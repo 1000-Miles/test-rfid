@@ -214,6 +214,14 @@ function setLogLevel(level) {
   load().SetLogLevel(level);
 }
 
+/** Read current output power (dBm), or null on failure. */
+function getPower() {
+  const f = load();
+  const buf = Buffer.alloc(4);
+  const rc = f.UHFGetPower(buf);
+  return rc === 0 ? buf[0] : null;
+}
+
 // ---------------------------------------------------------------------------
 // GPIO / GPI (IR sensor) support
 // ---------------------------------------------------------------------------
@@ -319,6 +327,7 @@ module.exports = {
   pollTag,
   parseTag,
   getSoftwareVersion,
+  getPower,
   setLogLevel,
   // GPIO / IR
   readIOStatus,

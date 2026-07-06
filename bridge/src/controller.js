@@ -94,6 +94,29 @@ class Controller extends EventEmitter {
     const rc = await this._withLock(() => uhf.connect(ip, Number(port)));
     this.connected = rc === 0;
     this.log(`TCPConnect(${ip}, ${port}) -> ${rc} (${rc === 0 ? 'OK' : 'FAIL'})`);
+    if (this.connected) {
+      // Reset the reader to a known-good state for command-mode reading. After
+      // IR/work-mode experiments (some of which persist to flash) or an
+      // ungraceful shutdown, the reader can be left mid-inventory or in a
+      // non-command work mode, which stops tags flowing over TCP.
+      await this._withLock(() => {
+        try {
+          const stopRc = uhf.stopInventory(); // clear any leftover inventory
+          const wmBefore = uhf.getWorkMode();
+          const wmRc = uhf.setWorkMode(0); // force command mode
+          const ver = uhf.getSoftwareVersion();
+          const pwr = uhf.getPower();
+          this.log(
+            `Reader reset: stopGet=${stopRc}, workMode ${wmBefore}->0 (rc=${wmRc}), version=${ver}, power=${pwr}dBm`
+          );
+          if (pwr != null && pwr < 5) {
+            this.log(`WARNING: read power is very low (${pwr}dBm) — tags may not be detected.`, 'warn');
+          }
+        } catch (e) {
+          this.log(`reset warning: ${e.message}`, 'warn');
+        }
+      });
+    }
     this._emitStatus();
     return rc;
   }
@@ -113,6 +136,9 @@ class Controller extends EventEmitter {
     if (rc === 0) {
       this.reading = true;
       this.readingUntil = durationMs ? Date.now() + durationMs : null;
+      this._firstTagLogged = false;
+      this._readStartAt = Date.now();
+      this._lastActivityLog = 0;
       this.log(`Inventory started${durationMs ? ` (burst ${durationMs}ms)` : ' (manual)'}.`);
     } else {
       this.log(`UHFInventory() -> ${rc} (FAIL)`, 'warn');
@@ -189,6 +215,11 @@ class Controller extends EventEmitter {
     while (n < 100 && (tag = uhf.pollTag())) {
       n++;
       if (!tag.epc) continue; // skip malformed frames
+      this._totalReads = (this._totalReads || 0) + 1;
+      if (!this._firstTagLogged) {
+        this._firstTagLogged = true;
+        this.log(`First tag: epc=${tag.epc} ant=${tag.antenna} rssi=${tag.rssi}dBm`);
+      }
       const msg = {
         type: 'tag',
         epc: tag.epc,
@@ -198,6 +229,17 @@ class Controller extends EventEmitter {
         timestamp: new Date().toISOString(),
       };
       this.emit('message', msg);
+    }
+
+    // Heartbeat while reading, so the terminal shows whether tags are flowing.
+    const now = Date.now();
+    if (now - (this._lastActivityLog || 0) >= 2000) {
+      this._lastActivityLog = now;
+      if (this._firstTagLogged) {
+        this.log(`reading... ${this._totalReads} total reads`);
+      } else if (now - (this._readStartAt || now) >= 2000) {
+        this.log('reading, but NO tags received yet — check tag in range / power / antenna.', 'warn');
+      }
     }
     return n;
   }
