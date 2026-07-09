@@ -1,6 +1,6 @@
 # UR4 RFID Test App
 
-A two-part desktop test rig for a **Chainway UR4** UHF RFID reader connected directly to a laptop over Ethernet.
+A two-part desktop test rig for a **Chainway UR4** UHF RFID reader connected directly to a laptop over Ethernet, plus a **Chainway CP30** RFID label printer (print + EPC encode over ZPL).
 
 ```
 dashboard/   React + Vite + TS + Tailwind UI  (browser)
@@ -104,6 +104,63 @@ Config keys: `gpi1Byte`, `gpi2Byte`, `activeHigh`. Once confirmed, bake the valu
 | POST | `/debug/gpi-config` | `{ gpi1Byte?, gpi2Byte?, activeHigh? }` | adjust GPI mapping live |
 
 **WebSocket** `ws://localhost:3001/ws` pushes JSON messages: `tag`, `gpi`, `trigger`, `status`, `log`.
+
+## Chainway CP30 printer — print + RFID encode
+
+The CP30 speaks **ZPL**, so encoding a chip is just `^RFW,H^FD<hex EPC>^FS` inside a normal
+`^XA…^XZ` label. The bridge builds the ZPL and sends it over one of two transports:
+
+- **`usb`** (default) — writes RAW bytes to a Windows print queue via `winspool.drv` (koffi FFI).
+  The queue uses the built-in **Generic / Text Only** driver: RAW jobs bypass the driver entirely,
+  so no vendor driver is needed. One-time setup per machine (PowerShell, printer plugged in via USB):
+
+  ```powershell
+  Add-PrinterDriver -Name "Generic / Text Only"
+  Add-Printer -Name "Chainway CP30" -DriverName "Generic / Text Only" -PortName "USB001"
+  # find the port with: Get-PrinterPort | Where-Object Description -match 'CHAINWAY'
+  ```
+
+- **`tcp`** — raw socket to the printer's IP on **port 9100** (Ethernet/Wi-Fi). No setup at all;
+  read the printer's IP off its touchscreen and switch the transport in the dashboard.
+
+Test EPCs are sequential 96-bit values `<prefix><zero-padded hex counter>` (default prefix `AA00`),
+persisted in `bridge/data/printer.json` so they stay unique across restarts.
+
+### Dashboard flow
+
+The **Print & Encode** panel: pick transport (USB queue dropdown / IP:9100), optionally type an
+explicit hex EPC (blank = next auto test EPC), hit **Print & Encode**, then **Read 5s to verify** —
+hold the printed label near the UR4; the panel turns green (**✓ VERIFIED**) when the reader reports
+the freshly printed EPC. A collapsible **raw ZPL console** is there for tuning experiments.
+
+### CLI (no UI needed)
+
+```bash
+cd bridge
+npm run print                                   # next auto test EPC -> USB queue "Chainway CP30"
+node test/print-test.js AA0000000000000000000123  # explicit EPC (24 hex chars)
+node test/print-test.js --tcp 192.168.99.201:9100 # network transport instead
+node test/print-test.js --zpl-only                # show generated ZPL, send nothing
+node test/print-test.js --raw label.zpl           # send a ZPL file verbatim
+```
+
+### Printer REST API
+
+| Method | Path | Body | Notes |
+|---|---|---|---|
+| GET | `/printer/status` | — | config + next auto EPC + last print |
+| POST | `/printer/config` | any of `{ transport, printerName, host, port, epcPrefix, barcode, widthDots, heightDots, extraZpl }` | persisted |
+| POST | `/printer/print` | `{ epc?, title?, copies? }` | omit `epc` for next auto test EPC |
+| GET | `/printer/preview` | `?epc=&title=` | generated ZPL without printing |
+| POST | `/printer/raw` | `{ zpl }` | send arbitrary ZPL verbatim |
+| GET | `/printer/queues` | — | Windows print queue names |
+
+### If encoding fails on the large tags
+
+The label prints but the chip doesn't verify (or the printer voids it): tune **offset** and
+**write power** in the printer's on-screen **RFID Setup** — find the inlay by holding a label up to
+the light, set the offset so the chip sits over the printer's antenna, then raise write power.
+`^RS`-based tuning can also be sent from the raw ZPL console (`extraZpl` config slots it into every label).
 
 ## Optional: Supabase forwarding
 

@@ -1,4 +1,4 @@
-import type { Mode, Status } from './types';
+import type { Mode, PrinterConfig, PrinterStatusInfo, PrintResult, Status } from './types';
 
 export const BRIDGE_HTTP = 'http://localhost:3001';
 export const BRIDGE_WS = 'ws://localhost:3001/ws';
@@ -22,4 +22,17 @@ export const api = {
     const res = await fetch(`${BRIDGE_HTTP}/status`);
     return res.json();
   },
+  printerStatus: async (): Promise<PrinterStatusInfo> => {
+    const res = await fetch(`${BRIDGE_HTTP}/printer/status`);
+    return res.json();
+  },
+  printerQueues: async (): Promise<{ ok: boolean; queues?: string[]; error?: string }> => {
+    const res = await fetch(`${BRIDGE_HTTP}/printer/queues`);
+    return res.json();
+  },
+  printerConfig: (cfg: Partial<PrinterConfig>): Promise<{ ok: boolean; config?: PrinterConfig; error?: string }> =>
+    post('/printer/config', cfg),
+  printerPrint: (body: { epc?: string; title?: string; copies?: number }): Promise<PrintResult> =>
+    post('/printer/print', body),
+  printerRaw: (zpl: string): Promise<{ ok: boolean; error?: string }> => post('/printer/raw', { zpl }),
 };

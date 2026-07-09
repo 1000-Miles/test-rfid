@@ -49,6 +49,47 @@ export interface LogMsg {
 
 export type WsMsg = TagMsg | GpiMsg | TriggerMsg | StatusMsg | LogMsg;
 
+export type PrinterTransport = 'usb' | 'tcp';
+
+export interface PrinterConfig {
+  transport: PrinterTransport;
+  printerName: string;
+  host: string;
+  port: number;
+  epcPrefix: string;
+  barcode: boolean;
+  widthDots: number | null;
+  heightDots: number | null;
+  topOffsetDots: number;
+  leftOffsetDots: number;
+  extraZpl: string;
+}
+
+export interface LastPrint {
+  epc: string;
+  at: string;
+  transport: string;
+  target?: string;
+}
+
+export interface PrinterStatusInfo {
+  ok: boolean;
+  config: PrinterConfig;
+  nextEpc: string;
+  lastPrint: LastPrint | null;
+}
+
+export interface PrintResult {
+  ok: boolean;
+  error?: string;
+  epc: string;
+  zpl: string;
+  transport: string;
+  target: string;
+  jobId?: number;
+  nextEpc?: string;
+}
+
 export interface TagRow {
   id: number;
   epc: string;

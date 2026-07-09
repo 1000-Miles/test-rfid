@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from './api';
 import { useBridge } from './useBridge';
-import type { GpiState, Mode, TagRow } from './types';
+import type { GpiState, LastPrint, Mode, PrinterConfig, TagRow } from './types';
 
 export default function App() {
   const bridge = useBridge();
@@ -74,6 +74,8 @@ export default function App() {
           onStart={() => run(() => api.start())}
           onStop={() => run(() => api.stop())}
         />
+
+        <PrintPanel rows={bridge.rows} readerConnected={status.connected} reading={status.reading} />
 
         <Stats total={bridge.totalReads} unique={bridge.uniqueEpcs} rps={bridge.readsPerSec} />
 
@@ -297,6 +299,288 @@ function ReadControls(props: {
         ■ Stop Reading
       </button>
     </div>
+  );
+}
+
+/* --------------------------------------------------- Printer (CP30, ZPL) */
+function PrintPanel(props: { rows: TagRow[]; readerConnected: boolean; reading: boolean }) {
+  const [cfg, setCfg] = useState<PrinterConfig | null>(null);
+  const [queues, setQueues] = useState<string[]>([]);
+  const [nextEpc, setNextEpc] = useState('');
+  const [lastPrint, setLastPrint] = useState<LastPrint | null>(null);
+  const [lastZpl, setLastZpl] = useState('');
+  const [epcInput, setEpcInput] = useState('');
+  const [copies, setCopies] = useState(1);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [verifying, setVerifying] = useState(false);
+  const [rawZpl, setRawZpl] = useState('^XA\n^FO24,24^A0N,32,32^FDPRINTER SELF TEST^FS\n^XZ\n');
+
+  useEffect(() => {
+    api
+      .printerStatus()
+      .then((s) => {
+        if (s.config) setCfg(s.config);
+        if (s.nextEpc) setNextEpc(s.nextEpc);
+        if (s.lastPrint) setLastPrint(s.lastPrint);
+      })
+      .catch(() => {});
+    api
+      .printerQueues()
+      .then((r) => setQueues(r.queues ?? []))
+      .catch(() => {});
+  }, []);
+
+  const applyCfg = async (partial: Partial<PrinterConfig>) => {
+    setError('');
+    // optimistic update so the inputs feel live; bridge response is authoritative
+    setCfg((c) => (c ? { ...c, ...partial } : c));
+    try {
+      const r = await api.printerConfig(partial);
+      if (r.config) setCfg(r.config);
+      else if (r.error) setError(r.error);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const print = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const r = await api.printerPrint({ epc: epcInput.trim() || undefined, copies });
+      if (!r.ok) throw new Error(r.error || 'print failed');
+      setLastPrint({ epc: r.epc, at: new Date().toISOString(), transport: r.transport, target: r.target });
+      setLastZpl(r.zpl);
+      if (r.nextEpc) setNextEpc(r.nextEpc);
+      setEpcInput('');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const sendRaw = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const r = await api.printerRaw(rawZpl);
+      if (!r.ok) throw new Error(r.error || 'raw send failed');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // A print is verified once the UR4 reads that EPC *after* the print was sent.
+  const verified =
+    !!lastPrint &&
+    props.rows.some((r) => r.epc.toUpperCase() === lastPrint.epc.toUpperCase() && r.timestamp >= lastPrint.at);
+
+  const readToVerify = async () => {
+    setVerifying(true);
+    try {
+      await api.start();
+      setTimeout(async () => {
+        await api.stop().catch(() => {});
+        setVerifying(false);
+      }, 5000);
+    } catch {
+      setVerifying(false);
+    }
+  };
+
+  return (
+    <Card title="Chainway CP30 — Print & Encode (ZPL)">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* transport / target */}
+        <div className="flex flex-col gap-3">
+          <div className="flex rounded-lg bg-black/40 border border-white/10 p-1">
+            <ModeButton
+              active={cfg?.transport !== 'tcp'}
+              onClick={() => applyCfg({ transport: 'usb' })}
+              disabled={busy || !cfg}
+            >
+              USB (queue)
+            </ModeButton>
+            <ModeButton
+              active={cfg?.transport === 'tcp'}
+              onClick={() => applyCfg({ transport: 'tcp' })}
+              disabled={busy || !cfg}
+            >
+              Network :9100
+            </ModeButton>
+          </div>
+          {cfg?.transport === 'tcp' ? (
+            <div className="flex gap-2">
+              <label className="text-sm flex-1">
+                <span className="text-slate-400">Printer IP</span>
+                <input
+                  value={cfg.host}
+                  onChange={(e) => applyCfg({ host: e.target.value })}
+                  className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm"
+                />
+              </label>
+              <label className="text-sm w-24">
+                <span className="text-slate-400">Port</span>
+                <input
+                  type="number"
+                  value={cfg.port}
+                  onChange={(e) => applyCfg({ port: Number(e.target.value) })}
+                  className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm"
+                />
+              </label>
+            </div>
+          ) : (
+            <label className="text-sm">
+              <span className="text-slate-400">Windows print queue</span>
+              <select
+                value={cfg?.printerName ?? ''}
+                onChange={(e) => applyCfg({ printerName: e.target.value })}
+                disabled={!cfg}
+                className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 text-sm"
+              >
+                {cfg && !queues.includes(cfg.printerName) && <option value={cfg.printerName}>{cfg.printerName}</option>}
+                {queues.map((q) => (
+                  <option key={q} value={q}>
+                    {q}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <label className="flex items-center gap-2 text-sm text-slate-300">
+            <input
+              type="checkbox"
+              checked={cfg?.barcode ?? true}
+              onChange={(e) => applyCfg({ barcode: e.target.checked })}
+              disabled={!cfg}
+            />
+            Print Code-128 barcode of the EPC
+          </label>
+          <div className="flex gap-2">
+            <label className="text-sm flex-1">
+              <span className="text-slate-400">Top offset (dots)</span>
+              <input
+                type="number"
+                min={0}
+                step={8}
+                value={cfg?.topOffsetDots ?? 0}
+                onChange={(e) => applyCfg({ topOffsetDots: Number(e.target.value) || 0 })}
+                disabled={!cfg}
+                className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm"
+              />
+            </label>
+            <label className="text-sm flex-1">
+              <span className="text-slate-400">Left offset (dots)</span>
+              <input
+                type="number"
+                min={0}
+                step={8}
+                value={cfg?.leftOffsetDots ?? 0}
+                onChange={(e) => applyCfg({ leftOffsetDots: Number(e.target.value) || 0 })}
+                disabled={!cfg}
+                className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm"
+              />
+            </label>
+          </div>
+          <p className="text-xs text-slate-500">8 dots = 1 mm. Shifts the whole layout down / right.</p>
+        </div>
+
+        {/* EPC + print */}
+        <div className="flex flex-col gap-3">
+          <label className="text-sm">
+            <span className="text-slate-400">EPC to encode (hex, blank = auto)</span>
+            <input
+              value={epcInput}
+              onChange={(e) => setEpcInput(e.target.value)}
+              placeholder={nextEpc ? `auto: ${nextEpc}` : 'auto'}
+              className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm placeholder:text-slate-600"
+            />
+          </label>
+          <label className="text-sm w-28">
+            <span className="text-slate-400">Copies</span>
+            <input
+              type="number"
+              min={1}
+              max={50}
+              value={copies}
+              onChange={(e) => setCopies(Number(e.target.value) || 1)}
+              className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm"
+            />
+          </label>
+          <button
+            onClick={print}
+            disabled={busy || !cfg}
+            className="rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 px-4 py-3 font-semibold"
+          >
+            🖨 Print & Encode
+          </button>
+          {error && <p className="text-sm text-rose-400 break-all">{error}</p>}
+        </div>
+
+        {/* last print + verify */}
+        <div className="flex flex-col gap-3">
+          <div className="text-sm">
+            <span className="text-slate-400">Last printed EPC</span>
+            <div className="mt-1 font-mono text-sm break-all">
+              {lastPrint ? (
+                <span className={verified ? 'text-emerald-300' : 'text-amber-300'}>{lastPrint.epc}</span>
+              ) : (
+                <span className="text-slate-600">none yet</span>
+              )}
+            </div>
+          </div>
+          {lastPrint && (
+            <div
+              className={`rounded-md border px-3 py-2 text-sm font-medium ${
+                verified
+                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                  : 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+              }`}
+            >
+              {verified ? '✓ VERIFIED — EPC read back by the UR4' : 'Not verified yet — read the tag with the UR4'}
+            </div>
+          )}
+          <button
+            onClick={readToVerify}
+            disabled={!props.readerConnected || props.reading || verifying || !lastPrint}
+            className="rounded-md bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 px-4 py-2 text-sm font-medium"
+            title={props.readerConnected ? 'Runs a 5s read burst on the UR4' : 'Connect the UR4 reader first'}
+          >
+            {verifying ? 'Reading… hold the label near the UR4' : 'Read 5s to verify'}
+          </button>
+          {lastZpl && (
+            <details className="text-xs text-slate-400">
+              <summary className="cursor-pointer select-none">ZPL sent</summary>
+              <pre className="mt-2 rounded-md bg-black/40 border border-white/10 p-2 overflow-x-auto">{lastZpl}</pre>
+            </details>
+          )}
+        </div>
+      </div>
+
+      <details className="mt-4 text-sm text-slate-400">
+        <summary className="cursor-pointer select-none">Raw ZPL console (tuning / experiments)</summary>
+        <div className="mt-2 flex flex-col gap-2">
+          <textarea
+            value={rawZpl}
+            onChange={(e) => setRawZpl(e.target.value)}
+            rows={5}
+            spellCheck={false}
+            className="w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-xs"
+          />
+          <button
+            onClick={sendRaw}
+            disabled={busy}
+            className="self-start rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-4 py-2 text-sm"
+          >
+            Send raw ZPL
+          </button>
+        </div>
+      </details>
+    </Card>
   );
 }
 

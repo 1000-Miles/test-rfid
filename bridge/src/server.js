@@ -47,6 +47,10 @@ async function forwardToSupabase(tag) {
 // --- Controller ---------------------------------------------------------------
 const controller = new Controller();
 
+// --- Printer (Chainway CP30, ZPL) ----------------------------------------------
+const { PrinterManager } = require('./printer');
+const printer = new PrinterManager({ log: (text, level) => controller.log(`[printer] ${text}`, level) });
+
 // --- HTTP / Express -----------------------------------------------------------
 const app = express();
 app.use(express.json());
@@ -126,6 +130,71 @@ app.get('/debug/io', async (_req, res) => {
 app.post('/debug/gpi-config', (req, res) => {
   const uhf = require('./uhf');
   res.json({ ok: true, gpiConfig: uhf.setGpiConfig(req.body || {}) });
+});
+
+// --- Printer endpoints ----------------------------------------------------------
+app.get('/printer/status', (_req, res) => {
+  res.json({ ok: true, ...printer.getStatus() });
+});
+
+app.post('/printer/config', (req, res) => {
+  try {
+    res.json({ ok: true, config: printer.setConfig(req.body || {}) });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+// Print one label + encode its EPC. Body: { epc?, title?, copies? }.
+// Omit epc to auto-generate the next sequential test EPC.
+app.post('/printer/print', async (req, res) => {
+  try {
+    const result = await printer.printLabel(req.body || {});
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Generated ZPL for the next label without sending it. Query: ?epc=...&title=...
+app.get('/printer/preview', (req, res) => {
+  try {
+    res.json({ ok: true, ...printer.preview(req.query || {}) });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+// Print a run of N labels as one continuous job. Body: { count, title? }.
+app.post('/printer/batch', async (req, res) => {
+  try {
+    const result = await printer.printBatch(req.body || {});
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Send arbitrary ZPL verbatim (tuning: ^RS write power, offsets, ~HS, ...).
+app.post('/printer/raw', async (req, res) => {
+  const zplText = req.body?.zpl;
+  if (!zplText || typeof zplText !== 'string') {
+    return res.status(400).json({ ok: false, error: 'body must be { "zpl": "^XA...^XZ" }' });
+  }
+  try {
+    res.json({ ok: true, ...(await printer.sendRaw(zplText)) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Windows print queue names, for the USB queue picker.
+app.get('/printer/queues', async (_req, res) => {
+  try {
+    res.json({ ok: true, queues: await printer.listQueues() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // --- WebSocket ----------------------------------------------------------------
