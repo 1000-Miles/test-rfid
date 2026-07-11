@@ -1,7 +1,8 @@
 # Wolf Handheld (Chainway C5P) — stock-audit app
 
-Native Android host for the **Chainway C5P** UHF handheld. It owns the Chainway UHF SDK
-and renders its UI in a WebView, mirroring the UR4 gate's *bridge + dashboard* split — see
+Native Android app for the **Chainway C5P** UHF handheld. Companion to the UR4 gate
+(`../bridge` + `../dashboard`): the gate watches what enters/leaves, the handheld roams
+the floor to audit what's actually there. Full design:
 [`../docs/c5p-handheld-architecture.md`](../docs/c5p-handheld-architecture.md).
 
 ```
@@ -9,31 +10,60 @@ and renders its UI in a WebView, mirroring the UR4 gate's *bridge + dashboard* s
  (RFIDWithUHFUART)      NativeBridge  ◄──window.Native──   the UI
 ```
 
-This is the **milestone-1/2 scaffold**: it proves the SDK binds and the native↔WebView
-bridge works end-to-end, using a plain HTML test harness. The React dashboard drops into
-`app/src/main/assets/web/` later (same `window.__onNativeMessage` / `window.Native` contract).
+The native layer owns the reader (same role the Node bridge plays for the UR4); the UI
+is an offline web bundle. The current UI is a full-featured test harness; the production
+React dashboard will drop into `assets/web/` using the same bridge contract.
 
-## What's here
+## Features (verified on-device)
+
+- **Inventory sweep** — continuous read of every tag in range; live list with counts,
+  RSSI, timestamps; tap a tag to hunt it.
+- **Locate / geiger** — pick a target (dropdown of seen tags, or manual EPC) and the
+  0–100 proximity meter guides you to it.
+- **Gun trigger / Manual modes** (exclusive, persisted) — hold-to-read on the physical
+  trigger, or on-screen toggles; never both, so a trigger release can't cancel a
+  UI-started read. Trigger is context-aware: sweeps in Inventory, hunts in Locate.
+- **Dual power, native-enforced** — sweep power (default 5 dBm, close-range precise) and
+  hunt power (default 20 dBm, longer acquisition) switch automatically; max 30 dBm.
+- **Status strip** — Reader / Activity / Trigger / Power chips with live state colors.
+- **Tap-for-help** — ⓘ icons on every non-obvious control open plain-language explanations.
+- Loud beep on read start, load watchdog (see Troubleshooting), Montserrat + Lucide
+  icons, fully offline.
+
+## Project map
 
 | File | Role |
 |---|---|
-| `Rfid.kt` | Chainway SDK wrapper — init/free, inventory (callback), locate/geiger, power. Serialised on one executor. |
+| `Rfid.kt` | Chainway SDK wrapper — open/close, sweep, locate, dual power, beep, trigger actions. Single-threaded executor serializes all SDK access. |
 | `NativeBridge.kt` | `@JavascriptInterface` command surface exposed as `window.Native`. |
-| `Json.kt` | Builds the `WsMsg`-compatible event envelope pushed to the WebView. |
-| `TriggerKeys.kt` | Pistol-trigger keycodes (incl. **293** for the C5P). |
-| `MainActivity.kt` | Hosts the WebView, wires the bridge, handles the trigger (hold-to-read). |
-| `assets/web/index.html` | Test harness: open reader, inventory, locate meter, tag table, log. |
+| `Json.kt` | Event envelope (tag/locate/status/key/log) pushed to `window.__onNativeMessage`. |
+| `TriggerKeys.kt` | Accepted trigger keycodes (incl. **188** — see device setup below). |
+| `MainActivity.kt` | WebView host, `dispatchKeyEvent` trigger interception, load watchdog. |
+| `assets/web/index.html` | The UI (self-contained; Montserrat + inline Lucide SVGs). |
+| `assets/web/fonts/` | Bundled Montserrat variable font. |
 
-## One-time setup
+## One-time setup — per development machine
 
-1. **Drop in the SDK.** Copy `DeviceAPI_ver20251103_release.aar` into `app/libs/`
-   (from `wolf/SDK/Handhled Scanner reader/安卓手持-UHF-2D_java_SDK_20251103/uhf-uart-demo`).
-   Committed to the repo like the gate's `bridge/lib/UHFAPI.dll`.
-2. **Point at the Android SDK.** Create `local.properties`:
+1. Android Studio (bundles the JDK) + Android SDK platform 34. `local.properties` points
+   at the SDK (Android Studio writes it on first open).
+2. The Chainway SDK (`app/libs/DeviceAPI_ver20251103_release.aar`) is committed — no
+   download needed.
+
+## One-time setup — per C5P device
+
+1. **Trigger remap** (the side scan key is otherwise swallowed by the vendor scanner
+   service): open the preinstalled **KeySettings** app → menu → *New mapping* → press the
+   side trigger (captures "Right Trigger", 293) → mode *Remap* → *CUSTOM KEYCODE* → enter
+   **188** → confirm → save (✓). The app listens for 188.
+2. **Pin the WebView** (Play-updated WebViews wedge this ROM's renderer — white-screen
+   hangs). With USB debugging on:
    ```
-   sdk.dir=C\:\\Users\\<you>\\AppData\\Local\\Android\\Sdk
+   adb shell pm uninstall-system-updates com.google.android.webview
+   adb shell pm disable-user --user 0 com.android.vending
    ```
-   (Android Studio writes this for you on first open.)
+   This reverts to the factory WebView (94) and stops Play from re-updating it.
+   (Consequence: keep the web UI Chrome-94 compatible. Re-enable Play anytime with
+   `adb shell pm enable com.android.vending`.)
 
 ## Build & run
 
@@ -60,15 +90,17 @@ then write `keystore.properties` with `storeFile` / `storePassword` / `keyAlias`
 same key. Note: debug and release APKs have different signatures, so switching between
 them on a device requires uninstalling first.
 
-On the device: **Open reader** → **Start inventory** (or pull the trigger) → tags stream into
-the table. Enter an EPC and **Locate** to see the 0–100 proximity meter.
+## Troubleshooting
 
-## Notes / TODO
+| Symptom | Cause / fix |
+|---|---|
+| "Display failed to start" dialog (or white screen) | WebView renderer wedged (OS-level). **Restart the device.** Rare after the WebView pin. |
+| Reader toggle won't open, log shows `reader init returned false` | UHF serial port left locked by an unclean app kill. The app auto-retries once; if it still fails, **restart the device.** |
+| Trigger does nothing (no `key 188` in the event log) | The KeySettings remap is missing on this unit — redo device setup step 1. |
+| Tags read from too far / not far enough | Adjust sweep power (Inventory tab). Hunts use their own power (Locate tab). |
 
-- **Trigger keycode:** the handler accepts a list of Chainway codes incl. 293. Confirm the
-  real one with `adb shell getevent -l` and prune `TriggerKeys.CODES`.
-- **SDK transitive deps:** only the DeviceAPI `.aar` is included. If you hit a runtime
-  `ClassNotFoundException`, copy the sibling jars (`xUtils-2.5.5.jar`, etc.) from the demo's
-  `app/libs/` too.
-- **Next milestones** (per the architecture doc): build the React dashboard into `assets/web/`;
-  add Room offline buffer + Supabase sync; Reconcile screen (present/missing/unexpected).
+## Next phase
+
+Port the real React dashboard into `assets/web/` (same `window.Native` /
+`__onNativeMessage` contract), then add Supabase sync + the present/missing/unexpected
+reconcile screen — see the architecture doc §3–5.

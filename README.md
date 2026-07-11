@@ -1,10 +1,14 @@
-# UR4 RFID Test App
+# 1000Miles RFID Test Rig
 
-A two-part desktop test rig for a **Chainway UR4** UHF RFID reader connected directly to a laptop over Ethernet, plus a **Chainway CP30** RFID label printer (print + EPC encode over ZPL).
+Test rig for the warehouse RFID stack: a **Chainway UR4** UHF gate reader (Ethernet), a
+**Chainway CP30** RFID label printer (print + EPC encode over ZPL), and a **Chainway C5P**
+Android handheld for in-facility stock audits.
 
 ```
-dashboard/   React + Vite + TS + Tailwind UI  (browser)
-bridge/       Node.js Express + WebSocket server that drives UHFAPI.dll (koffi)
+dashboard/   React + Vite + TS + Tailwind UI for the UR4 gate  (browser)
+bridge/      Node.js Express + WebSocket server that drives UHFAPI.dll (koffi)
+handheld/    Android app (Kotlin + WebView) for the C5P handheld reader
+docs/        architecture docs (C5P handheld design, shared Supabase schema)
 ```
 
 ```
@@ -161,6 +165,16 @@ The label prints but the chip doesn't verify (or the printer voids it): tune **o
 **write power** in the printer's on-screen **RFID Setup** — find the inlay by holding a label up to
 the light, set the offset so the chip sits over the printer's antenna, then raise write power.
 `^RS`-based tuning can also be sent from the raw ZPL console (`extraZpl` config slots it into every label).
+
+## Chainway C5P handheld — in-facility stock audit
+
+The UR4 gate watches what enters/leaves; the **C5P handheld** roams the floor to audit
+what's actually there. It's a native Android app (Kotlin bridge over Chainway's UHF SDK +
+an offline WebView UI) with inventory sweep, a locate/geiger tag finder, hold-to-read
+trigger support, and dual sweep/hunt power. Build, per-device setup (trigger remap,
+WebView pin), and troubleshooting: **[handheld/README.md](handheld/README.md)**. Design +
+the shared Supabase schema both systems will meet at:
+**[docs/c5p-handheld-architecture.md](docs/c5p-handheld-architecture.md)**.
 
 ## Optional: Supabase forwarding
 
