@@ -1,4 +1,4 @@
-# Wolf Handheld (Chainway C5P) — stock-audit app
+# 1000Miles Handheld (Chainway C5P) — stock-audit app
 
 Native Android app for the **Chainway C5P** UHF handheld. Companion to the UR4 gate
 (`../bridge` + `../dashboard`): the gate watches what enters/leaves, the handheld roams
