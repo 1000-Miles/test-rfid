@@ -1,0 +1,67 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+// Release signing: reads handheld/keystore.properties (gitignored). On machines
+// without it, release builds fall back to the debug key so they still install.
+def keystoreProps = new Properties()
+def keystorePropsFile = rootProject.file('keystore.properties')
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+
+android {
+    namespace 'biz.thousandmiles.wolf'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'biz.thousandmiles.wolf'
+        minSdk 26
+        targetSdk 33
+        versionCode 1
+        versionName '0.1.0'
+    }
+
+    signingConfigs {
+        release {
+            if (keystorePropsFile.exists()) {
+                storeFile rootProject.file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            // Optimized build: R8 code shrinking + resource shrinking. The Chainway SDK
+            // and the WebView JS bridge are protected by proguard-rules.pro keep rules.
+            minifyEnabled true
+            shrinkResources true
+            signingConfig keystorePropsFile.exists() ? signingConfigs.release : signingConfigs.debug
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+    lint {
+        abortOnError false
+    }
+}
+
+dependencies {
+    // Chainway UHF + 2D SDK. Drop DeviceAPI_ver20251103_release.aar into app/libs/.
+    implementation fileTree(dir: 'libs', include: ['*.aar', '*.jar'])
+
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'com.google.android.material:material:1.12.0'
+}

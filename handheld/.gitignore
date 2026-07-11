@@ -1,0 +1,14 @@
+*.iml
+.gradle/
+/local.properties
+.idea/
+build/
+/captures
+.externalNativeBuild
+.cxx
+/app/release
+# Release signing — NEVER commit the keystore or its passwords.
+*.jks
+keystore.properties
+# NOTE: app/libs/*.aar (the Chainway DeviceAPI SDK) IS committed on purpose,
+# mirroring how the gate repo commits bridge/lib/UHFAPI.dll.

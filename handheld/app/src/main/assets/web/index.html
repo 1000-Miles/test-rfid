@@ -1,0 +1,640 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Wolf Handheld</title>
+<style>
+  @font-face {
+    font-family: 'Montserrat';
+    src: url('fonts/Montserrat-Variable.ttf') format('truetype-variations');
+    font-weight: 100 900;
+    font-display: swap;
+  }
+
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; min-width: 0; }
+
+  /* Full-height flex column: header pinned, <main> scrolls. */
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    height: 100vh;   /* fallback for WebView 94 (device pinned to factory version) */
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    font: 16px/1.45 'Montserrat', system-ui, sans-serif;
+    background: #0e1116; color: #e6e6e6;
+    -webkit-tap-highlight-color: transparent;
+  }
+  button, input { font-family: inherit; }
+
+  header {
+    flex: 0 0 auto;
+    padding: 10px 12px 0;
+    background: #161b22;
+    border-bottom: 1px solid #2a2f37;
+  }
+  .titlerow { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+  h1 { font-size: 17px; margin: 0; font-weight: 800; letter-spacing: .01em; }
+  .ver { font-size: 11px; color: #5b6673; font-weight: 600; }
+
+  /* status strip: four fixed chips with colored state dots */
+  .status { display: flex; gap: 6px; }
+  .chip {
+    flex: 1; min-height: 32px;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    background: #0e1420; border: 1px solid #232a33; border-radius: 8px;
+    font-size: 12px; font-weight: 600; color: #8b949e;
+    white-space: nowrap; overflow: hidden;
+  }
+  /* lucide-style inline icons inherit currentColor, so state classes recolor them */
+  .chip svg, .switch .opt svg, .tab svg {
+    width: 15px; height: 15px; flex: 0 0 auto;
+    stroke: currentColor; fill: none; stroke-width: 2.2;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  .chip.ok  { color: #7ee2a8; border-color: #1c7a4155; }
+  .chip.bad { color: #f0a0a0; border-color: #7a1c1c55; }
+  .chip.live svg { animation: pulse 1.1s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
+  .switch .opt { gap: 7px; }
+  .tab { display: flex; align-items: center; justify-content: center; gap: 8px; }
+
+  /* control-mode switch (gun trigger ↔ manual buttons) — sliding-thumb toggle */
+  .switch {
+    position: relative;
+    display: flex;
+    height: 40px; padding: 3px;
+    background: #0b0e13; border: 1px solid #313842; border-radius: 999px;
+    user-select: none;
+  }
+  .switch .thumb {
+    position: absolute; top: 3px; bottom: 3px; left: 3px;
+    width: calc(50% - 3px);
+    border-radius: 999px;
+    transition: transform .18s ease, background .18s ease, border-color .18s ease;
+    /* state toggles: left position = Closed/Off = RED */
+    background: #3a1010; border: 1px solid #7a1c1c;
+  }
+  .switch.right .thumb {
+    transform: translateX(100%);
+    /* right position = Open/Reading/Hunting = GREEN */
+    background: #103a24; border-color: #1c7a41;
+  }
+  .switch .opt {
+    position: relative; z-index: 1;
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 600; color: #8b949e;
+    transition: color .15s;
+  }
+  .switch .opt.active { color: #f0a0a0; }
+  .switch.right .opt.active { color: #7ee2a8; }
+  .switch.disabled { opacity: .35; pointer-events: none; }
+
+  /* mode switch: both states are valid choices, so no red/green — gun = amber, manual = blue */
+  #modeSwitch .thumb { background: #3a2c10; border-color: #8a6914; }
+  #modeSwitch .opt.active { color: #f0c674; }
+  #modeSwitch.right .thumb { background: #0f2540; border-color: #1f6feb; }
+  #modeSwitch.right .opt.active { color: #79b8ff; }
+
+  #modeSwitch { margin: 8px 0 2px; }
+
+  /* real tabs: flat, underline indicator, flush with the header's bottom edge */
+  .tabs { display: flex; margin-top: 6px; }
+  .tab {
+    flex: 1; min-height: 44px;
+    background: none; border: none; border-radius: 0;
+    color: #8b949e; font-size: 15px; font-weight: 600;
+    border-bottom: 3px solid transparent;
+  }
+  .tab.active { color: #fff; border-bottom-color: #1f6feb; }
+
+  main {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 12px;
+    display: grid; gap: 12px;
+    align-content: start;
+  }
+  section { background: #12161c; border: 1px solid #232a33; border-radius: 12px; padding: 12px; }
+  h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+    color: #8b949e; margin: 0 0 10px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .hidden { display: none !important; }
+
+  /* tap-for-help info buttons */
+  .infobtn {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 4px; margin: -4px 0; color: #4d5866; flex: 0 0 auto;
+  }
+  .infobtn svg {
+    width: 15px; height: 15px;
+    stroke: currentColor; fill: none; stroke-width: 2;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  .infobtn:active { color: #79b8ff; }
+
+  /* info modal */
+  .modalwrap {
+    position: fixed; inset: 0; z-index: 50;
+    background: rgba(0,0,0,.65);
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  .modal {
+    background: #161b22; border: 1px solid #313842; border-radius: 14px;
+    padding: 18px; width: 100%; max-width: 460px;
+  }
+  .modal h3 { margin: 0 0 8px; font-size: 16px; font-weight: 700; }
+  .modal p { margin: 0 0 16px; color: #b6c2cf; font-size: 14px; line-height: 1.55; }
+  .modal button {
+    width: 100%; min-height: 44px;
+    background: #21262d; border: 1px solid #313842; color: #e6e6e6;
+    border-radius: 10px; font-size: 15px; font-weight: 600;
+  }
+
+  /* labelled control rows: [label] [two-state toggle] */
+  .ctl { display: flex; align-items: center; gap: 12px; }
+  .ctl .lbl {
+    flex: 0 0 92px; font-size: 14px; color: #8b949e; font-weight: 600;
+    display: flex; align-items: center; gap: 2px;
+  }
+  .ctl .switch { flex: 1; }
+  .fieldlbl { display: flex; align-items: center; gap: 2px; }
+
+  input, select {
+    width: 100%; min-height: 44px;
+    background: #0b0e13; color: #e6e6e6;
+    border: 1px solid #313842; border-radius: 10px;
+    padding: 10px 12px; font-size: 15px;
+  }
+  select { appearance: none; -webkit-appearance: none; }
+
+  /* locate target: dropdown (picker) vs manual entry must read differently */
+  .fieldlbl {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+    color: #5b6673; font-weight: 700; margin: 0 0 -6px 2px;
+  }
+  .selwrap { position: relative; }
+  .selwrap::after {
+    content: '▾';
+    position: absolute; right: 14px; top: 50%; transform: translateY(-55%);
+    color: #79b8ff; font-size: 18px; pointer-events: none;
+  }
+  #locSelect { background: #131c2a; border-color: #2a4468; padding-right: 40px; }
+  #locEpc { border-style: dashed; }
+  .mono { font-family: ui-monospace, monospace; }
+  .muted { color: #8b949e; }
+  .stack { display: grid; gap: 10px; }
+  .inline { display: flex; gap: 8px; align-items: center; }
+  button.danger { background: #3a1010; border: 1px solid #7a1c1c; color: #f0a0a0; border-radius: 10px; }
+  button.small { min-height: 34px; width: auto; padding: 5px 12px; font-size: 13px; }
+
+  /* proximity meter: borderless pill track so it doesn't read as an input field */
+  #meter {
+    height: 26px; border-radius: 999px; overflow: hidden;
+    background: #0b0e13; box-shadow: inset 0 0 0 1px #1c222b;
+    margin-top: 4px;
+  }
+  #meterFill {
+    height: 100%; width: 0%; border-radius: 999px;
+    background: linear-gradient(90deg, #1f6feb, #2ea043);
+    transition: width .12s linear;
+  }
+  #proxText { text-align: center; font-size: 34px; font-weight: 800; margin-top: 8px; }
+
+  .statrow { display: flex; align-items: baseline; gap: 16px; margin-bottom: 10px; flex-wrap: wrap; }
+  .stat b { font-size: 24px; }
+  .statrow .spacer { flex: 1; }
+
+  #tags { display: grid; gap: 8px; }
+  .tagcard { background: #0b0e13; border: 1px solid #232a33; border-radius: 10px; padding: 10px 12px; }
+  .tagcard .epc { font-family: ui-monospace, monospace; font-size: 14px; word-break: break-all; }
+  .tagcard .meta { display: flex; gap: 12px; margin-top: 6px; font-size: 12px; color: #8b949e; flex-wrap: wrap; }
+  .tagcard:active { border-color: #1f6feb; }
+
+  #log {
+    max-height: 44vh; overflow-y: auto; overflow-x: hidden;
+    font-family: ui-monospace, monospace; font-size: 11px; line-height: 1.35;
+    word-break: break-word;
+  }
+  #log .row { display: flex; gap: 8px; padding: 1px 0; border-bottom: 1px solid #171c23; }
+  #log .t { color: #5b6673; flex: 0 0 auto; }
+  #log .m { flex: 1 1 auto; }
+  .log-error .m { color: #f0a0a0; } .log-warn .m { color: #f0c674; }
+  .log-info .m { color: #9db4d0; } .log-key .m { color: #d2a8ff; }
+  .hint { font-size: 12px; color: #8b949e; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="titlerow">
+    <h1>Wolf Handheld</h1>
+    <span class="ver" id="verTag">bridge test</span>
+  </div>
+  <div class="status">
+    <div class="chip" id="chReader">
+      <svg viewBox="0 0 24 24"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.2 19.1 19.1"/></svg>
+      <span id="chReaderTxt">Closed</span>
+    </div>
+    <div class="chip" id="chActivity">
+      <svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+      <span id="chActivityTxt">Idle</span>
+    </div>
+    <div class="chip" id="chTrigger">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></svg>
+      <span id="chTriggerTxt">up</span>
+    </div>
+    <div class="chip" id="chPower">
+      <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      <span id="chPowerTxt">—</span>
+    </div>
+  </div>
+  <div class="inline" style="margin: 8px 0 2px;">
+    <span class="infobtn" style="visibility:hidden"></span><!-- mirrors the right-side icon so the switch stays centered -->
+    <div class="switch" id="modeSwitch" onclick="toggleControlMode()" style="flex:1; margin:0;">
+      <div class="thumb"></div>
+      <span class="opt active" id="modeGun">
+        <svg viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><line x1="7" y1="12" x2="17" y2="12"/></svg>
+        Gun trigger
+      </span>
+      <span class="opt" id="modeManual">
+        <svg viewBox="0 0 24 24"><path d="m3 3 7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><path d="m13 13 6 6"/></svg>
+        Manual
+      </span>
+    </div>
+    <span class="infobtn" data-info="mode"></span>
+  </div>
+  <div class="tabs">
+    <button class="tab active" id="tabBtnInv" onclick="switchTab('inv')">
+      <svg viewBox="0 0 24 24"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="M3.29 7 12 12l8.71-5"/><line x1="12" y1="22" x2="12" y2="12"/></svg>
+      Inventory
+    </button>
+    <button class="tab" id="tabBtnLoc" onclick="switchTab('loc')">
+      <svg viewBox="0 0 24 24"><line x1="2" x2="5" y1="12" y2="12"/><line x1="19" x2="22" y1="12" y2="12"/><line x1="12" x2="12" y1="2" y2="5"/><line x1="12" x2="12" y1="19" y2="22"/><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="3"/></svg>
+      Locate
+    </button>
+  </div>
+</header>
+
+<main>
+  <!-- ============ INVENTORY TAB ============ -->
+  <div id="tabInv" class="stack" style="gap:12px">
+    <section>
+      <h2>Reader</h2>
+      <div class="stack">
+        <div class="ctl">
+          <span class="lbl">Reader<span class="infobtn" data-info="reader"></span></span>
+          <div class="switch" id="swReader" onclick="toggleReader()">
+            <div class="thumb"></div>
+            <span class="opt active" id="swReaderOff">Closed</span>
+            <span class="opt" id="swReaderOn">Open</span>
+          </div>
+        </div>
+        <div class="ctl">
+          <span class="lbl">Read<span class="infobtn" data-info="read"></span></span>
+          <div class="switch" id="swRead" onclick="toggleRead()">
+            <div class="thumb"></div>
+            <span class="opt active" id="swReadOff">Off</span>
+            <span class="opt" id="swReadOn">Reading</span>
+          </div>
+        </div>
+        <div class="inline">
+          <span class="muted" style="white-space:nowrap; font-size:14px; font-weight:600">Sweep power dBm</span>
+          <span class="infobtn" data-info="sweepPower"></span>
+          <input id="invPower" type="number" min="5" max="30" inputmode="numeric" style="flex:1"
+                 onchange="savePowers()" />
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Tags<span class="infobtn" data-info="tags"></span></h2>
+      <div class="statrow">
+        <span class="stat">reads <b id="total">0</b></span>
+        <span class="stat">unique <b id="unique">0</b></span>
+        <span class="spacer"></span>
+        <button class="danger small" onclick="clearTags()">Clear</button>
+      </div>
+      <div id="tags"></div>
+      <div class="hint">Tap a tag to hunt it in the Locate tab.</div>
+    </section>
+  </div>
+
+  <!-- ============ LOCATE TAB ============ -->
+  <div id="tabLoc" class="stack hidden" style="gap:12px">
+    <section>
+      <h2>Locate / geiger<span class="infobtn" data-info="hunt"></span></h2>
+      <div class="stack">
+        <div class="fieldlbl">Pick from seen tags<span class="infobtn" data-info="target"></span></div>
+        <div class="selwrap">
+          <select id="locSelect" class="mono" onchange="pickFromDropdown()">
+            <option value="">— pick a seen tag (0) —</option>
+          </select>
+        </div>
+        <div class="fieldlbl">Or type manually</div>
+        <input id="locEpc" class="mono" placeholder="type a target EPC…"
+               onchange="registerTriggerTarget()" />
+        <div class="ctl">
+          <span class="lbl">Hunt</span>
+          <div class="switch" id="swHunt" onclick="toggleHunt()">
+            <div class="thumb"></div>
+            <span class="opt active" id="swHuntOff">Off</span>
+            <span class="opt" id="swHuntOn">Hunting</span>
+          </div>
+        </div>
+        <div class="inline">
+          <span class="muted" style="white-space:nowrap; font-size:14px; font-weight:600">Hunt power dBm</span>
+          <span class="infobtn" data-info="huntPower"></span>
+          <input id="locPower" type="number" min="5" max="30" inputmode="numeric" style="flex:1"
+                 onchange="savePowers()" />
+        </div>
+        <div id="meter"><div id="meterFill"></div></div>
+        <div id="proxText" class="muted">— / 100</div>
+        <div class="hint">Hold the trigger to hunt — closer = higher number. Release to stop.
+          Hunt power applies during the hunt; sweep power is restored after.</div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============ SHARED LOG ============ -->
+  <section>
+    <h2>Event log<span class="infobtn" data-info="log"></span></h2>
+    <div id="log"></div>
+  </section>
+</main>
+
+<!-- tap-for-help modal -->
+<div id="infoModal" class="modalwrap hidden" onclick="if (event.target === this) this.classList.add('hidden')">
+  <div class="modal">
+    <h3 id="infoTitle"></h3>
+    <p id="infoBody"></p>
+    <button onclick="document.getElementById('infoModal').classList.add('hidden')">Close</button>
+  </div>
+</div>
+
+<script>
+  // ---- transport: call into native, log gracefully if absent ----------------
+  function call(method, arg) {
+    const N = window.Native;
+    if (!N || typeof N[method] !== 'function') {
+      addLog('warn', 'Native.' + method + ' unavailable (running outside the app?)');
+      return;
+    }
+    try {
+      const ack = arg === undefined ? N[method]() : N[method](arg);
+      addLog('info', method + (arg !== undefined ? '(' + arg + ')' : '()') + ' -> ' + ack);
+    } catch (e) {
+      addLog('error', method + ' threw: ' + e);
+    }
+  }
+
+  // ---- tap-for-help ----------------------------------------------------------
+  const INFO = {
+    mode: ['Control mode',
+      'Choose what starts and stops the reader. GUN TRIGGER: hold the physical side button to read; the on-screen Read/Hunt toggles are locked. MANUAL: only the on-screen toggles work; the side button is ignored. The modes are exclusive so a trigger release can never cancel a reading you started on screen.'],
+    reader: ['Reader',
+      'Powers the RFID module itself on or off. It must be Open before any reading or hunting can happen. Keep it Closed when not in use to save battery.'],
+    read: ['Read (sweep)',
+      'Continuous inventory: reads every tag within range, over and over, and collects them in the Tags list below. Use it to take stock of everything around you.'],
+    sweepPower: ['Sweep power',
+      'Transmit power used while sweeping (5–30 dBm). LOW (5): reads only tags close to you — precise, good for counting one shelf at a time. HIGH (30): reaches several meters but may also pick up tags from neighboring shelves or aisles.'],
+    hunt: ['Locate / geiger',
+      'Finds one specific tag, like a metal detector. While hunting, the number (0–100) and the bar rise as you get closer to the tag and fall as you move away. Sweep in Inventory first, pick the tag, then walk toward higher numbers.'],
+    target: ['Choosing a target',
+      'Pick a tag seen during your last sweep from the dropdown, or type/paste a tag ID (EPC) manually in the field below it. Tapping a tag in the Inventory list also sets it as the target.'],
+    huntPower: ['Hunt power',
+      'Transmit power used only while hunting (5–30 dBm). Higher power helps the geiger first detect the tag from farther away. When the hunt ends, the reader automatically returns to your sweep power.'],
+    tags: ['Tags list',
+      'Every unique tag heard in this session, newest first — with how many times it was read (×), its last signal strength (dBm, closer to 0 = stronger), and when it was last seen. Tap any tag to hunt it. Clear empties the list.'],
+    log: ['Event log',
+      'A technical trace of everything the app and reader do — button presses, power changes, reader events. Useful when reporting a problem: the newest entries are at the top.'],
+  };
+  const INFO_SVG = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>';
+
+  function showInfo(key) {
+    const [title, body] = INFO[key] || ['', ''];
+    document.getElementById('infoTitle').textContent = title;
+    document.getElementById('infoBody').textContent = body;
+    document.getElementById('infoModal').classList.remove('hidden');
+  }
+
+  document.querySelectorAll('.infobtn').forEach(b => {
+    b.innerHTML = INFO_SVG;
+    b.addEventListener('click', e => { e.stopPropagation(); showInfo(b.dataset.info); });
+  });
+
+  // ---- live device state (from native status events) -------------------------
+  const state = { readerOpen: false, reading: false, locating: false };
+
+  // ---- tabs ------------------------------------------------------------------
+  let activeTab = 'inv';
+  function switchTab(name) {
+    activeTab = name;
+    document.getElementById('tabInv').classList.toggle('hidden', name !== 'inv');
+    document.getElementById('tabLoc').classList.toggle('hidden', name !== 'loc');
+    document.getElementById('tabBtnInv').classList.toggle('active', name === 'inv');
+    document.getElementById('tabBtnLoc').classList.toggle('active', name === 'loc');
+    registerTriggerTarget();
+  }
+
+  function registerTriggerTarget() {
+    const epc = activeTab === 'loc' ? document.getElementById('locEpc').value.trim() : '';
+    call('setTriggerLocate', epc);
+  }
+
+  // ---- per-mode power (persisted; native applies at each sweep/hunt start) ---
+  function savePowers() {
+    const inv = +document.getElementById('invPower').value || 5;
+    const loc = +document.getElementById('locPower').value || 20;
+    localStorage.setItem('invPower', inv);
+    localStorage.setItem('locPower', loc);
+    call('setInventoryPower', inv);
+    call('setLocatePower', loc);
+  }
+
+  function loadPowers() {
+    document.getElementById('invPower').value = localStorage.getItem('invPower') || 5;
+    document.getElementById('locPower').value = localStorage.getItem('locPower') || 20;
+    savePowers();
+  }
+
+  // ---- control mode: gun trigger vs manual buttons (persisted) ---------------
+  let controlMode = localStorage.getItem('controlMode') || 'gun';
+
+  function applyControlMode() {
+    const gun = controlMode === 'gun';
+    document.getElementById('modeSwitch').classList.toggle('right', !gun);
+    document.getElementById('modeGun').classList.toggle('active', gun);
+    document.getElementById('modeManual').classList.toggle('active', !gun);
+    // gun mode: the trigger owns start/stop — disable the manual Read/Hunt toggles.
+    document.getElementById('swRead').classList.toggle('disabled', gun);
+    document.getElementById('swHunt').classList.toggle('disabled', gun);
+    chip('chTrigger', gun ? 'up' : 'off', gun ? undefined : 'bad');
+    if (window.Native && window.Native.setTriggerEnabled) window.Native.setTriggerEnabled(gun);
+  }
+
+  function toggleControlMode() {
+    controlMode = controlMode === 'gun' ? 'manual' : 'gun';
+    localStorage.setItem('controlMode', controlMode);
+    applyControlMode();
+    addLog('info', 'control mode: ' + (controlMode === 'gun' ? 'gun trigger (manual toggles disabled)' : 'manual (trigger ignored)'));
+  }
+
+  // ---- state toggles ----------------------------------------------------------
+  function setSwitch(id, onIdSuffix, isOn) {
+    document.getElementById(id).classList.toggle('right', isOn);
+    document.getElementById(id.replace('sw', 'sw') + 'Off').classList.toggle('active', !isOn);
+    document.getElementById(id.replace('sw', 'sw') + 'On').classList.toggle('active', isOn);
+  }
+
+  function renderSwitches() {
+    setSwitch('swReader', 'On', state.readerOpen);
+    setSwitch('swRead',   'On', state.reading);
+    setSwitch('swHunt',   'On', state.locating);
+  }
+
+  function toggleReader() { call(state.readerOpen ? 'readerClose' : 'readerOpen'); }
+  function toggleRead()   { call(state.reading ? 'inventoryStop' : 'inventoryStart'); }
+  function toggleHunt()   {
+    if (state.locating) { call('locateStop'); return; }
+    registerTriggerTarget();
+    call('locateStart', document.getElementById('locEpc').value.trim());
+  }
+
+  // ---- tag list ----------------------------------------------------------------
+  const tags = new Map();
+  let total = 0;
+  let renderQueued = false;
+
+  function clearTags() { tags.clear(); total = 0; renderTags(); }
+
+  function renderTags() {
+    document.getElementById('total').textContent = total;
+    document.getElementById('unique').textContent = tags.size;
+    const rows = [...tags.entries()].sort((a, b) => b[1].last - a[1].last).slice(0, 50);
+    document.getElementById('tags').innerHTML = rows.map(([epc, t]) =>
+      `<div class="tagcard" onclick="pickTag('${epc}')">
+         <div class="epc">${epc}</div>
+         <div class="meta"><span>×${t.count}</span><span>${t.rssi ?? '—'} dBm</span><span>${t.last ? fmt(t.last) : ''}</span></div>
+       </div>`
+    ).join('');
+    refreshLocSelect();
+  }
+
+  // Locate dropdown: every EPC seen this session, newest first.
+  // (Placeholder implementation — later this will come from the expected-inventory DB.)
+  function refreshLocSelect() {
+    const sel = document.getElementById('locSelect');
+    const cur = document.getElementById('locEpc').value.trim();
+    const epcs = [...tags.entries()].sort((a, b) => b[1].last - a[1].last).map(([e]) => e);
+    sel.innerHTML =
+      `<option value="">— pick a seen tag (${epcs.length}) —</option>` +
+      epcs.map(e => `<option value="${e}"${e === cur ? ' selected' : ''}>${e}</option>`).join('');
+  }
+
+  function pickFromDropdown() {
+    const v = document.getElementById('locSelect').value;
+    if (!v) return;
+    document.getElementById('locEpc').value = v;
+    registerTriggerTarget();
+    addLog('info', 'locate target set: ' + v);
+  }
+
+  function queueRender() {
+    if (renderQueued) return;
+    renderQueued = true;
+    setTimeout(() => { renderQueued = false; renderTags(); }, 200);
+  }
+
+  function pickTag(epc) {
+    document.getElementById('locEpc').value = epc;
+    refreshLocSelect();
+    switchTab('loc');
+    addLog('info', 'locate target set: ' + epc);
+  }
+
+  /** Update a status chip: state 'ok' | 'bad' | undefined (neutral); live = pulsing dot. */
+  function chip(id, text, state, live) {
+    const el = document.getElementById(id);
+    document.getElementById(id + 'Txt').textContent = text;
+    el.classList.toggle('ok', state === 'ok');
+    el.classList.toggle('bad', state === 'bad');
+    el.classList.toggle('live', !!live);
+  }
+
+  function fmt(ms) { return new Date(ms).toLocaleTimeString('en-GB'); }
+
+  function addLog(level, text) {
+    const div = document.getElementById('log');
+    const row = document.createElement('div');
+    row.className = 'row log-' + level;
+    row.innerHTML = '<span class="t">' + fmt(Date.now()) + '</span><span class="m"></span>';
+    row.lastChild.textContent = text;
+    div.prepend(row);
+    while (div.childElementCount > 120) div.lastChild.remove();
+  }
+
+  // ---- the sink the native layer pushes events into --------------------------
+  window.__onNativeMessage = function (msg) {
+    switch (msg && msg.type) {
+      case 'tag': {
+        total++;
+        const t = tags.get(msg.epc) || { count: 0, rssi: null, last: 0 };
+        t.count++; t.rssi = msg.rssi; t.last = msg.ts || Date.now();
+        tags.set(msg.epc, t);
+        queueRender();
+        break;
+      }
+      case 'locate': {
+        // SDK can emit negative values on weak/final callbacks — clamp to 0..100.
+        const p = Math.max(0, Math.min(100, msg.proximity || 0));
+        document.getElementById('meterFill').style.width = p + '%';
+        document.getElementById('proxText').textContent = p + ' / 100' + (msg.valid ? '' : '  (weak)');
+        break;
+      }
+      case 'reader':
+        state.readerOpen = !!msg.open;
+        chip('chReader', msg.open ? 'Open' : 'Closed', msg.open ? 'ok' : 'bad');
+        chip('chPower', msg.powerDbm + ' dBm');
+        renderSwitches();
+        break;
+      case 'status':
+        state.readerOpen = !!msg.readerOpen;
+        state.reading = !!msg.reading;
+        state.locating = !!msg.locating;
+        chip('chReader', msg.readerOpen ? 'Open' : 'Closed', msg.readerOpen ? 'ok' : 'bad');
+        chip('chActivity',
+             msg.reading ? 'Reading' : (msg.locating ? 'Locating' : 'Idle'),
+             (msg.reading || msg.locating) ? 'ok' : undefined,
+             msg.reading || msg.locating);
+        chip('chPower', msg.powerDbm + ' dBm');
+        renderSwitches();
+        break;
+      case 'key':
+        addLog('key', 'key ' + msg.code + (msg.down ? ' DOWN' : ' UP') + (msg.trigger ? '  ← trigger' : ''));
+        if (msg.trigger && controlMode === 'gun') chip('chTrigger', msg.down ? 'DOWN' : 'up', msg.down ? 'ok' : undefined);
+        break;
+      case 'log':
+        addLog(msg.level || 'info', msg.text);
+        break;
+    }
+  };
+
+  if (!window.Native) chip('chActivity', 'no bridge', 'bad');
+  applyControlMode();
+  loadPowers();
+  renderSwitches();
+  // Sync chips/toggles with the REAL device state (e.g. reader already open after a UI reload).
+  try {
+    if (window.Native && window.Native.getStatus) window.__onNativeMessage(JSON.parse(window.Native.getStatus()));
+  } catch (e) { addLog('warn', 'initial status sync failed: ' + e); }
+  addLog('info', 'harness loaded (v15 info-help + watchdog)');
+</script>
+</body>
+</html>
