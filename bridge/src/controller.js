@@ -121,6 +121,36 @@ class Controller extends EventEmitter {
     return rc;
   }
 
+  async connectUsb() {
+    if (this.reading) await this.stopReading();
+    const rc = await this._withLock(() => uhf.connectUsb());
+    this.connected = rc === 0;
+    this.log(`UsbOpen() -> ${rc} (${rc === 0 ? 'OK' : 'FAIL'})`);
+    if (this.connected) {
+      // Same known-good reset as TCP connect: clear any leftover inventory and
+      // force command mode so tags flow through the poll loop.
+      await this._withLock(() => {
+        try {
+          const stopRc = uhf.stopInventory();
+          const wmBefore = uhf.getWorkMode();
+          const wmRc = uhf.setWorkMode(0);
+          const ver = uhf.getSoftwareVersion();
+          const pwr = uhf.getPower();
+          this.log(
+            `Reader reset: stopGet=${stopRc}, workMode ${wmBefore}->0 (rc=${wmRc}), version=${ver}, power=${pwr}dBm`
+          );
+          if (pwr != null && pwr < 5) {
+            this.log(`WARNING: read power is very low (${pwr}dBm) — tags may not be detected.`, 'warn');
+          }
+        } catch (e) {
+          this.log(`reset warning: ${e.message}`, 'warn');
+        }
+      });
+    }
+    this._emitStatus();
+    return rc;
+  }
+
   async disconnect() {
     if (this.reading) await this.stopReading();
     await this._withLock(() => uhf.disconnect());

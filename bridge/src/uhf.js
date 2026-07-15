@@ -49,6 +49,9 @@ function load() {
     // --- connection (doc 1510-1521) ---
     TCPConnect: lib.func('int TCPConnect(const char *hostaddr, int hostport)'),
     TCPDisconnect: lib.func('void TCPDisconnect()'),
+    // USB desktop readers (e.g. Chainway R1): open/close the connected USB device.
+    UsbOpen: lib.func('int UsbOpen()'),
+    UsbClose: lib.func('void UsbClose()'),
 
     // --- inventory (doc 2231-2277) ---
     UHFInventory: lib.func('int UHFInventory()'),
@@ -87,22 +90,39 @@ function load() {
 // ---------------------------------------------------------------------------
 
 let connected = false;
+let linkType = null; // 'tcp' | 'usb' — so disconnect() closes the right transport
 
 /**
- * Connect to the reader over TCP.
+ * Connect to the reader over TCP (network readers, e.g. UR4).
  * @returns {number} 0 on success, other = SDK error code.
  */
 function connect(ip, port) {
   const f = load();
   const rc = f.TCPConnect(ip, port);
   connected = rc === 0;
+  if (connected) linkType = 'tcp';
+  return rc;
+}
+
+/**
+ * Open the connected USB reader (desktop readers, e.g. Chainway R1). Same DLL,
+ * same inventory/poll path as TCP — only the transport differs.
+ * @returns {number} 0 on success, other = SDK error code.
+ */
+function connectUsb() {
+  const f = load();
+  const rc = f.UsbOpen();
+  connected = rc === 0;
+  if (connected) linkType = 'usb';
   return rc;
 }
 
 function disconnect() {
   if (!fns) return;
-  fns.TCPDisconnect();
+  if (linkType === 'usb') fns.UsbClose();
+  else fns.TCPDisconnect();
   connected = false;
+  linkType = null;
 }
 
 function isConnected() {
@@ -320,6 +340,7 @@ function setWorkModePara(ioTrigger, durationMs, minGapMs, outputMode) {
 module.exports = {
   load,
   connect,
+  connectUsb,
   disconnect,
   isConnected,
   startInventory,

@@ -57,18 +57,25 @@ function buildLabel(opts = {}) {
     copies = 1,
   } = opts;
   const hex = validateEpcHex(epc);
+  // Strip ZPL control prefixes (^ ~) + control chars from the human title so a
+  // crafted product name can't break out of ^FD…^FS and inject ZPL commands.
+  const safeTitle = String(title == null ? '' : title).replace(/[\^~\x00-\x1f]/g, ' ');
   const qty = Math.max(1, Math.min(50, Number(copies) || 1));
-  const oy = Math.max(0, Number(topOffsetDots) || 0);
-  const ox = Math.max(0, Number(leftOffsetDots) || 0);
+  // Offsets may be NEGATIVE to move content up / left (toward the leading / left
+  // edge); the final ^FO coordinate is clamped at 0 so it never goes off-canvas.
+  const oy = Math.round(Number(topOffsetDots) || 0);
+  const ox = Math.round(Number(leftOffsetDots) || 0);
+  const fx = (bx) => Math.max(0, bx + ox);
+  const fy = (by) => Math.max(0, by + oy);
 
   const z = ['^XA', '^CI28'];
   if (widthDots) z.push(`^PW${widthDots}`);
   if (heightDots) z.push(`^LL${heightDots}`);
   if (extraZpl) z.push(extraZpl);
   z.push(`^RFW,H^FD${hex}^FS`);
-  z.push(`^FO${24 + ox},${24 + oy}^A0N,32,32^FD${title}^FS`);
-  z.push(`^FO${24 + ox},${68 + oy}^A0N,28,28^FDEPC ${hex}^FS`);
-  if (barcode) z.push(`^FO${24 + ox},${112 + oy}^BY2,3,80^BCN,80,N,N,N^FD${hex}^FS`);
+  z.push(`^FO${fx(24)},${fy(24)}^A0N,32,32^FD${safeTitle}^FS`);
+  z.push(`^FO${fx(24)},${fy(68)}^A0N,28,28^FDEPC ${hex}^FS`);
+  if (barcode) z.push(`^FO${fx(24)},${fy(112)}^BY2,3,80^BCN,80,N,N,N^FD${hex}^FS`);
   z.push(`^PQ${qty}`);
   z.push('^XZ');
   return z.join('\n') + '\n';

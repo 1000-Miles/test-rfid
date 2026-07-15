@@ -75,6 +75,16 @@ app.post('/connect', async (req, res) => {
   }
 });
 
+// Open a USB desktop reader (e.g. Chainway R1) — same DLL as the TCP path.
+app.post('/connect-usb', async (_req, res) => {
+  try {
+    const rc = await controller.connectUsb();
+    res.json({ ok: rc === 0, code: rc, ...controller.getStatus() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.post('/disconnect', async (_req, res) => {
   try {
     await controller.disconnect();
@@ -133,8 +143,12 @@ app.post('/debug/gpi-config', (req, res) => {
 });
 
 // --- Printer endpoints ----------------------------------------------------------
-app.get('/printer/status', (_req, res) => {
-  res.json({ ok: true, ...printer.getStatus() });
+app.get('/printer/status', async (_req, res) => {
+  // printerReady says whether a printer is actually reachable behind the
+  // transport — the spooler accepts jobs even with nothing attached, so
+  // clients must gate print runs on this, not on ok:true (= bridge is up).
+  const readiness = await printer.checkReady().catch((e) => ({ ready: false, detail: e.message }));
+  res.json({ ok: true, ...printer.getStatus(), printerReady: readiness.ready, printerDetail: readiness.detail });
 });
 
 app.post('/printer/config', (req, res) => {
@@ -183,6 +197,17 @@ app.post('/printer/raw', async (req, res) => {
   }
   try {
     res.json({ ok: true, ...(await printer.sendRaw(zplText)) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Durable print log — the airtight reconcile source. ?jobId= filters to one job.
+// Nexus pulls this before resuming to mark cartons that printed but whose "done"
+// signal never reached it (browser/PC crash), so they're never reprinted.
+app.get('/printer/log', (req, res) => {
+  try {
+    res.json({ ok: true, entries: printer.readPrintLog({ jobId: req.query.jobId }) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
