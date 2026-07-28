@@ -14,7 +14,11 @@
 
 const dgram = require('dgram');
 const EventEmitter = require('events');
-const uhf = require('./uhf');
+// Lazy-load the DLL driver: this module is only used in HW trigger mode
+// (DLL-only feature), and requiring uhf.js at top level would drag koffi in
+// on Linux/sidecar setups where it isn't installed.
+let uhf = null;
+const getUhf = () => (uhf ??= require('./uhf'));
 
 class UdpListener extends EventEmitter {
   constructor() {
@@ -38,7 +42,7 @@ class UdpListener extends EventEmitter {
       this.frames++;
       let parsed = null;
       try {
-        parsed = uhf.parseUdpDatagram(buf);
+        parsed = getUhf().parseUdpDatagram(buf);
       } catch (_) {
         /* keep raw-only */
       }
