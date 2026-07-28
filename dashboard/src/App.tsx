@@ -9,7 +9,7 @@ export default function App() {
   const bridge = useBridge();
   const { status } = bridge;
 
-  const [ip, setIp] = useState('192.168.99.202');
+  const [ip, setIp] = useState('192.168.254.202');
   const [port, setPort] = useState(8888);
   const [irDuration, setIrDuration] = useState(500);
   const [busy, setBusy] = useState(false);

@@ -8,7 +8,7 @@ const { WebSocketServer } = require('ws');
 const { Controller } = require('./controller');
 
 const PORT = Number(process.env.PORT || 3001);
-const DEFAULT_IP = process.env.UR4_IP || '192.168.99.202';
+const DEFAULT_IP = process.env.UR4_IP || '192.168.254.202';
 const DEFAULT_PORT = Number(process.env.UR4_PORT || 8888);
 
 // --- Supabase forwarding (optional) ------------------------------------------
