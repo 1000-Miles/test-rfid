@@ -420,6 +420,19 @@ class Controller extends EventEmitter {
           const got = await this._withLock(() => this._drainTags());
           if (this.readingUntil && Date.now() >= this.readingUntil) {
             await this.stopReading();
+            // IR level-extension: if the beam is STILL broken when the burst
+            // expires, the pallet is still in the doorway — keep reading
+            // instead of waiting for a fresh clear->broken edge.
+            if (this.mode === 'ir' && this.connected) {
+              const g = await this._withLock(() => uhf.getGpi());
+              if (g && g.rc === 0) {
+                this.lastGpi1 = g.gpi1 === true;
+                if (g.gpi1 === true) {
+                  this.log('IR burst extended — beam still broken.');
+                  await this.startReading(this.irDurationMs);
+                }
+              }
+            }
           }
           delay = got > 0 ? 0 : 10; // keep draining while tags flow
         } else {
