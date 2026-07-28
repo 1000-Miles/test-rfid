@@ -17,7 +17,8 @@ export const api = {
   disconnect: () => post('/disconnect'),
   start: () => post('/inventory/start'),
   stop: () => post('/inventory/stop'),
-  setMode: (cfg: { mode?: Mode; irDurationMs?: number; irMinGapMs?: number }) => post('/mode', cfg),
+  setMode: (cfg: { mode?: Mode; irDurationMs?: number; irMinGapMs?: number; udpPort?: number; destIp?: string }) =>
+    post('/mode', cfg),
   status: async (): Promise<Status & { defaults?: { ip: string; port: number } }> => {
     const res = await fetch(`${BRIDGE_HTTP}/status`);
     return res.json();
@@ -35,4 +36,14 @@ export const api = {
   printerPrint: (body: { epc?: string; title?: string; copies?: number }): Promise<PrintResult> =>
     post('/printer/print', body),
   printerRaw: (zpl: string): Promise<{ ok: boolean; error?: string }> => post('/printer/raw', { zpl }),
+  getPower: async (): Promise<{ ok: boolean; dBm: number | null }> => {
+    const res = await fetch(`${BRIDGE_HTTP}/power`);
+    return res.json();
+  },
+  setPower: (dBm: number) => post<{ ok: boolean; dBm: number | null }>('/power', { dBm }),
+  nexusSummary: async (): Promise<{ dedupMs: number; quietMs: number; maxWindowMs: number }> => {
+    const res = await fetch(`${BRIDGE_HTTP}/nexus/summary`);
+    return res.json();
+  },
+  setNexusConfig: (cfg: { dedupMs?: number; quietMs?: number; maxWindowMs?: number }) => post('/nexus/config', cfg),
 };

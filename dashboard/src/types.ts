@@ -1,9 +1,16 @@
-export type Mode = 'manual' | 'ir';
+export type Mode = 'manual' | 'ir' | 'hw';
 
 export interface GpiState {
   gpi1: boolean | null;
   gpi2: boolean | null;
   raw: string;
+}
+
+export interface UdpState {
+  listening: boolean;
+  port: number;
+  frames: number;
+  destIp: string | null;
 }
 
 export interface Status {
@@ -13,6 +20,7 @@ export interface Status {
   irDurationMs: number;
   irMinGapMs: number;
   gpi: GpiState;
+  udp?: UdpState;
 }
 
 export interface TagMsg {
@@ -47,7 +55,54 @@ export interface LogMsg {
   timestamp: string;
 }
 
-export type WsMsg = TagMsg | GpiMsg | TriggerMsg | StatusMsg | LogMsg;
+export interface UdpMsg {
+  type: 'udp';
+  raw: string;
+  len: number;
+  from: string;
+  parsed: boolean;
+  epc: string | null;
+  timestamp: string;
+}
+
+export interface NexusItem {
+  sku: string;
+  name: string;
+  pallet: string | null;
+  category: string | null;
+}
+
+export interface EntryMsg {
+  type: 'entry' | 'exit';
+  direction: 'in' | 'out';
+  method: 'antenna' | 'toggle';
+  epc: string;
+  known: boolean;
+  item: NexusItem;
+  location: string;
+  rssi: number | null;
+  antenna: number | null;
+  antennas: number[];
+  reads: number;
+  timestamp: string;
+}
+
+export type WsMsg = TagMsg | GpiMsg | TriggerMsg | StatusMsg | LogMsg | UdpMsg | EntryMsg;
+
+export interface EntryRow extends Omit<EntryMsg, 'type'> {
+  id: number;
+  kind: 'entry' | 'exit';
+}
+
+export interface UdpFrameRow {
+  id: number;
+  raw: string;
+  len: number;
+  from: string;
+  parsed: boolean;
+  epc: string | null;
+  timestamp: string;
+}
 
 export type PrinterTransport = 'usb' | 'tcp';
 

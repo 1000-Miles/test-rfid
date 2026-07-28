@@ -63,12 +63,21 @@ function load() {
     // version[0] = length, version[1..] = version bytes.
     UHFGetSoftwareVersion: lib.func('int UHFGetSoftwareVersion(uint8_t *version)'),
     UHFGetPower: lib.func('int UHFGetPower(uint8_t *uPower)'),
+    // save: 1 = persist across power cycles. uPower in dBm (UR4 max 30).
+    UHFSetPower: lib.func('int UHFSetPower(uint8_t save, uint8_t uPower)'),
+
+    // --- antennas (vendor UHFAPI.cs 1266): 2-byte bitmask, buf[1] bit0=ANT1 ---
+    UHFSetANT: lib.func('int UHFSetANT(uint8_t saveflag, const uint8_t *buf)'),
+    UHFGetANT: lib.func('int UHFGetANT(uint8_t *buf)'),
+    UHFGetAntennaLinkStatus: lib.func('int UHFGetAntennaLinkStatus(int16_t *buf)'),
 
     // --- GPIO (header 1010-1011) ---
     // GPO *outputs* only: statusData[0]=GPO0, statusData[1]=GPO1 (doc 2029).
     UHFGetIOControl: lib.func('int UHFGetIOControl(uint8_t *statusData)'),
-    // GPI *inputs* (IR sensor). Format undocumented -> we expose raw & calibrate.
-    UHFGetIOStatus: lib.func('int UHFGetIOStatus(uint8_t *statusData, _Inout_ uint16_t *len)'),
+    // GPI *inputs* (IR sensor). Vendor UR4Demo source: len is int*, and the
+    // payload layout is [?, GPI1, ?, GPI2, ...] (GetInputStatus uses temp[1]
+    // and temp[3]).
+    UHFGetIOStatus: lib.func('int UHFGetIOStatus(uint8_t *statusData, _Inout_ int *len)'),
 
     // --- work mode / hardware trigger (doc 2038-2073) ---
     // NOTE: mode 2 (trigger) outputs tags over serial/UDP only, NOT TCP, so we do
@@ -77,6 +86,30 @@ function load() {
     UHFGetWorkMode: lib.func('int UHFGetWorkMode(uint8_t *mode)'),
     UHFSetWorkModePara: lib.func('int UHFSetWorkModePara(uint8_t *param)'),
     UHFGetWorkModePara: lib.func('int UHFGetWorkModePara(uint8_t *param)'),
+
+    // --- UDP active output (doc V1.0.1 "UHFSetDestIp") ---
+    // In trigger work mode with param[5]=1 the reader pushes tag data via UDP
+    // to this destination. Doc claims C strings, but hardware readback proves
+    // BINARY: ip = 4 octets, port = 2 bytes (passing "192.168.99.100"/"9090"
+    // stored ip=31 39 32 2E "192." and port=39 30 "90").
+    UHFSetDestIp: lib.func('int UHFSetDestIp(const uint8_t *ip, const uint8_t *port)'),
+    UHFGetDestIp: lib.func('int UHFGetDestIp(uint8_t *ip, uint8_t *port)'),
+    // Reader's own static IP config (vendor UHFAPI.cs 42): all binary —
+    // ip 4 octets, port 2 bytes BE, mask 4 octets, gateway 4 octets.
+    UHFSetIp: lib.func('int UHFSetIp(const uint8_t *ip, const uint8_t *port, const uint8_t *mask, const uint8_t *gate)'),
+    UHFGetIp: lib.func('int UHFGetIp(uint8_t *ip, uint8_t *port, uint8_t *mask, uint8_t *gate)'),
+
+    // DLL-side UDP receiver (vendor ReceiveEPC.cs): BindUDP opens a socket
+    // inside the DLL; pushed frames land in the same buffer that
+    // UHF_GetReceived_EX drains. No TCP connection required for the data path.
+    BindUDP: lib.func('int BindUDP(int bindport)'),
+    UnbindUDP: lib.func('void UnbindUDP()'),
+
+    // --- continuous-read work/wait times (vendor UHFAPI.cs 636) ---
+    // Governs standalone reading cycles (auto/trigger modes): read for
+    // workTime ms, pause waitTime ms. work/wait are 2 bytes each, high first.
+    UHFSetWorkTime: lib.func('int UHFSetWorkTime(uint8_t save, uint8_t work1, uint8_t work2, uint8_t wait1, uint8_t wait2)'),
+    UHFGetWorkTime: lib.func('int UHFGetWorkTime(uint8_t *data)'),
 
     // --- logging (header 1220-1228) ---
     SetLogLevel: lib.func('void SetLogLevel(int level)'),
@@ -220,6 +253,32 @@ function parseTag(buf, len) {
   };
 }
 
+/**
+ * Best-effort parse of a UDP datagram pushed by the reader in trigger/auto
+ * work mode. The wire format is NOT documented, so we scan for the same
+ * record layout UHF_GetReceived_EX uses (uiiLen + PC + EPC + tidLen + TID
+ * + RSSI + antenna) at small offsets, in case the datagram carries a
+ * protocol header/trailer around it. Returns { ...tag, offset } or null;
+ * callers always get the raw hex separately for calibration.
+ */
+function parseUdpDatagram(buf) {
+  const maxOffset = Math.min(8, buf.length - 7);
+  for (let off = 0; off <= maxOffset; off++) {
+    const uiiLen = buf[off];
+    if (uiiLen < 4 || uiiLen > 66) continue; // PC(2) + EPC(2..64)
+    const tidLenIdx = off + 1 + uiiLen;
+    if (tidLenIdx >= buf.length) continue;
+    const tidLen = buf[tidLenIdx];
+    // record ends at uiiLen + tidLen + 5 relative to off; allow <=4 trailing
+    // bytes (checksum/frame end) but no truncation.
+    const end = off + uiiLen + tidLen + 5;
+    if (end > buf.length || buf.length - end > 4) continue;
+    const tag = parseTag(buf.subarray(off), end - off);
+    if (tag && tag.epc) return { ...tag, offset: off };
+  }
+  return null;
+}
+
 /** Read the reader's software version string (diagnostic round-trip). */
 function getSoftwareVersion() {
   const f = load();
@@ -242,20 +301,84 @@ function getPower() {
   return rc === 0 ? buf[0] : null;
 }
 
+/** Set output power in dBm (UR4: 1..30). @returns {number} 0 on success. */
+function setPower(dBm, save = true) {
+  return load().UHFSetPower(save ? 1 : 0, Number(dBm) & 0xff);
+}
+
+/** Enable a set of antenna ports, e.g. setAntennas([1,2]). @returns 0 on success. */
+function setAntennas(ports, save = true) {
+  let mask = 0;
+  for (const p of ports) {
+    if (p < 1 || p > 16) throw new Error(`setAntennas: bad port ${p}`);
+    mask |= 1 << (p - 1);
+  }
+  // buf[0] = ANT16..ANT9, buf[1] = ANT8..ANT1
+  const buf = Buffer.from([(mask >> 8) & 0xff, mask & 0xff]);
+  return load().UHFSetANT(save ? 1 : 0, buf);
+}
+
+/** Read enabled antenna ports. @returns {number[]|null} e.g. [1,2] */
+function getAntennas() {
+  const f = load();
+  const buf = Buffer.alloc(4);
+  const rc = f.UHFGetANT(buf);
+  if (rc !== 0) return null;
+  const mask = (buf[0] << 8) | buf[1];
+  const ports = [];
+  for (let p = 1; p <= 16; p++) if (mask & (1 << (p - 1))) ports.push(p);
+  return ports;
+}
+
+/** Which antenna ports have an antenna physically connected. @returns {number[]|null} */
+function getAntennaLink() {
+  const f = load();
+  const buf = Buffer.alloc(64); // int16 per vendor sig; generous
+  const rc = f.UHFGetAntennaLinkStatus(buf);
+  if (rc !== 0) return null;
+  const mask = buf.readInt16LE(0);
+  const ports = [];
+  for (let p = 1; p <= 16; p++) if (mask & (1 << (p - 1))) ports.push(p);
+  return ports;
+}
+
+/** Read standalone work/wait cycle times (ms). @returns {{workMs,waitMs}|null} */
+function getWorkTime() {
+  const f = load();
+  const buf = Buffer.alloc(8);
+  const rc = f.UHFGetWorkTime(buf);
+  if (rc !== 0) return null;
+  return { workMs: buf.readUInt16BE(0), waitMs: buf.readUInt16BE(2), raw: buf.subarray(0, 4).toString('hex').toUpperCase() };
+}
+
+/** Set standalone work/wait cycle times (ms). */
+function setWorkTime(workMs, waitMs, save = true) {
+  const w = Math.max(0, Math.min(65535, Math.round(workMs)));
+  const g = Math.max(0, Math.min(65535, Math.round(waitMs)));
+  return load().UHFSetWorkTime(save ? 1 : 0, (w >> 8) & 0xff, w & 0xff, (g >> 8) & 0xff, g & 0xff);
+}
+
 // ---------------------------------------------------------------------------
 // GPIO / GPI (IR sensor) support
 // ---------------------------------------------------------------------------
 
 /**
- * GPI bit interpretation. UHFGetIOStatus's byte format is NOT documented, so
- * these are calibratable against the real reader (watch the `raw` field change
- * as the IR beam breaks, then adjust). Defaults are a reasonable first guess:
- * byte 0 -> GPI1, byte 1 -> GPI2, and a non-zero value means "beam broken".
+ * GPI interpretation, from the vendor UR4Demo source ("GPIO Of UR4" region):
+ * on the UR4, GPI inputs are read via UHFGetIOControl — byte 0 = GPI1 level,
+ * byte 1 = GPI2 level (0 = low, 1 = high). (UHFGetIOStatus with bytes 1/3 is
+ * the UR1A path; the SDK doc describes UHFGetIOControl as GPO readback —
+ * both wrong for UR4.)
+ * source: 'iocontrol' (UR4) | 'iostatus' (UR1A). Calibratable live via
+ * /debug/gpi-config: whether "beam broken" is high or low depends on the IR
+ * sensor's output type (NPN/PNP).
  */
 let gpiConfig = {
+  source: 'iocontrol',
   gpi1Byte: 0,
   gpi2Byte: 1,
-  activeHigh: true, // true => non-zero byte means "broken"; false => zero means "broken"
+  // Hardware-calibrated 2026-07-06: GPI1 idles HIGH (beam clear = 01), drops
+  // LOW while the beam is broken -> "broken" is the ZERO state.
+  activeHigh: false, // true => non-zero byte means "broken"; false => zero means "broken"
 };
 
 function setGpiConfig(partial) {
@@ -284,7 +407,16 @@ function readIOStatus() {
  * gpi true = "beam broken" (per gpiConfig). null = byte not present in response.
  */
 function getGpi() {
-  const { rc, bytes, raw } = readIOStatus();
+  let rc, bytes, raw;
+  if (gpiConfig.source === 'iostatus') {
+    ({ rc, bytes, raw } = readIOStatus());
+  } else {
+    const f = load();
+    const buf = Buffer.alloc(16);
+    rc = f.UHFGetIOControl(buf);
+    bytes = rc === 0 ? buf.subarray(0, 2) : Buffer.alloc(0);
+    raw = bytes.toString('hex').toUpperCase();
+  }
   const bit = (idx) => {
     if (idx == null || idx >= bytes.length) return null;
     const v = bytes[idx] !== 0;
@@ -323,6 +455,91 @@ function setWorkMode(mode) {
  * @param {number} minGapMs   min gap since last trigger (ms)
  * @param {number} outputMode 0 = serial, 1 = UDP (NOT TCP)
  */
+/**
+ * Set the UDP destination the reader pushes tags to in trigger/auto work mode.
+ * ip = dotted string, port = number. Encoded as 4 binary octets + 2 bytes
+ * big-endian (high byte first, like the work-mode params).
+ */
+function setDestIp(ip, port) {
+  const octets = String(ip).split('.').map((n) => parseInt(n, 10));
+  if (octets.length !== 4 || octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+    throw new Error(`setDestIp: bad ip "${ip}"`);
+  }
+  const p = Number(port);
+  if (!Number.isInteger(p) || p < 1 || p > 65535) throw new Error(`setDestIp: bad port "${port}"`);
+  return load().UHFSetDestIp(Buffer.from(octets), Buffer.from([(p >> 8) & 0xff, p & 0xff]));
+}
+
+/** Read back the configured UDP destination. @returns {{ip,port,rawIp,rawPort}|null} */
+function getDestIp() {
+  const f = load();
+  const ip = Buffer.alloc(16);
+  const port = Buffer.alloc(8);
+  const rc = f.UHFGetDestIp(ip, port);
+  if (rc !== 0) return null;
+  return {
+    ip: `${ip[0]}.${ip[1]}.${ip[2]}.${ip[3]}`,
+    port: (port[0] << 8) | port[1],
+    rawIp: ip.subarray(0, 4).toString('hex').toUpperCase(),
+    rawPort: port.subarray(0, 2).toString('hex').toUpperCase(),
+  };
+}
+
+const ipToBytes = (ip, label) => {
+  const o = String(ip).split('.').map((n) => parseInt(n, 10));
+  if (o.length !== 4 || o.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) throw new Error(`bad ${label}: ${ip}`);
+  return Buffer.from(o);
+};
+
+/** Set the READER's own static IP/port/mask/gateway. Takes effect after reboot. */
+function setReaderIp(ip, port, mask, gateway) {
+  const p = Number(port);
+  if (!Number.isInteger(p) || p < 1 || p > 65535) throw new Error(`bad port: ${port}`);
+  return load().UHFSetIp(
+    ipToBytes(ip, 'ip'),
+    Buffer.from([(p >> 8) & 0xff, p & 0xff]),
+    ipToBytes(mask, 'mask'),
+    ipToBytes(gateway, 'gateway')
+  );
+}
+
+/** Read the reader's static IP config. @returns {{ip,port,mask,gateway}|null} */
+function getReaderIp() {
+  const f = load();
+  const ip = Buffer.alloc(8);
+  const port = Buffer.alloc(4);
+  const mask = Buffer.alloc(8);
+  const gate = Buffer.alloc(8);
+  const rc = f.UHFGetIp(ip, port, mask, gate);
+  if (rc !== 0) return null;
+  const dot = (b) => `${b[0]}.${b[1]}.${b[2]}.${b[3]}`;
+  return { ip: dot(ip), port: (port[0] << 8) | port[1], mask: dot(mask), gateway: dot(gate) };
+}
+
+/** Open the DLL's own UDP receive socket. @returns {number} 0 on success. */
+function bindUdp(port) {
+  return load().BindUDP(Number(port));
+}
+
+function unbindUdp() {
+  if (fns) fns.UnbindUDP();
+}
+
+/** Read back trigger work mode params. @returns parsed object or null. */
+function getWorkModePara() {
+  const f = load();
+  const buf = Buffer.alloc(16);
+  const rc = f.UHFGetWorkModePara(buf);
+  if (rc !== 0) return null;
+  return {
+    ioTrigger: buf[0], // 0 = input 1 (GPI1), 1 = input 2
+    durationMs: buf.readUInt16BE(1) * 10,
+    minGapMs: buf.readUInt16BE(3) * 10,
+    outputMode: buf[5], // 0 = serial, 1 = UDP
+    raw: buf.subarray(0, 6).toString('hex').toUpperCase(),
+  };
+}
+
 function setWorkModePara(ioTrigger, durationMs, minGapMs, outputMode) {
   const dur = Math.round(durationMs / 10); // unit = 10ms, high byte first
   const gap = Math.round(minGapMs / 10);
@@ -349,6 +566,12 @@ module.exports = {
   parseTag,
   getSoftwareVersion,
   getPower,
+  setPower,
+  getWorkTime,
+  setWorkTime,
+  setAntennas,
+  getAntennas,
+  getAntennaLink,
   setLogLevel,
   // GPIO / IR
   readIOStatus,
@@ -356,9 +579,17 @@ module.exports = {
   getIOControl,
   setGpiConfig,
   getGpiConfig,
-  // hardware work mode (diagnostics)
+  // hardware work mode / UDP active output
   getWorkMode,
   setWorkMode,
   setWorkModePara,
+  getWorkModePara,
+  setDestIp,
+  getDestIp,
+  parseUdpDatagram,
+  bindUdp,
+  unbindUdp,
+  setReaderIp,
+  getReaderIp,
   paths: { LIB_DIR, UHFAPI_PATH, LIBUSB_PATH },
 };

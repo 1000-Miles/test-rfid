@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BRIDGE_WS } from './api';
-import type { GpiState, Status, TagRow, WsMsg } from './types';
+import type { EntryRow, GpiState, Status, TagRow, UdpFrameRow, WsMsg } from './types';
 
 const MAX_ROWS = 100;
+const MAX_UDP_ROWS = 50;
 
 export interface BridgeState {
   wsConnected: boolean;
   status: Status;
   rows: TagRow[];
+  udpFrames: UdpFrameRow[];
+  entries: EntryRow[];
   gpi: GpiState;
   totalReads: number;
   uniqueEpcs: number;
@@ -29,6 +32,8 @@ export function useBridge(): BridgeState {
   const [wsConnected, setWsConnected] = useState(false);
   const [status, setStatus] = useState<Status>(initialStatus);
   const [rows, setRows] = useState<TagRow[]>([]);
+  const [udpFrames, setUdpFrames] = useState<UdpFrameRow[]>([]);
+  const [entries, setEntries] = useState<EntryRow[]>([]);
   const [gpi, setGpi] = useState<GpiState>({ gpi1: null, gpi2: null, raw: '' });
   const [totalReads, setTotalReads] = useState(0);
   const [uniqueEpcs, setUniqueEpcs] = useState(0);
@@ -41,6 +46,8 @@ export function useBridge(): BridgeState {
 
   const clear = useCallback(() => {
     setRows([]);
+    setUdpFrames([]);
+    setEntries([]);
     setTotalReads(0);
     setUniqueEpcs(0);
     setReadsPerSec(0);
@@ -96,6 +103,39 @@ export function useBridge(): BridgeState {
             }
             break;
           }
+          case 'udp': {
+            const row: UdpFrameRow = {
+              id: idRef.current++,
+              raw: msg.raw,
+              len: msg.len,
+              from: msg.from,
+              parsed: msg.parsed,
+              epc: msg.epc,
+              timestamp: msg.timestamp,
+            };
+            setUdpFrames((prev) => [row, ...prev].slice(0, MAX_UDP_ROWS));
+            break;
+          }
+          case 'entry':
+          case 'exit': {
+            const row: EntryRow = {
+              id: idRef.current++,
+              kind: msg.type,
+              direction: msg.direction,
+              method: msg.method,
+              epc: msg.epc,
+              known: msg.known,
+              item: msg.item,
+              location: msg.location,
+              rssi: msg.rssi,
+              antenna: msg.antenna,
+              antennas: msg.antennas ?? [],
+              reads: msg.reads ?? 0,
+              timestamp: msg.timestamp,
+            };
+            setEntries((prev) => [row, ...prev].slice(0, 100));
+            break;
+          }
           case 'gpi':
             setGpi({ gpi1: msg.gpi1, gpi2: msg.gpi2, raw: msg.raw });
             break;
@@ -110,6 +150,7 @@ export function useBridge(): BridgeState {
               irDurationMs: msg.irDurationMs,
               irMinGapMs: msg.irMinGapMs,
               gpi: msg.gpi,
+              udp: msg.udp,
             });
             if (msg.gpi) setGpi(msg.gpi);
             break;
@@ -131,6 +172,8 @@ export function useBridge(): BridgeState {
     wsConnected,
     status,
     rows,
+    udpFrames,
+    entries,
     gpi,
     totalReads,
     uniqueEpcs,

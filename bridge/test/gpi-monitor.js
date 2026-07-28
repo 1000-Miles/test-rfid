@@ -14,8 +14,9 @@
  * lines marked  <<< CHANGED.
  *
  * Usage:
- *   node test/gpi-monitor.js [ip] [port] [intervalMs]
- *   e.g. node test/gpi-monitor.js 192.168.99.202 8888 200
+ *   node test/gpi-monitor.js [ip] [port] [intervalMs] [durationSec]
+ *   e.g. node test/gpi-monitor.js 192.168.99.202 8888 200 60
+ *   durationSec 0 (default) = run until Ctrl+C.
  */
 
 const uhf = require('../src/uhf');
@@ -23,6 +24,7 @@ const uhf = require('../src/uhf');
 const ip = process.argv[2] || '192.168.99.202';
 const port = parseInt(process.argv[3] || '8888', 10);
 const interval = parseInt(process.argv[4] || '200', 10);
+const durationSec = parseInt(process.argv[5] || '0', 10);
 
 const ts = () => new Date().toISOString().slice(11, 23);
 
@@ -72,6 +74,7 @@ function main() {
     process.exit(0);
   };
   process.on('SIGINT', shutdown);
+  if (durationSec > 0) setTimeout(shutdown, durationSec * 1000);
 }
 
 main();

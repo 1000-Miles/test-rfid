@@ -13,6 +13,86 @@ body {
   font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 }
 
+/* ---------------- TV wallboard (industrial depot signage) ---------------- */
+.tv-display {
+  font-family: 'Bebas Neue', 'Arial Narrow', sans-serif;
+  letter-spacing: 0.02em;
+}
+.tv-mono {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+}
+.tv-hazard {
+  background: repeating-linear-gradient(-45deg, #ffb000 0 24px, #14120a 24px 48px);
+}
+.tv-grain {
+  position: relative;
+}
+.tv-grain::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: radial-gradient(rgba(255, 176, 0, 0.05) 1px, transparent 1px);
+  background-size: 4px 4px;
+  mix-blend-mode: screen;
+}
+@keyframes tv-stamp {
+  0% {
+    opacity: 0;
+    transform: scale(2.4) rotate(-9deg);
+  }
+  55% {
+    opacity: 1;
+    transform: scale(0.94) rotate(-4deg);
+  }
+  75% {
+    transform: scale(1.05) rotate(-4deg);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) rotate(-4deg);
+  }
+}
+.tv-stamp {
+  animation: tv-stamp 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.4) both;
+}
+@keyframes tv-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(-24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.tv-slide-in {
+  animation: tv-slide-in 0.35s ease-out both;
+}
+@keyframes tv-beam {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.tv-beam-wait {
+  animation: tv-beam 2.4s ease-in-out infinite;
+}
+@keyframes tv-flash-bg {
+  0% {
+    background-color: rgba(255, 176, 0, 0.22);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+.tv-flash-bg {
+  animation: tv-flash-bg 1.2s ease-out both;
+}
+
 @keyframes triggerflash {
   0% {
     opacity: 0;

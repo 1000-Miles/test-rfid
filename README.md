@@ -56,17 +56,31 @@ The smoke test dumps each tag as `epc=… ant=… rssi=…dBm raw=…`. It prove
 - **Connect form** — IP / port, Connect / Disconnect.
 - **Read mode toggle**
   - **Manual** — you click Start / Stop.
-  - **IR-triggered** — the reader auto-reads for a configurable burst (default 500 ms) each time the **GPI1 IR beam breaks**.
+  - **IR (bridge)** — the bridge polls GPI over TCP and starts a read burst (default 500 ms) each time the **GPI1 IR beam breaks**.
+  - **IR (HW+UDP)** — the reader firmware itself triggers on GPI1 (work mode 2) and pushes tag data to the bridge **over UDP**; the dashboard shows every raw datagram plus parsed tags.
 - **GPI Status** — live GPI1 / GPI2 lamps (beam clear / **BEAM BROKEN**) polled ~3×/sec, plus the raw status bytes.
 - **⚡ TRIGGERED!** flash — fires on every GPI1 trigger event so you can confirm the IR sensor visually.
 - **Stats** — total reads, unique EPCs, reads/sec.
 - **Live table** — newest first, last 100 rows: Time | EPC | Antenna | RSSI. **Clear** resets.
 
-## How IR triggering works (and why it's software-side)
+## Two ways to do IR triggering
 
-The UR4's **hardware** trigger mode (`UHFSetWorkMode(2)`) outputs tags over **serial or UDP only — never over the TCP link** we read tags on (SDK `UHFSetWorkModePara` `param[5]` = serial/UDP). Putting the reader in that mode would divert tag data away from our poll loop.
+The UR4's **hardware** trigger mode (`UHFSetWorkMode(2)`) outputs tags over **serial or UDP only — never over the TCP link** we read tags on (SDK `UHFSetWorkModePara` `param[5]` = serial/UDP). Both approaches are now supported:
 
-So IR triggering is done **on the bridge**, keeping the reader in normal command mode:
+### IR (HW+UDP) — hardware trigger mode
+
+Select **IR (HW+UDP)** in the dashboard (`POST /mode {"mode":"hw"}`). The bridge then:
+
+1. Sets trigger params: `UHFSetWorkModePara([GPI1, burst, minGap, UDP])`.
+2. Points the reader's UDP output at this laptop: `UHFSetDestIp(<auto-detected NIC IP on the reader's subnet>, <udpPort>)` (defaults: `192.168.99.100`, port `9090`; override with `POST /mode {"destIp":"...","udpPort":9090}`).
+3. Switches to trigger mode: `UHFSetWorkMode(2)`.
+4. Binds a plain Node UDP socket on `udpPort` and shows **every datagram raw hex** in the dashboard's *UDP Frames* panel.
+
+The UDP wire format is **not documented**, so the bridge scans each datagram for the known `UHF_GetReceived_EX` record layout (at offsets 0–8, tolerating a ≤4-byte trailer). Frames that parse also appear in the normal tag table (and forward to Supabase); frames that don't still show raw so the format can be calibrated. Check reader-side state anytime with `GET /debug/workmode` (work mode, trigger params, dest IP).
+
+Note: connecting always resets the reader to command mode; if HW mode is selected it is **re-armed automatically after connect**. Manual Start/Stop is disabled in HW mode.
+
+### IR (bridge) — software trigger, reader stays in command mode
 
 1. When idle, the bridge polls `UHFGetIOStatus` (GPI inputs) every ~300 ms.
 2. On a **GPI1 clear→broken edge** it emits `TRIGGERED!` and starts a timed `UHFInventory()` burst.
@@ -102,12 +116,13 @@ Config keys: `gpi1Byte`, `gpi2Byte`, `activeHigh`. Once confirmed, bake the valu
 | POST | `/disconnect` | — | `TCPDisconnect` |
 | POST | `/inventory/start` | — | manual continuous read |
 | POST | `/inventory/stop` | — | stop |
-| POST | `/mode` | `{ mode, irDurationMs?, irMinGapMs? }` | `mode` = `"manual"` \| `"ir"` |
-| GET | `/status` | — | `{ connected, reading, mode, gpi, ... }` |
+| POST | `/mode` | `{ mode, irDurationMs?, irMinGapMs?, udpPort?, destIp? }` | `mode` = `"manual"` \| `"ir"` \| `"hw"` |
+| GET | `/status` | — | `{ connected, reading, mode, gpi, udp, ... }` |
 | GET | `/debug/io` | — | raw GPI/IO bytes for calibration |
+| GET | `/debug/workmode` | — | reader work mode, trigger params, UDP dest IP |
 | POST | `/debug/gpi-config` | `{ gpi1Byte?, gpi2Byte?, activeHigh? }` | adjust GPI mapping live |
 
-**WebSocket** `ws://localhost:3001/ws` pushes JSON messages: `tag`, `gpi`, `trigger`, `status`, `log`.
+**WebSocket** `ws://localhost:3001/ws` pushes JSON messages: `tag`, `gpi`, `trigger`, `status`, `log`, `udp` (raw datagram + parse result in HW mode).
 
 ## Chainway CP30 printer — print + RFID encode
 
