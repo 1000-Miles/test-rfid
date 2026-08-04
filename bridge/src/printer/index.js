@@ -42,6 +42,18 @@ const DEFAULT_CONFIG = {
   topOffsetDots: 0,
   leftOffsetDots: 0,
   extraZpl: '',
+  // Closed-loop print verification (TCP transport only — USB RAW is one-way and
+  // can't hear the printer back). When on, each label is checked against the
+  // printer's ~HQES error status before it's recorded as printed.
+  verify: true,
+  // How many times the BRIDGE reprints a carton (same EPC) when the printer
+  // reports a recoverable fault (e.g. a void encode) before it gives up and
+  // halts the run. Layered on top of the printer's own internal retries.
+  reprintRetries: 1,
+  // When on, each print waits until the label has PHYSICALLY finished (the
+  // printer's receive buffer drains, via ~HS) before returning — so a caller's
+  // progress reflects labels actually out, not just accepted. TCP + verify only.
+  trackPhysical: true,
 };
 
 const CONFIG_KEYS = Object.keys(DEFAULT_CONFIG);
@@ -69,6 +81,112 @@ function sendTcp(host, port, data, timeoutMs = 5000) {
       if (!hadError) resolve();
     });
   });
+}
+
+// Send bytes over TCP and READ whatever the printer sends back (unlike sendTcp,
+// which is fire-and-forget). Used for the closed-loop verify: we push the label
+// + a ~HQES status query in one connection, then wait for the printer's status
+// reply. Resolves as soon as `until` matches (the reply arrived) or after
+// `quietMs` of silence following the last byte, whichever comes first; hard-caps
+// at `timeoutMs`. Returns '' if the printer says nothing at all (older/clone
+// firmware that ignores host queries) — callers treat '' as "no confirmation
+// available" (degraded mode), never as a failure.
+function sendTcpAndRead(host, port, data, { timeoutMs = 8000, quietMs = 1200, until = null } = {}) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host, port });
+    let out = '';
+    let quiet = null;
+    let settled = false;
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      if (quiet) clearTimeout(quiet);
+      socket.destroy();
+      if (err) reject(err);
+      else resolve(out);
+    };
+    const armQuiet = () => {
+      if (quiet) clearTimeout(quiet);
+      quiet = setTimeout(() => finish(), quietMs);
+    };
+    // Overall cap: if the printer never replies, resolve empty (not an error) so
+    // a silent printer degrades gracefully instead of blocking the run.
+    socket.setTimeout(timeoutMs, () => finish());
+    socket.on('connect', () => {
+      socket.write(data);
+      armQuiet();
+    });
+    socket.on('data', (chunk) => {
+      out += chunk.toString('latin1');
+      if (until && until.test(out)) return finish();
+      armQuiet();
+    });
+    socket.on('error', (e) => finish(e));
+    socket.on('close', () => finish());
+  });
+}
+
+// Parse a ZPL ~HQES ("Host Query — Error Status") reply into a human fault
+// reason, or null if the printer is healthy / didn't answer. ~HQES returns two
+// hex flag groups on an ERRORS line; we decode the common physical faults. NOTE:
+// exact bit positions vary a little by model — verify against the real CP30 once
+// it's on the LAN and adjust the map if needed. A blank/unrecognized reply → null
+// (no confirmation, not a failure — the degraded path).
+function parseHqesFault(text) {
+  if (!text) return null;
+  const m = /ERROR[S]?:\s*\d\s+([0-9A-Fa-f]{8})\s+([0-9A-Fa-f]{8})/.exec(text);
+  if (!m) return null;
+  const hi = parseInt(m[1], 16) || 0; // second-group flags (RFID etc. on some models)
+  const lo = parseInt(m[2], 16) || 0; // first-group flags (media/head/paused…)
+  if (!hi && !lo) return null; // no errors set → healthy
+  const reasons = [];
+  if (lo & 0x00000001) reasons.push('media/paper out');
+  if (lo & 0x00000002) reasons.push('ribbon out');
+  if (lo & 0x00000004) reasons.push('printhead open');
+  if (lo & 0x00000008) reasons.push('cutter fault');
+  if (lo & 0x00000010) reasons.push('printhead over temperature');
+  if (hi) reasons.push(`rfid/other error (0x${m[1]})`);
+  if (!reasons.length) reasons.push(`printer error (0x${m[2]})`);
+  return { reason: reasons.join(', '), hardware: /out|open|jam|cutter/i.test(reasons.join(' ')) };
+}
+
+// Parse a ~HS ("Host Status") string-1 reply. Field 5 (0-based index 4) is the
+// number of label formats still in the receive buffer — i.e. sent-but-not-yet-
+// finished-printing. 0 means the printer has drained everything we gave it.
+// Format: <STX>aaa,b,c,dddd,eee,...  → we read eee. Returns null if unparseable.
+function parseHsBuffer(text) {
+  if (!text) return null;
+  const first = text.replace(/[\x02\x03]/g, '').split(/\r?\n/)[0] || '';
+  const f = first.split(',');
+  if (f.length < 5) return null;
+  return {
+    paperOut: f[1] === '1',
+    paused: f[2] === '1',
+    formatsInBuffer: Number(f[4]) || 0, // eee — 0 = buffer drained
+  };
+}
+
+// Poll ~HS until the printer's receive buffer is empty — i.e. every label format
+// we sent has finished printing — so the caller only returns once the label is
+// PHYSICALLY out, not merely accepted. Best-effort and bounded: if the printer
+// stops answering or we hit the timeout, we stop waiting (never hang a print).
+async function waitBufferDrained(host, port, { timeoutMs = 15000, pollMs = 250 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  // Small initial delay so a just-sent format has registered in the buffer before
+  // the first read (otherwise a fast reply could read 0 prematurely).
+  await new Promise((r) => setTimeout(r, 150));
+  while (Date.now() < deadline) {
+    let reply = '';
+    try {
+      reply = await sendTcpAndRead(host, port, '~HS\r\n', { timeoutMs: 3000, quietMs: 350 });
+    } catch {
+      return; // printer stopped answering — don't block the run
+    }
+    const hs = parseHsBuffer(reply);
+    if (!hs) return; // unparseable → can't track; give up gracefully
+    if (hs.formatsInBuffer === 0 && !hs.paused) return; // drained = physically done
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
 }
 
 class PrinterManager {
@@ -159,9 +277,17 @@ class PrinterManager {
       else if (k === 'topOffsetDots' || k === 'leftOffsetDots')
         // may be negative — moves content up / left (final coord clamped in zpl.js)
         this.config[k] = Math.round(Number(partial[k]) || 0);
+      else if (k === 'verify') this.config.verify = Boolean(partial.verify);
+      else if (k === 'trackPhysical') this.config.trackPhysical = Boolean(partial.trackPhysical);
+      else if (k === 'reprintRetries')
+        this.config.reprintRetries = Math.max(0, Math.min(5, Math.round(Number(partial.reprintRetries) || 0)));
       else this.config[k] = String(partial[k]);
     }
     if (this.config.transport !== 'tcp') this.config.transport = 'usb';
+    // A config change may point us at a different/fixed printer — re-probe whether
+    // it answers status queries instead of staying latched in degraded mode.
+    this._statusMute = false;
+    this._readyCache = null;
     this._save();
     this.log(`config updated: ${JSON.stringify(this.config)}`);
     return this.config;
@@ -267,6 +393,70 @@ class PrinterManager {
     });
   }
 
+  /**
+   * Print one label over TCP and confirm the outcome with the printer before
+   * returning. The whole point of the error-management work: a spooler/socket
+   * "accept" is NOT proof the label printed or the chip encoded — so here we ask
+   * the printer (~HQES) and act on the truth.
+   *
+   *   healthy / silent  → success (silent = older firmware that ignores queries;
+   *                        we degrade to "assume printed" so a mute printer never
+   *                        blocks the line — matches the agreed fallback).
+   *   recoverable fault  → reprint the SAME EPC up to config.reprintRetries, then
+   *                        halt if it still fails (e.g. a stubborn bad tag).
+   *   hardware fault     → halt immediately (paper out / head open / jam): a
+   *                        reprint can't fix it; the operator must, then Resume.
+   *
+   * Throws on any unresolved fault so the caller never logs the carton as printed.
+   */
+  async _printAndVerify(zplText) {
+    const { host, port } = this.config;
+    const target = `${host}:${port}`;
+    const maxAttempts = 1 + (Number.isFinite(this.config.reprintRetries) ? this.config.reprintRetries : 1);
+    // Skip the status query on printers we've already learned are mute — pay the
+    // timeout once, not on every label (keeps throughput up in degraded mode).
+    let lastReason = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      // Push the label and a status query in one connection; wait for the
+      // "PRINTER STATUS" reply (or fall through on a mute printer).
+      const probe = this._statusMute ? '' : '\n~HQES\n';
+      const reply = await sendTcpAndRead(host, port, zplText + probe, {
+        timeoutMs: 12000,
+        quietMs: 1500,
+        until: /PRINTER STATUS/i,
+      }).catch((e) => {
+        // A real socket failure (printer unreachable) is a hard fault — do not
+        // pretend it printed.
+        throw new Error(`print to ${target} failed: ${e.message}`);
+      });
+
+      if (!this._statusMute && !/PRINTER STATUS/i.test(reply)) {
+        // First time we see no status reply: this printer ignores host queries.
+        // Latch degraded mode so later labels don't each wait the full timeout.
+        this._statusMute = true;
+        this.log(`verify: printer at ${target} did not answer ~HQES — degrading to no-confirm (spooler/auto-void only)`);
+      }
+
+      const fault = this._statusMute ? null : parseHqesFault(reply);
+      if (!fault) {
+        // No fault → optionally wait until the label PHYSICALLY prints (buffer
+        // drains) so the caller's progress tracks real output, not just accept.
+        if (!this._statusMute && this.config.trackPhysical) {
+          await waitBufferDrained(host, port).catch(() => {});
+        }
+        return { transport: 'tcp', target, confirmed: !this._statusMute };
+      }
+
+      lastReason = fault.reason;
+      if (fault.hardware) throw new Error(`Printer fault — ${fault.reason}`);
+      // Recoverable (e.g. RFID void): loop to reprint, unless we're out of tries.
+      this.log(
+        `verify: fault "${fault.reason}" on attempt ${attempt}/${maxAttempts} — ${attempt < maxAttempts ? 'reprinting same EPC' : 'giving up'}`,
+      );
+    }
+    throw new Error(`Encode not confirmed after ${maxAttempts} attempt(s) — ${lastReason}`);
+  }
+
   /** Send a ZPL string over the configured transport. */
   async send(zplText) {
     if (this.config.transport === 'tcp') {
@@ -278,20 +468,21 @@ class PrinterManager {
   }
 
   /** Build the label ZPL without sending (does not consume the EPC counter). */
-  preview({ epc, title, productName, itemNo, poRef, copies } = {}) {
+  preview({ epc, title, boxId, productName, itemNo, poRef, copies } = {}) {
     const hex = epc ? zpl.validateEpcHex(epc) : zpl.testEpc(this.config.epcPrefix, this.counter + 1);
-    return { epc: hex, zpl: this._buildLabel(hex, { title, productName, itemNo, poRef, copies }) };
+    return { epc: hex, zpl: this._buildLabel(hex, { title, boxId, productName, itemNo, poRef, copies }) };
   }
 
-  _buildLabel(epcHex, { title, productName, itemNo, poRef, copies, layout = {} } = {}) {
+  _buildLabel(epcHex, { title, boxId, productName, itemNo, poRef, copies, layout = {} } = {}) {
     // layout = sanitized per-print overrides; anything absent falls back to the
     // stored config, so config-only callers print exactly as before. content
-    // (productName/itemNo/poRef) selects the carton-label layout in zpl.js;
-    // title-only callers get the legacy layout.
+    // (boxId/productName/itemNo/poRef) selects the carton-label layout in
+    // zpl.js; title-only callers get the legacy layout.
     const cfg = { ...this.config, ...layout };
     return zpl.buildLabel({
       epc: epcHex,
       title,
+      boxId,
       productName,
       itemNo,
       poRef,
@@ -322,8 +513,15 @@ class PrinterManager {
       epcHex = zpl.testEpc(this.config.epcPrefix, usedCounter);
     }
     const layout = sanitizeLayout({ widthDots, heightDots, topOffsetDots, leftOffsetDots });
-    const text = this._buildLabel(epcHex, { title, productName, itemNo, poRef, copies, layout });
-    const res = await this.send(text);
+    const text = this._buildLabel(epcHex, { title, boxId, productName, itemNo, poRef, copies, layout });
+    // TCP + verify on → closed loop: print, read the printer's status back, and
+    // reprint/halt on a fault BEFORE recording anything. Any other case (USB, or
+    // verify off) keeps the original one-way behaviour. A thrown error here means
+    // nothing is logged as printed, so Nexus's Resume repaints exactly this carton.
+    const res =
+      this.config.transport === 'tcp' && this.config.verify
+        ? await this._printAndVerify(text)
+        : await this.send(text);
     if (usedCounter != null) this.counter = usedCounter;
     const at = new Date().toISOString();
     this.lastPrint = { epc: epcHex, at, transport: res.transport, target: res.target };
