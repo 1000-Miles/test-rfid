@@ -159,8 +159,13 @@ app.post('/printer/config', (req, res) => {
   }
 });
 
-// Print one label + encode its EPC. Body: { epc?, title?, copies? }.
-// Omit epc to auto-generate the next sequential test EPC.
+// Print one label + encode its EPC. Body: { epc?, title?, productName?,
+// itemNo?, poRef?, copies?, jobId?, boxId?, widthDots?, heightDots?,
+// topOffsetDots?, leftOffsetDots? }. productName/itemNo/poRef select the
+// carton-label layout (name / ITEM No. / PO Number / EPC / barcode); title
+// alone keeps the legacy layout. Layout fields override the stored config for
+// this print only (label-size profiles live in Nexus and travel with each
+// request). Omit epc to auto-generate the next sequential test EPC.
 app.post('/printer/print', async (req, res) => {
   try {
     const result = await printer.printLabel(req.body || {});

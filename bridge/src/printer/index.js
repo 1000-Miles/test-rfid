@@ -46,6 +46,20 @@ const DEFAULT_CONFIG = {
 
 const CONFIG_KEYS = Object.keys(DEFAULT_CONFIG);
 
+// Per-print layout overrides (same sanitisation as setConfig). Only fields the
+// caller actually sent override the stored config for that one label — a client
+// that sends none behaves exactly as before, so old Nexus builds are unaffected.
+function sanitizeLayout(body = {}) {
+  const out = {};
+  for (const k of ['widthDots', 'heightDots']) {
+    if (body[k] !== undefined) out[k] = body[k] == null || body[k] === '' ? null : Number(body[k]);
+  }
+  for (const k of ['topOffsetDots', 'leftOffsetDots']) {
+    if (body[k] !== undefined) out[k] = Math.round(Number(body[k]) || 0);
+  }
+  return out;
+}
+
 function sendTcp(host, port, data, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
     const socket = net.connect({ host, port }, () => socket.end(data));
@@ -158,6 +172,10 @@ class PrinterManager {
       config: this.config,
       nextEpc: zpl.testEpc(this.config.epcPrefix, this.counter + 1),
       lastPrint: this.lastPrint,
+      // Capability flag: this bridge accepts per-print layout overrides on
+      // /printer/print. Lets clients fall back to pushing /printer/config
+      // before a run when talking to an older bridge that lacks this.
+      layoutPerPrint: true,
     };
   }
 
@@ -260,29 +278,37 @@ class PrinterManager {
   }
 
   /** Build the label ZPL without sending (does not consume the EPC counter). */
-  preview({ epc, title, copies } = {}) {
+  preview({ epc, title, productName, itemNo, poRef, copies } = {}) {
     const hex = epc ? zpl.validateEpcHex(epc) : zpl.testEpc(this.config.epcPrefix, this.counter + 1);
-    return { epc: hex, zpl: this._buildLabel(hex, title, copies) };
+    return { epc: hex, zpl: this._buildLabel(hex, { title, productName, itemNo, poRef, copies }) };
   }
 
-  _buildLabel(epcHex, title, copies) {
+  _buildLabel(epcHex, { title, productName, itemNo, poRef, copies, layout = {} } = {}) {
+    // layout = sanitized per-print overrides; anything absent falls back to the
+    // stored config, so config-only callers print exactly as before. content
+    // (productName/itemNo/poRef) selects the carton-label layout in zpl.js;
+    // title-only callers get the legacy layout.
+    const cfg = { ...this.config, ...layout };
     return zpl.buildLabel({
       epc: epcHex,
       title,
+      productName,
+      itemNo,
+      poRef,
       copies,
-      barcode: this.config.barcode,
-      widthDots: this.config.widthDots,
-      heightDots: this.config.heightDots,
-      topOffsetDots: this.config.topOffsetDots,
-      leftOffsetDots: this.config.leftOffsetDots,
-      extraZpl: this.config.extraZpl,
+      barcode: cfg.barcode,
+      widthDots: cfg.widthDots,
+      heightDots: cfg.heightDots,
+      topOffsetDots: cfg.topOffsetDots,
+      leftOffsetDots: cfg.leftOffsetDots,
+      extraZpl: cfg.extraZpl,
     });
   }
 
   /** Print one label and encode its EPC. Auto-generates the next test EPC if none
    * given. `jobId`/`boxId` are metadata recorded in the durable print log so
    * Nexus can reconcile which cartons actually printed after any interruption. */
-  async printLabel({ epc, title, copies, jobId, boxId } = {}) {
+  async printLabel({ epc, title, productName, itemNo, poRef, copies, jobId, boxId, widthDots, heightDots, topOffsetDots, leftOffsetDots } = {}) {
     // Refuse before touching the counter or the durable log: a queued-but-not-
     // printed label must never be recorded as printed.
     const readiness = await this.checkReady().catch((e) => ({ ready: false, detail: e.message }));
@@ -295,7 +321,8 @@ class PrinterManager {
       usedCounter = this.counter + 1;
       epcHex = zpl.testEpc(this.config.epcPrefix, usedCounter);
     }
-    const text = this._buildLabel(epcHex, title, copies);
+    const layout = sanitizeLayout({ widthDots, heightDots, topOffsetDots, leftOffsetDots });
+    const text = this._buildLabel(epcHex, { title, productName, itemNo, poRef, copies, layout });
     const res = await this.send(text);
     if (usedCounter != null) this.counter = usedCounter;
     const at = new Date().toISOString();
@@ -317,16 +344,17 @@ class PrinterManager {
    * single chip (minimum-transponder-pitch limit). The only real fix is
    * longer-pitch RFID media.
    */
-  async printBatch({ count = 2, title } = {}) {
+  async printBatch({ count = 2, title, productName, itemNo, poRef, widthDots, heightDots, topOffsetDots, leftOffsetDots } = {}) {
     const readiness = await this.checkReady().catch((e) => ({ ready: false, detail: e.message }));
     if (!readiness.ready) throw new Error(`Printer not ready — ${readiness.detail}`);
     const n = Math.max(1, Math.min(50, Number(count) || 1));
+    const layout = sanitizeLayout({ widthDots, heightDots, topOffsetDots, leftOffsetDots });
     const epcs = [];
     const parts = [];
     for (let i = 1; i <= n; i++) {
       const epcHex = zpl.testEpc(this.config.epcPrefix, this.counter + i);
       epcs.push(epcHex);
-      parts.push(this._buildLabel(epcHex, title, 1));
+      parts.push(this._buildLabel(epcHex, { title, productName, itemNo, poRef, copies: 1, layout }));
     }
     const text = parts.join('');
     const res = await this.send(text);

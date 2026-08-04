@@ -37,18 +37,30 @@ function testEpc(prefix = 'AA00', counter = 1) {
 
 /**
  * Build a complete print+encode label format.
- * Coordinates assume 203 dpi; widthDots/heightDots are optional overrides
- * (^PW/^LL) — leave null to use the printer's calibrated label size.
+ * Coordinates are printhead dots — our CP30 is the 300 dpi model (12 dots/mm),
+ * so 60×40 mm media = 709×472 dots. widthDots/heightDots are optional overrides
+ * (^PW/^LL) — leave null to use the printer's calibrated label size (preferred:
+ * after the printer's label learning + RFID calibration, its own numbers are
+ * what keep the RFID encode on the SAME label as the print).
+ *
+ * Two content layouts:
+ *  - Semantic (any of productName / itemNo / poRef given — the carton label
+ *    design, 2026-08-04): product name, "ITEM No. …", "PO Number …", "EPC …",
+ *    barcode. Empty fields skip their line; positions stay fixed so the label
+ *    reads the same across a run.
+ *  - Legacy single `title` line + EPC + barcode (test prints, old callers).
  */
 function buildLabel(opts = {}) {
   const {
     epc,
     title = 'RFID TEST',
+    productName = null,
+    itemNo = null,
+    poRef = null,
     barcode = true,
     widthDots = null,
     heightDots = null,
-    // The CP30 starts printing ~this many dots before the label's leading edge
-    // reaches the head, so shift all fields down to compensate (203 dpi: 8 dots/mm).
+    // Shift all fields down to position content on the media (printhead dots).
     topOffsetDots = 0,
     // The label web is narrower than the 4.26" head and sits centered/right in
     // the feed path, so head-x=0 is off the label — shift all fields right.
@@ -57,9 +69,9 @@ function buildLabel(opts = {}) {
     copies = 1,
   } = opts;
   const hex = validateEpcHex(epc);
-  // Strip ZPL control prefixes (^ ~) + control chars from the human title so a
+  // Strip ZPL control prefixes (^ ~) + control chars from human text so a
   // crafted product name can't break out of ^FD…^FS and inject ZPL commands.
-  const safeTitle = String(title == null ? '' : title).replace(/[\^~\x00-\x1f]/g, ' ');
+  const clean = (s) => String(s == null ? '' : s).replace(/[\^~\x00-\x1f]/g, ' ').trim();
   const qty = Math.max(1, Math.min(50, Number(copies) || 1));
   // Offsets may be NEGATIVE to move content up / left (toward the leading / left
   // edge); the final ^FO coordinate is clamped at 0 so it never goes off-canvas.
@@ -73,9 +85,19 @@ function buildLabel(opts = {}) {
   if (heightDots) z.push(`^LL${heightDots}`);
   if (extraZpl) z.push(extraZpl);
   z.push(`^RFW,H^FD${hex}^FS`);
-  z.push(`^FO${fx(24)},${fy(24)}^A0N,32,32^FD${safeTitle}^FS`);
-  z.push(`^FO${fx(24)},${fy(68)}^A0N,28,28^FDEPC ${hex}^FS`);
-  if (barcode) z.push(`^FO${fx(24)},${fy(112)}^BY2,3,80^BCN,80,N,N,N^FD${hex}^FS`);
+  const line = (y, font, text) => z.push(`^FO${fx(24)},${fy(y)}^A0N,${font},${font}^FD${text}^FS`);
+  if (productName != null || itemNo != null || poRef != null) {
+    // Bare values, no "ITEM No."/"PO Number"/"EPC" prefixes (Brian 2026-08-04).
+    if (clean(productName)) line(24, 32, clean(productName));
+    if (clean(itemNo)) line(68, 28, clean(itemNo));
+    if (clean(poRef)) line(104, 28, clean(poRef));
+    line(140, 24, hex);
+    if (barcode) z.push(`^FO${fx(24)},${fy(172)}^BY2,3,80^BCN,80,N,N,N^FD${hex}^FS`);
+  } else {
+    line(24, 32, clean(title));
+    line(68, 28, `EPC ${hex}`);
+    if (barcode) z.push(`^FO${fx(24)},${fy(112)}^BY2,3,80^BCN,80,N,N,N^FD${hex}^FS`);
+  }
   z.push(`^PQ${qty}`);
   z.push('^XZ');
   return z.join('\n') + '\n';
