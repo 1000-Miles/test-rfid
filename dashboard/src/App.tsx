@@ -1,13 +1,15 @@
 import { useEffect, useState } from 'react';
 import { api } from './api';
 import { useBridge } from './useBridge';
-import type { GpiState, LastPrint, Mode, PrinterConfig, TagRow } from './types';
+import { useVoice } from './useVoice';
+import TvBoard from './TvBoard';
+import type { EntryRow, GpiState, LastPrint, Mode, PrinterConfig, TagRow, UdpFrameRow, UdpState } from './types';
 
 export default function App() {
   const bridge = useBridge();
   const { status } = bridge;
 
-  const [ip, setIp] = useState('192.168.99.202');
+  const [ip, setIp] = useState('192.168.254.202');
   const [port, setPort] = useState(8888);
   const [irDuration, setIrDuration] = useState(500);
   const [busy, setBusy] = useState(false);
@@ -37,11 +39,36 @@ export default function App() {
 
   const setMode = (mode: Mode) => run(() => api.setMode({ mode, irDurationMs: irDuration }));
 
+  const showUdp = status.mode === 'hw' || bridge.udpFrames.length > 0;
+
+  // --- voice announcements on warehouse check-ins ---
+  const [voiceOn, setVoiceOn] = useState(() => localStorage.getItem('voiceOn') === '1');
+  useEffect(() => {
+    localStorage.setItem('voiceOn', voiceOn ? '1' : '0');
+  }, [voiceOn]);
+  useVoice(bridge.entries, voiceOn);
+
+  // --- TV wallboard mode via #tv ---
+  const [tvMode, setTvMode] = useState(() => window.location.hash === '#tv');
+  useEffect(() => {
+    const onHash = () => setTvMode(window.location.hash === '#tv');
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  if (tvMode) return <TvBoard bridge={bridge} />;
+
   return (
     <div className="min-h-full flex flex-col">
       <TriggerFlash lastTriggerAt={bridge.lastTriggerAt} />
 
-      <Header wsConnected={bridge.wsConnected} connected={status.connected} reading={status.reading} />
+      <Header
+        wsConnected={bridge.wsConnected}
+        connected={status.connected}
+        reading={status.reading}
+        voiceOn={voiceOn}
+        onToggleVoice={() => setVoiceOn((v) => !v)}
+      />
 
       <main className="flex-1 w-full max-w-6xl mx-auto px-4 py-6 flex flex-col gap-6">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -54,6 +81,7 @@ export default function App() {
             onPort={setPort}
             onConnect={() => run(() => api.connect(ip, port))}
             onDisconnect={() => run(() => api.disconnect())}
+            powerControl={<PowerControl connected={status.connected} />}
           />
           <ModePanel
             mode={status.mode}
@@ -79,6 +107,10 @@ export default function App() {
 
         <Stats total={bridge.totalReads} unique={bridge.uniqueEpcs} rps={bridge.readsPerSec} />
 
+        <WarehousePanel entries={bridge.entries} />
+
+        {showUdp && <UdpPanel udp={status.udp} frames={bridge.udpFrames} />}
+
         <TagTable rows={bridge.rows} onClear={bridge.clear} />
       </main>
     </div>
@@ -86,7 +118,13 @@ export default function App() {
 }
 
 /* ------------------------------------------------------------------ Header */
-function Header(props: { wsConnected: boolean; connected: boolean; reading: boolean }) {
+function Header(props: {
+  wsConnected: boolean;
+  connected: boolean;
+  reading: boolean;
+  voiceOn: boolean;
+  onToggleVoice: () => void;
+}) {
   const { wsConnected, connected, reading } = props;
   return (
     <header className="border-b border-white/10 bg-[#0d1220]">
@@ -102,6 +140,24 @@ function Header(props: { wsConnected: boolean; connected: boolean; reading: bool
         <div className="flex items-center gap-4">
           <Pill ok={wsConnected} okText="Bridge online" badText="Bridge offline" />
           <Pill ok={connected} okText="Reader connected" badText="Reader disconnected" />
+          <a
+            href="#tv"
+            title="Open TV wallboard mode"
+            className="text-sm rounded-md px-3 py-1.5 border border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 font-medium"
+          >
+            📺 TV Mode
+          </a>
+          <button
+            onClick={props.onToggleVoice}
+            title={props.voiceOn ? 'Voice announcements ON — click to mute' : 'Voice announcements OFF — click to enable'}
+            className={`text-lg rounded-md px-2 py-1 border transition ${
+              props.voiceOn
+                ? 'bg-indigo-600/30 border-indigo-500/50'
+                : 'bg-black/30 border-white/10 opacity-60 hover:opacity-100'
+            }`}
+          >
+            {props.voiceOn ? '🔊' : '🔇'}
+          </button>
         </div>
       </div>
     </header>
@@ -138,6 +194,7 @@ function ConnectPanel(props: {
   onPort: (v: number) => void;
   onConnect: () => void;
   onDisconnect: () => void;
+  powerControl?: React.ReactNode;
 }) {
   return (
     <Card title="Connection">
@@ -178,8 +235,69 @@ function ConnectPanel(props: {
             Disconnect
           </button>
         )}
+        {props.powerControl}
       </div>
     </Card>
+  );
+}
+
+function PowerControl(props: { connected: boolean }) {
+  const [current, setCurrent] = useState<number | null>(null);
+  const [value, setValue] = useState(20);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!props.connected) {
+      setCurrent(null);
+      return;
+    }
+    api
+      .getPower()
+      .then((r) => {
+        if (r.dBm != null) {
+          setCurrent(r.dBm);
+          setValue(r.dBm);
+        }
+      })
+      .catch(() => {});
+  }, [props.connected]);
+
+  const apply = async () => {
+    setBusy(true);
+    try {
+      const r = await api.setPower(value);
+      if (r.dBm != null) setCurrent(r.dBm);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <label className="text-sm">
+      <span className="text-slate-400">
+        Read power (dBm){current != null ? <span className="text-emerald-400"> — current {current}</span> : ''}
+      </span>
+      <div className="flex gap-2 mt-1 items-center">
+        <input
+          type="range"
+          min={1}
+          max={30}
+          value={value}
+          disabled={!props.connected || busy}
+          onChange={(e) => setValue(Number(e.target.value))}
+          className="flex-1 accent-emerald-500 disabled:opacity-40"
+        />
+        <span className="w-8 text-right font-mono text-sm tabular-nums">{value}</span>
+        <button
+          onClick={apply}
+          disabled={!props.connected || busy || value === current}
+          className="rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-3 py-1.5 text-sm"
+        >
+          Set
+        </button>
+      </div>
+      <p className="text-xs text-slate-500 mt-1">Low = short range (fewer stray reads) · 30 = max. Persists on the reader.</p>
+    </label>
   );
 }
 
@@ -198,7 +316,10 @@ function ModePanel(props: {
           Manual
         </ModeButton>
         <ModeButton active={props.mode === 'ir'} onClick={() => props.onSetMode('ir')} disabled={props.busy}>
-          IR-triggered
+          IR (bridge)
+        </ModeButton>
+        <ModeButton active={props.mode === 'hw'} onClick={() => props.onSetMode('hw')} disabled={props.busy}>
+          IR (HW+UDP)
         </ModeButton>
       </div>
       <label className="text-sm block">
@@ -223,10 +344,83 @@ function ModePanel(props: {
       </label>
       <p className="text-xs text-slate-500 mt-3">
         {props.mode === 'ir'
-          ? 'Reader auto-reads when the GPI1 beam breaks, for the burst duration above.'
-          : 'You control reading with the Start / Stop buttons below.'}
+          ? 'Bridge watches GPI1 over TCP and starts a read burst when the beam breaks.'
+          : props.mode === 'hw'
+            ? 'Reader firmware triggers on GPI1 and pushes tag data to the bridge over UDP (work mode 2).'
+            : 'You control reading with the Start / Stop buttons below.'}
       </p>
+      <TimingControl />
     </Card>
+  );
+}
+
+function TimingControl() {
+  const [dedupMs, setDedupMs] = useState(5000);
+  const [quietMs, setQuietMs] = useState(700);
+  const [maxWindowMs, setMaxWindowMs] = useState(4000);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    api
+      .nexusSummary()
+      .then((s) => {
+        if (Number.isFinite(s.dedupMs)) setDedupMs(s.dedupMs);
+        if (Number.isFinite(s.quietMs)) setQuietMs(s.quietMs);
+        if (Number.isFinite(s.maxWindowMs)) setMaxWindowMs(s.maxWindowMs);
+      })
+      .catch(() => {});
+  }, []);
+
+  const apply = async () => {
+    setBusy(true);
+    setSaved(false);
+    try {
+      await api.setNexusConfig({ dedupMs, quietMs, maxWindowMs });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const Field = (p: { label: string; value: number; step: number; min: number; onChange: (v: number) => void; hint: string }) => (
+    <label className="text-xs block">
+      <span className="text-slate-400">{p.label}</span>
+      <input
+        type="number"
+        value={p.value}
+        min={p.min}
+        step={p.step}
+        onChange={(e) => p.onChange(Number(e.target.value))}
+        title={p.hint}
+        className="mt-0.5 w-full rounded-md bg-black/40 border border-white/10 px-2 py-1.5 font-mono text-sm"
+      />
+    </label>
+  );
+
+  return (
+    <div className="mt-4 pt-3 border-t border-white/10">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs uppercase tracking-wider text-slate-400">Portal timing (ms)</span>
+        {saved && <span className="text-xs text-emerald-400">saved ✓</span>}
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <Field label="Dedup" value={dedupMs} min={0} step={500} onChange={setDedupMs} hint="Ignore the same tag for this long after a movement event" />
+        <Field label="Quiet" value={quietMs} min={100} step={100} onChange={setQuietMs} hint="Decide direction after this much read-silence" />
+        <Field label="Max window" value={maxWindowMs} min={500} step={500} onChange={setMaxWindowMs} hint="Hard cap on one decision window" />
+      </div>
+      <button
+        onClick={apply}
+        disabled={busy}
+        className="mt-2 w-full rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-3 py-1.5 text-sm"
+      >
+        Apply timing
+      </button>
+      <p className="text-[11px] text-slate-500 mt-1.5">
+        Dedup: same tag ignored after an event · Quiet: silence before direction decision · Max window: cap per passage.
+      </p>
+    </div>
   );
 }
 
@@ -281,7 +475,15 @@ function ReadControls(props: {
   onStart: () => void;
   onStop: () => void;
 }) {
-  const disabled = !props.connected || props.busy;
+  const disabled = !props.connected || props.busy || props.mode === 'hw';
+  if (props.mode === 'hw') {
+    return (
+      <div className="rounded-xl border border-white/10 bg-[#111827] px-4 py-4 text-sm text-slate-400 text-center">
+        HW trigger mode — the reader starts reading by itself when the IR beam breaks. Manual Start / Stop is
+        disabled; watch the UDP panel below.
+      </div>
+    );
+  }
   return (
     <div className="flex items-center gap-4">
       <button
@@ -601,6 +803,134 @@ function Stat(props: { label: string; value: string }) {
       <div className="text-3xl font-bold tabular-nums">{props.value}</div>
       <div className="text-xs uppercase tracking-wider text-slate-400 mt-1">{props.label}</div>
     </div>
+  );
+}
+
+/* ------------------------------------------------- Warehouse check-ins */
+function WarehousePanel(props: { entries: EntryRow[] }) {
+  const { entries } = props;
+  // latest movement per EPC decides who's inside
+  const latestByEpc = new Map<string, EntryRow>();
+  for (const e of entries) if (!latestByEpc.has(e.epc)) latestByEpc.set(e.epc, e);
+  const insideCount = [...latestByEpc.values()].filter((e) => e.kind === 'entry').length;
+  return (
+    <section className="rounded-xl border border-indigo-500/30 bg-[#111827] overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 bg-indigo-500/10">
+        <h2 className="text-sm font-medium text-indigo-200">
+          🏭 Warehouse Movements <span className="text-slate-500">(Mock Nexus · out {'{1,3}'}→in {'{2,4}'} = IN, reverse = OUT)</span>
+        </h2>
+        <div className="text-sm text-indigo-300 font-semibold tabular-nums">{insideCount} inside</div>
+      </div>
+      <div className="overflow-x-auto max-h-[40vh] overflow-y-auto">
+        <table className="w-full text-sm">
+          <thead className="sticky top-0 bg-[#0d1220] text-slate-400">
+            <tr>
+              <th className="text-left font-medium px-4 py-2 w-32">Time</th>
+              <th className="text-left font-medium px-4 py-2 w-28">SKU</th>
+              <th className="text-left font-medium px-4 py-2">Item</th>
+              <th className="text-left font-medium px-4 py-2 w-28">Pallet</th>
+              <th className="text-left font-medium px-4 py-2 w-56">EPC</th>
+              <th className="text-left font-medium px-4 py-2 w-24">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {entries.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
+                  No check-ins yet — pass a tagged box through the IR beam.
+                </td>
+              </tr>
+            ) : (
+              entries.map((e) => (
+                <tr key={e.id} className="border-t border-white/5 hover:bg-white/5">
+                  <td className="px-4 py-1.5 font-mono text-xs text-slate-400">
+                    {new Date(e.timestamp).toLocaleTimeString(undefined, { hour12: false })}
+                  </td>
+                  <td className={`px-4 py-1.5 font-mono text-xs ${e.known ? 'text-indigo-300' : 'text-amber-400'}`}>
+                    {e.item.sku}
+                  </td>
+                  <td className={`px-4 py-1.5 ${e.known ? '' : 'text-amber-400 italic'}`}>{e.item.name}</td>
+                  <td className="px-4 py-1.5 text-slate-400">{e.item.pallet ?? '—'}</td>
+                  <td className="px-4 py-1.5 font-mono text-xs text-slate-500">{e.epc}</td>
+                  <td className="px-4 py-1.5">
+                    {e.kind === 'entry' ? (
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                        IN{e.method === 'toggle' ? '*' : ''}
+                      </span>
+                    ) : (
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30">
+                        OUT{e.method === 'toggle' ? '*' : ''}
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+/* --------------------------------------------------------------- UDP feed */
+function UdpPanel(props: { udp?: UdpState; frames: UdpFrameRow[] }) {
+  const { udp, frames } = props;
+  return (
+    <section className="rounded-xl border border-white/10 bg-[#111827] overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
+        <h2 className="text-sm font-medium text-slate-300">
+          UDP Frames from Reader <span className="text-slate-500">(HW trigger output, last 50)</span>
+        </h2>
+        <div className="text-xs font-mono text-slate-400">
+          {udp?.listening ? (
+            <>
+              listening :{udp.port} · dest {udp.destIp ?? '?'} · {udp.frames} frames
+            </>
+          ) : (
+            'listener off'
+          )}
+        </div>
+      </div>
+      <div className="overflow-x-auto max-h-[40vh] overflow-y-auto">
+        <table className="w-full text-sm">
+          <thead className="sticky top-0 bg-[#0d1220] text-slate-400">
+            <tr>
+              <th className="text-left font-medium px-4 py-2 w-40">Time</th>
+              <th className="text-left font-medium px-4 py-2 w-40">From</th>
+              <th className="text-right font-medium px-4 py-2 w-16">Len</th>
+              <th className="text-left font-medium px-4 py-2 w-56">Parsed EPC</th>
+              <th className="text-left font-medium px-4 py-2">Raw (hex)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {frames.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
+                  No UDP datagrams yet — break the IR beam. If nothing arrives, check reader work mode and dest
+                  IP via <span className="font-mono">GET /debug/workmode</span>.
+                </td>
+              </tr>
+            ) : (
+              frames.map((f) => (
+                <tr key={f.id} className="border-t border-white/5 hover:bg-white/5">
+                  <td className="px-4 py-1.5 font-mono text-xs text-slate-400">
+                    {new Date(f.timestamp).toLocaleTimeString(undefined, { hour12: false })}
+                    .{String(new Date(f.timestamp).getMilliseconds()).padStart(3, '0')}
+                  </td>
+                  <td className="px-4 py-1.5 font-mono text-xs text-slate-400">{f.from}</td>
+                  <td className="px-4 py-1.5 text-right tabular-nums">{f.len}</td>
+                  <td className={`px-4 py-1.5 font-mono text-xs ${f.parsed ? 'text-emerald-300' : 'text-slate-600'}`}>
+                    {f.epc ?? 'unparsed'}
+                  </td>
+                  <td className="px-4 py-1.5 font-mono text-xs text-amber-200/80 break-all">{f.raw}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 
