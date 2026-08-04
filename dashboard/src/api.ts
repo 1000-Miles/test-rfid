@@ -49,4 +49,7 @@ export const api = {
     return res.json();
   },
   setNexusConfig: (cfg: { dedupMs?: number; quietMs?: number; maxWindowMs?: number }) => post('/nexus/config', cfg),
+  /** Simulate a full IR passage — emits the same trigger + direction-stamped reads a real one does. */
+  mockPassage: (body: { epc?: string; direction?: 'in' | 'out' }) =>
+    post<{ ok: boolean; epc: string; direction: string }>('/debug/mock-passage', body),
 };

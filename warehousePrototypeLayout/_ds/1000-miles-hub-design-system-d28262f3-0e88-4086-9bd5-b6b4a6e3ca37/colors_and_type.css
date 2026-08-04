@@ -1,0 +1,201 @@
+/* ══════════════════════════════════════════════════════════════════
+   1000 MILES HUB — COLORS & TYPE TOKENS
+   Source of truth for all Hub-aligned mocks, prototypes, and assets.
+   Primary font: Montserrat (all UI, documents, SVG diagrams).
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ── Montserrat — self-hosted TTFs from fonts/ ────────────────────
+   Paths are RELATIVE to this CSS file. This file lives at the project root
+   and is also copied into ui_kits/hub/; both resolve `fonts/...` correctly
+   because fonts/ exists at the project root AND fonts are copied into
+   ui_kits/hub/fonts/ (see copy_files in the kit). */
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-Thin.ttf') format('truetype');            font-weight: 100; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-ThinItalic.ttf') format('truetype');      font-weight: 100; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-ExtraLight.ttf') format('truetype');      font-weight: 200; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-ExtraLightItalic.ttf') format('truetype');font-weight: 200; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-Light.ttf') format('truetype');           font-weight: 300; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-LightItalic.ttf') format('truetype');     font-weight: 300; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-Regular.ttf') format('truetype');         font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-Italic.ttf') format('truetype');          font-weight: 400; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-Medium.ttf') format('truetype');          font-weight: 500; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-MediumItalic.ttf') format('truetype');    font-weight: 500; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-SemiBold.ttf') format('truetype');        font-weight: 600; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-SemiBoldItalic.ttf') format('truetype');  font-weight: 600; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-Bold.ttf') format('truetype');            font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-BoldItalic.ttf') format('truetype');      font-weight: 700; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-ExtraBold.ttf') format('truetype');       font-weight: 800; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-ExtraBoldItalic.ttf') format('truetype'); font-weight: 800; font-style: italic; font-display: swap; }
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-Black.ttf') format('truetype');           font-weight: 900; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Montserrat'; src: url('fonts/Montserrat-BlackItalic.ttf') format('truetype');     font-weight: 900; font-style: italic; font-display: swap; }
+
+/* JetBrains Mono retained via CDN (no TTFs supplied) — used only for
+   mono meta columns and hex-value labels. Swap to self-hosted anytime. */
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  /* ── Core neutral palette ─────────────────────────── */
+  --color-white:      #ffffff;
+  --color-bg:         #ffffff;      /* page background in most views */
+  --color-surface:    #fafafa;      /* cards-on-white, table header bg */
+  --color-secondary:  #f5f5f5;      /* secondary buttons, chips */
+  --color-border:     #e5e5e5;      /* 1px dividers, card outlines */
+  --color-foreground: #0a0a0a;      /* primary text */
+  --color-muted:      #737373;      /* secondary text, labels */
+
+  /* ── Brand colors ─────────────────────────────────── */
+  --color-primary:     #00BCD4;     /* 1000 Miles teal — CTA, links */
+  --color-primary-dk:  #008A9C;     /* active/pressed teal, "on info-bg" text */
+  --color-violet:      #7C3AED;     /* secondary brand, accents */
+  --color-violet-dk:   #5B21B6;
+  --color-yellow:      #FFD60A;     /* highlight / accent CTA */
+  --color-destructive: #df2225;
+  --color-success:     #16a34a;
+  --color-warning:     #d97706;
+
+  /* ── Semantic tinted backgrounds ──────────────────── */
+  --color-success-bg:  #f0fdf4;
+  --color-warning-bg:  #fffbeb;
+  --color-error-bg:    #fef2f2;
+  --color-info-bg:     #e0f7fa;     /* the "active nav" background */
+
+  /* ── Semantic mappings (shortcuts for designers) ──── */
+  --fg1: var(--color-foreground);   /* primary text */
+  --fg2: var(--color-muted);        /* secondary text */
+  --fg3: #a3a3a3;                   /* tertiary / placeholders */
+  --bg1: var(--color-bg);
+  --bg2: var(--color-surface);
+  --bg3: var(--color-secondary);
+  --border: var(--color-border);
+  --link: var(--color-primary);
+
+  /* ── Typography ───────────────────────────────────── */
+  --font-family:      'Montserrat', ui-sans-serif, system-ui, sans-serif;
+  --font-mono:        'JetBrains Mono', 'Courier New', ui-monospace, monospace;
+  --font-display:     var(--font-family);  /* same family, heavier weights */
+
+  /* Type scale tokens — matches ds-foundations.html.
+     Font-sizes classify by value; line-heights (--lh-*), letter-spacing
+     (--ls-*) and weights (--fw-*) are typographic → tagged @kind font. */
+  --fs-d2xl: 36px;
+  --fs-dxl:  30px;
+  --fs-dlg:  24px;
+  --fs-dmd:  20px;
+  --fs-dsm:  16px;
+  --fs-dxs:  14px;
+  --fs-bxl:  18px;
+  --fs-blg:  16px;
+  --fs-bmd:  14px;
+  --fs-bsm:  13px;
+  --fs-bxs:  12px;
+
+  --lh-d2xl: 1.15; /* @kind font */
+  --lh-dxl:  1.2;  /* @kind font */
+  --lh-dlg:  1.25; /* @kind font */
+  --lh-dmd:  1.3;  /* @kind font */
+  --lh-dsm:  1.4;  /* @kind font */
+  --lh-dxs:  1.4;  /* @kind font */
+  --lh-bxl:  1.6;  /* @kind font */
+  --lh-blg:  1.6;  /* @kind font */
+  --lh-bmd:  1.5;  /* @kind font */
+  --lh-bsm:  1.5;  /* @kind font */
+  --lh-bxs:  1.5;  /* @kind font */
+
+  --ls-d2xl: -1px;  /* @kind font */
+  --ls-dxl:  -.5px; /* @kind font */
+
+  /* Weights */
+  --fw-regular:  400; /* @kind font */
+  --fw-medium:   500; /* @kind font */
+  --fw-semibold: 600; /* @kind font */
+  --fw-bold:     700; /* @kind font */
+
+  /* ── Radius ───────────────────────────────────────── */
+  --radius-xs:   4px;
+  --radius-sm:   8px;
+  --radius-md:  10px;
+  --radius-lg:  14px;
+  --radius-xl:  20px;
+  --radius-pill: 26px;
+
+  /* ── Spacing (4px base) ───────────────────────────── */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  /* ── Shadows ──────────────────────────────────────── */
+  --shadow-xs: 0 1px 2px rgba(16,24,40,.05);
+  --shadow-sm: 0 1px 3px rgba(16,24,40,.10), 0 1px 2px rgba(16,24,40,.06);
+  --shadow-md: 0 4px 8px -2px rgba(16,24,40,.10), 0 2px 4px -2px rgba(16,24,40,.06);
+  --shadow-lg: 0 12px 16px -4px rgba(16,24,40,.08), 0 4px 6px -2px rgba(16,24,40,.03);
+
+  /* ring outline style used for focus rings */
+  --ring-primary: 0 0 0 3px rgba(0,188,212,.12);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   BASE
+   ══════════════════════════════════════════════════════════════════ */
+html { font-family: var(--font-family); color: var(--fg1); }
+body { font-family: var(--font-family); font-weight: var(--fw-regular); color: var(--fg1); background: var(--bg1); }
+
+*, *::before, *::after { box-sizing: border-box; }
+
+/* ══════════════════════════════════════════════════════════════════
+   SEMANTIC TYPE CLASSES
+   These match the Hub's ds-foundations type scale exactly.
+   ══════════════════════════════════════════════════════════════════ */
+
+/* Display / Heading */
+h1, .h1, .t-d2xl { font-size: var(--fs-d2xl); line-height: var(--lh-d2xl); letter-spacing: var(--ls-d2xl); font-weight: var(--fw-bold); color: var(--fg1); }
+h2, .h2, .t-dxl  { font-size: var(--fs-dxl);  line-height: var(--lh-dxl);  letter-spacing: var(--ls-dxl);  font-weight: var(--fw-bold); color: var(--fg1); }
+h3, .h3, .t-dlg  { font-size: var(--fs-dlg);  line-height: var(--lh-dlg);  font-weight: var(--fw-bold);     color: var(--fg1); }
+h4, .h4, .t-dmd  { font-size: var(--fs-dmd);  line-height: var(--lh-dmd);  font-weight: var(--fw-semibold); color: var(--fg1); }
+h5, .h5, .t-dsm  { font-size: var(--fs-dsm);  line-height: var(--lh-dsm);  font-weight: var(--fw-semibold); color: var(--fg1); }
+h6, .h6, .t-dxs  { font-size: var(--fs-dxs);  line-height: var(--lh-dxs);  font-weight: var(--fw-semibold); color: var(--fg1); }
+
+/* Body */
+.t-bxl, .body-xl { font-size: var(--fs-bxl); line-height: var(--lh-bxl); font-weight: var(--fw-regular); color: var(--fg2); }
+.t-blg, .body-lg { font-size: var(--fs-blg); line-height: var(--lh-blg); font-weight: var(--fw-regular); color: var(--fg2); }
+p, .t-bmd, .body { font-size: var(--fs-bmd); line-height: var(--lh-bmd); font-weight: var(--fw-regular); color: var(--fg2); }
+.t-bsm, .caption { font-size: var(--fs-bsm); line-height: var(--lh-bsm); font-weight: var(--fw-regular); color: var(--fg2); }
+.t-bxs, .micro   { font-size: var(--fs-bxs); line-height: var(--lh-bxs); font-weight: var(--fw-regular); color: var(--fg2); }
+
+/* Section eyebrow — uppercase micro label used in tables, forms, section headers */
+.eyebrow, .overline {
+  font-size: 11px;
+  font-weight: var(--fw-bold);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--fg2);
+}
+
+/* Mono / code */
+code, pre, kbd, .t-mono { font-family: var(--font-mono); font-size: 12px; }
+
+/* Links */
+a { color: var(--link); text-decoration: none; }
+a:hover { color: var(--color-primary-dk); }
+
+/* Numbers — tabular align in tables */
+.t-num { font-variant-numeric: tabular-nums; }
+
+/* ══════════════════════════════════════════════════════════════════
+   QUICK-ACCESS UTILITY CLASSES (optional)
+   ══════════════════════════════════════════════════════════════════ */
+.text-fg1 { color: var(--fg1); }
+.text-fg2 { color: var(--fg2); }
+.text-primary { color: var(--color-primary); }
+.text-primary-dk { color: var(--color-primary-dk); }
+.text-success { color: var(--color-success); }
+.text-warning { color: var(--color-warning); }
+.text-destructive { color: var(--color-destructive); }
+
+.bg-surface { background: var(--bg2); }
+.bg-info { background: var(--color-info-bg); }
+.bg-success { background: var(--color-success-bg); }
+.bg-warning { background: var(--color-warning-bg); }
+.bg-error { background: var(--color-error-bg); }

@@ -1,5 +1,37 @@
 @import 'tailwindcss';
 
+/* Montserrat — 1000 Miles Hub design system, self-hosted from public/fonts. */
+@font-face {
+  font-family: 'Montserrat';
+  src: url('/fonts/Montserrat-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Montserrat';
+  src: url('/fonts/Montserrat-Medium.ttf') format('truetype');
+  font-weight: 500;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Montserrat';
+  src: url('/fonts/Montserrat-SemiBold.ttf') format('truetype');
+  font-weight: 600;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Montserrat';
+  src: url('/fonts/Montserrat-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Montserrat';
+  src: url('/fonts/Montserrat-ExtraBold.ttf') format('truetype');
+  font-weight: 800;
+  font-display: swap;
+}
+
 html,
 body,
 #root {
@@ -11,6 +43,60 @@ body {
   background: #0b0f17;
   color: #e5e7eb;
   font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* --------------- Gate board (portrait kiosk, 1080 × 1920) ---------------
+   --u is one design pixel. At 1080 × 1920 it resolves to exactly 1px, so the
+   board is pixel-identical to the prototype; on any other viewport every
+   dimension scales together and the list regions take up the slack. The 1.4px
+   ceiling keeps type sane on very large displays. */
+.gate {
+  --u: min(0.0926vw, 0.0521vh, 1.4px);
+  font-family: 'Montserrat', ui-sans-serif, system-ui, sans-serif;
+}
+.gate ::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+@keyframes gate-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.7);
+  }
+}
+.gate-dot {
+  animation: gate-dot 0.7s linear infinite;
+}
+@keyframes gate-flash {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+.gate-flash {
+  animation: gate-flash 0.4s linear infinite;
+}
+@keyframes gate-toast {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.gate-toast {
+  animation: gate-toast 0.18s ease;
 }
 
 /* ---------------- TV wallboard (industrial depot signage) ---------------- */

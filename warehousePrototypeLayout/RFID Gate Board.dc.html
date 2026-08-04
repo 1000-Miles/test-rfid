@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="_ds/1000-miles-hub-design-system-d28262f3-0e88-4086-9bd5-b6b4a6e3ca37/colors_and_type.css">
+<link rel="stylesheet" href="_ds/1000-miles-hub-design-system-d28262f3-0e88-4086-9bd5-b6b4a6e3ca37/styles.css">
+<script src="_ds/1000-miles-hub-design-system-d28262f3-0e88-4086-9bd5-b6b4a6e3ca37/_ds_bundle.js"></script>
+<script src="./image-slot.js"></script>
+<style>
+  html, body { margin:0; padding:0; background:#ffffff; }
+  a { color:#008A9C; text-decoration:none; }
+  a:hover { color:#00BCD4; }
+  @keyframes gflash { 0%,100% { opacity:1 } 50% { opacity:0.25 } }
+  @keyframes gdot { 0%,100% { opacity:1; transform:scale(1) } 50% { opacity:0.35; transform:scale(0.7) } }
+  @keyframes gtoast { from { opacity:0; transform:translateY(24px) } to { opacity:1; transform:translateY(0) } }
+  ::-webkit-scrollbar { width:0; height:0; }
+</style>
+</helmet>
+
+<div style="width:1080px;height:1920px;position:relative;overflow:hidden;background:#ffffff;color:#0a0a0a;font-family:'Montserrat', ui-sans-serif, system-ui, sans-serif;display:flex;flex-direction:column;user-select:none;-webkit-tap-highlight-color:transparent">
+
+  <div style="flex:0 0 112px;display:flex;align-items:center;gap:22px;padding:0 32px;background:#ffffff;border-bottom:1px solid #e5e5e5;position:relative;z-index:20">
+    <div style="width:62px;height:62px;border-radius:14px;background:#00BCD4;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:800;color:#ffffff;letter-spacing:-0.4px">1000M</div>
+    <div style="display:flex;flex-direction:column;gap:5px">
+      <div style="font-size:25px;font-weight:700;letter-spacing:0.01em">RFID GATE 01</div>
+      <div style="font-size:15px;font-weight:600;letter-spacing:0.14em;color:#737373">WAREHOUSE A · DOCK 3</div>
+    </div>
+    <div style="flex:1"></div>
+    <sc-if value="{{ scanning }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;gap:12px;padding:12px 22px;border-radius:26px;background:#e0f7fa;border:1px solid #7fd9e4">
+        <div style="width:14px;height:14px;border-radius:50%;background:#00BCD4;animation:gdot 0.7s linear infinite"></div>
+        <div style="font-size:17px;font-weight:700;letter-spacing:0.12em;color:#008A9C">READING</div>
+      </div>
+    </sc-if>
+    <sc-if value="{{ hasExceptions }}" hint-placeholder-val="{{ false }}">
+      <div onClick="{{ openExc }}" style="display:flex;align-items:center;gap:12px;padding:12px 24px;border-radius:26px;background:#fef2f2;border:1px solid #f0a1a2;cursor:pointer">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#df2225" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>
+        <div style="font-size:26px;font-weight:800;color:#df2225;line-height:1">{{ excCount }}</div>
+        <div style="font-size:15px;font-weight:700;letter-spacing:0.1em;color:#b41c1e">EXCEPTIONS</div>
+      </div>
+    </sc-if>
+    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+      <div style="font-size:34px;font-weight:700;letter-spacing:-0.5px;font-variant-numeric:tabular-nums;line-height:1">{{ clock }}</div>
+      <div style="font-size:16px;font-weight:600;letter-spacing:0.08em;color:#737373">{{ dateLabel }}</div>
+    </div>
+    <div onClick="{{ toggleDemo }}" style="width:62px;height:62px;border-radius:14px;background:#f5f5f5;border:1px solid #e5e5e5;display:flex;align-items:center;justify-content:center;color:#737373;cursor:pointer">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.6.66 1.03 1.28 1.05H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"></path></svg>
+    </div>
+  </div>
+
+  <div style="flex:1;min-height:0;position:relative">
+
+    <sc-if value="{{ isIdle }}" hint-placeholder-val="{{ true }}">
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column;gap:22px;padding:26px 32px">
+
+        <div style="flex:1;min-height:0;background:#ffffff;border-radius:20px;box-shadow:0 0 0 1px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.04);padding:26px 28px;display:flex;flex-direction:column;gap:20px">
+          <div style="display:flex;align-items:center;gap:28px">
+            <div style="position:relative;width:172px;height:172px;flex:0 0 172px">
+              <svg width="172" height="172" viewBox="0 0 172 172" style="transform:rotate(-90deg);display:block">
+                <circle cx="86" cy="86" r="74" fill="none" stroke="#eef0f2" stroke-width="16"></circle>
+                <circle cx="86" cy="86" r="74" fill="none" stroke="#00BCD4" stroke-width="16" stroke-linecap="{{ inCap }}" stroke-dasharray="{{ inDash }}" style="transition:stroke-dasharray .3s ease"></circle>
+              </svg>
+              <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px">
+                <div style="font-size:42px;font-weight:800;letter-spacing:-1.5px;color:#008A9C">{{ inPctLabel }}</div>
+                <div style="font-size:14px;font-weight:700;letter-spacing:0.12em;color:#a3a3a3">RECEIVED</div>
+              </div>
+            </div>
+            <div style="flex:1;display:flex;flex-direction:column;gap:10px">
+              <div style="font-size:15px;font-weight:800;letter-spacing:0.18em;color:#008A9C">INBOUND · RECEIVING</div>
+              <div style="display:flex;align-items:baseline;gap:12px">
+                <div style="font-size:86px;font-weight:800;line-height:0.85;letter-spacing:-3px;font-variant-numeric:tabular-nums">{{ inReceived }}</div>
+                <div style="font-size:38px;font-weight:700;color:#a3a3a3;font-variant-numeric:tabular-nums">/ {{ inExpected }}</div>
+                <div style="font-size:16px;font-weight:700;letter-spacing:0.14em;color:#a3a3a3;padding-bottom:6px">CARTONS</div>
+              </div>
+              <div style="font-size:19px;font-weight:600;color:#737373">{{ inDocLabel }}</div>
+            </div>
+          </div>
+          <div style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:12px">
+            <sc-for list="{{ inRows }}" as="r" hint-placeholder-count="3">
+              <div onClick="{{ r.open }}" style="flex:0 0 auto;display:flex;align-items:center;gap:18px;padding:14px 20px;border-radius:14px;background:#ffffff;border:1px solid #e5e5e5">
+                <div style="flex:0 0 46px;width:46px;height:46px;border-radius:12px;background:#e0f7fa;color:#008A9C;display:flex;align-items:center;justify-content:center">
+                  <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><path d="m3.3 7 8.7 5 8.7-5"></path><path d="M12 22V12"></path></svg>
+                </div>
+                <div style="flex:1;display:flex;flex-direction:column;gap:6px;min-width:0">
+                  <div style="display:flex;align-items:center;gap:12px">
+                    <div style="font-size:24px;font-weight:700;letter-spacing:0.01em">{{ r.id }}</div>
+                    <div style="padding:4px 12px;border-radius:26px;font-size:14px;font-weight:800;letter-spacing:0.08em;background:{{ r.chipBg }};color:{{ r.chipFg }}">{{ r.status }}</div>
+                    <div style="padding:4px 12px;border-radius:26px;font-size:14px;font-weight:800;letter-spacing:0.08em;background:{{ r.dueBg }};color:{{ r.dueFg }};border:1px solid {{ r.dueEdge }}">{{ r.dueLabel }}</div>
+                  </div>
+                  <div style="font-size:15px;font-weight:500;color:#737373;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ r.sub }}</div>
+                  <div style="height:10px;border-radius:8px;background:#eef0f2;overflow:hidden;margin-top:2px">
+                    <div style="height:100%;border-radius:8px;width:{{ r.pct }};background:{{ r.bar }};transition:width .3s ease"></div>
+                  </div>
+                </div>
+                <div style="font-size:38px;font-weight:800;letter-spacing:-1px;font-variant-numeric:tabular-nums;color:{{ r.color }};min-width:170px;text-align:right">{{ r.label }}</div>
+              </div>
+            </sc-for>
+          </div>
+          
+        </div>
+
+        <div style="flex:1;min-height:0;background:#ffffff;border-radius:20px;box-shadow:0 0 0 1px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.04);padding:26px 28px;display:flex;flex-direction:column;gap:20px">
+          <div style="display:flex;align-items:center;gap:28px">
+            <div style="position:relative;width:172px;height:172px;flex:0 0 172px">
+              <svg width="172" height="172" viewBox="0 0 172 172" style="transform:rotate(-90deg);display:block">
+                <circle cx="86" cy="86" r="74" fill="none" stroke="#eef0f2" stroke-width="16"></circle>
+                <circle cx="86" cy="86" r="74" fill="none" stroke="#FF8A00" stroke-width="16" stroke-linecap="{{ outCap }}" stroke-dasharray="{{ outDash }}" style="transition:stroke-dasharray .3s ease"></circle>
+              </svg>
+              <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px">
+                <div style="font-size:42px;font-weight:800;letter-spacing:-1.5px;color:#C25E00">{{ outPctLabel }}</div>
+                <div style="font-size:14px;font-weight:700;letter-spacing:0.12em;color:#a3a3a3">LOADED</div>
+              </div>
+            </div>
+            <div style="flex:1;display:flex;flex-direction:column;gap:10px">
+              <div style="font-size:15px;font-weight:800;letter-spacing:0.18em;color:#C25E00">OUTBOUND · SHIPPING</div>
+              <div style="display:flex;align-items:baseline;gap:12px">
+                <div style="font-size:86px;font-weight:800;line-height:0.85;letter-spacing:-3px;font-variant-numeric:tabular-nums">{{ outReceived }}</div>
+                <div style="font-size:38px;font-weight:700;color:#a3a3a3;font-variant-numeric:tabular-nums">/ {{ outExpected }}</div>
+                <div style="font-size:16px;font-weight:700;letter-spacing:0.14em;color:#a3a3a3;padding-bottom:6px">CARTONS</div>
+              </div>
+              <div style="font-size:19px;font-weight:600;color:#737373">{{ outDocLabel }}</div>
+            </div>
+          </div>
+          <div style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:12px">
+            <sc-for list="{{ outRows }}" as="r" hint-placeholder-count="3">
+              <div onClick="{{ r.open }}" style="flex:0 0 auto;display:flex;align-items:center;gap:18px;padding:14px 20px;border-radius:14px;background:#ffffff;border:1px solid #e5e5e5">
+                <div style="flex:0 0 46px;width:46px;height:46px;border-radius:12px;background:#fff4e6;color:#C25E00;display:flex;align-items:center;justify-content:center">
+                  <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 18V6a1 1 0 0 0-1-1H2a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h2"></path><path d="M14 9h4l3 3v5a1 1 0 0 1-1 1h-1"></path><circle cx="7" cy="18" r="2"></circle><circle cx="17" cy="18" r="2"></circle></svg>
+                </div>
+                <div style="flex:1;display:flex;flex-direction:column;gap:6px;min-width:0">
+                  <div style="display:flex;align-items:center;gap:12px">
+                    <div style="font-size:24px;font-weight:700;letter-spacing:0.01em">{{ r.id }}</div>
+                    <div style="padding:4px 12px;border-radius:26px;font-size:14px;font-weight:800;letter-spacing:0.08em;background:{{ r.chipBg }};color:{{ r.chipFg }}">{{ r.status }}</div>
+                    <div style="padding:4px 12px;border-radius:26px;font-size:14px;font-weight:800;letter-spacing:0.08em;background:{{ r.dueBg }};color:{{ r.dueFg }};border:1px solid {{ r.dueEdge }}">{{ r.dueLabel }}</div>
+                  </div>
+                  <div style="font-size:15px;font-weight:500;color:#737373;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ r.sub }}</div>
+                  <div style="height:10px;border-radius:8px;background:#eef0f2;overflow:hidden;margin-top:2px">
+                    <div style="height:100%;border-radius:8px;width:{{ r.pct }};background:{{ r.bar }};transition:width .3s ease"></div>
+                  </div>
+                </div>
+                <div style="font-size:38px;font-weight:800;letter-spacing:-1px;font-variant-numeric:tabular-nums;color:{{ r.color }};min-width:170px;text-align:right">{{ r.label }}</div>
+              </div>
+            </sc-for>
+          </div>
+          
+        </div>
+
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isLive }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column;background:#ffffff">
+
+        <div style="flex:0 0 auto;padding:26px 32px 22px 32px;background:{{ liveHeadBg }};border-bottom:1px solid #e5e5e5">
+          <div style="display:flex;align-items:flex-start;gap:20px">
+            <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:10px">
+              <div style="display:flex;align-items:center;gap:14px">
+                <div onClick="{{ goIdle }}" style="display:flex;align-items:center;gap:10px;height:60px;padding:0 24px;border-radius:26px;background:#f5f5f5;border:1px solid #e5e5e5;font-size:19px;font-weight:700;color:#737373">‹ Overview</div>
+                <div style="padding:8px 18px;border-radius:26px;font-size:15px;font-weight:800;letter-spacing:0.16em;background:{{ accentSoft }};color:{{ accentTxt }}">{{ dirLabel }}</div>
+                <div style="padding:8px 18px;border-radius:26px;font-size:15px;font-weight:800;letter-spacing:0.12em;background:{{ activeDueBg }};color:{{ activeDueFg }};border:1px solid {{ activeDueEdge }}">{{ activeDueLabel }}</div>
+                <div style="font-size:16px;font-weight:600;letter-spacing:0.08em;color:#737373">{{ activeMeta }}</div>
+              </div>
+              <div style="font-size:66px;font-weight:800;line-height:0.95;letter-spacing:-2px">{{ activeId }}</div>
+              <div style="font-size:24px;font-weight:600;color:#737373">{{ activeParty }}</div>
+            </div>
+            <div style="display:flex;align-items:baseline;gap:10px;padding-top:8px">
+              <div style="font-size:132px;font-weight:800;line-height:0.8;letter-spacing:-6px;font-variant-numeric:tabular-nums;color:{{ activeColor }}">{{ activeReceived }}</div>
+              <div style="font-size:52px;font-weight:700;color:#a3a3a3;font-variant-numeric:tabular-nums">/ {{ activeExpected }}</div>
+            </div>
+          </div>
+          <div style="display:flex;gap:6px;margin-top:20px;align-items:center">
+            <sc-for list="{{ segs }}" as="g" hint-placeholder-count="5">
+              <div style="height:20px;border-radius:12px;background:#eef0f2;overflow:hidden;flex:{{ g.flex }}">
+                <div style="height:100%;border-radius:12px;width:{{ g.pct }};background:{{ g.color }};transition:width .3s ease"></div>
+              </div>
+            </sc-for>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:12px;font-size:16px;font-weight:600;color:#a3a3a3">
+            <div style="width:12px;height:12px;border-radius:4px;background:{{ activeBar }}"></div>
+            <div>{{ segLegend }}</div>
+          </div>
+        </div>
+
+        <div style="flex:1;min-height:0;overflow-y:auto;padding:24px 32px 32px 32px">
+          <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:20px">
+            <sc-for list="{{ tiles }}" as="t" hint-placeholder-count="6">
+              <div style="border-radius:16px;background:#ffffff;border:2px solid {{ t.edge }};overflow:hidden;display:flex;flex-direction:column;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+                <div style="position:relative;height:250px;background:#f5f5f5">
+                  <image-slot id="{{ t.slotId }}" shape="rect" fit="cover" placeholder="Drop product photo"></image-slot>
+                  <div style="position:absolute;left:12px;top:12px;padding:5px 12px;border-radius:26px;background:rgba(255,255,255,0.92);box-shadow:0 1px 4px rgba(0,0,0,0.18);font-size:13px;font-weight:700;letter-spacing:0.1em;color:#525252;font-family:'Courier New', monospace;pointer-events:none">{{ t.sku }}</div>
+                  <div style="position:absolute;right:12px;bottom:12px;padding:8px 16px;border-radius:26px;font-size:26px;font-weight:800;font-variant-numeric:tabular-nums;pointer-events:none;background:{{ t.badgeBg }};color:{{ t.badgeFg }};box-shadow:0 2px 12px rgba(0,0,0,0.28)">{{ t.label }}</div>
+                </div>
+                <div style="padding:14px 16px 18px 16px;display:flex;flex-direction:column;gap:10px;flex:1">
+                  <div style="font-size:19px;font-weight:600;line-height:1.25;color:#0a0a0a;text-wrap:pretty">{{ t.name }}</div>
+                  <div style="margin-top:auto;height:8px;border-radius:5px;background:#e9ebee;overflow:hidden">
+                    <div style="height:100%;border-radius:5px;width:{{ t.pct }};background:{{ t.bar }}"></div>
+                  </div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ dupMsg }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;left:32px;right:32px;bottom:28px;z-index:40;padding:22px 28px;border-radius:16px;background:#fffbeb;border:2px solid #d97706;display:flex;align-items:center;gap:20px;animation:gtoast .18s ease;box-shadow:0 8px 24px rgba(0,0,0,0.12)">
+        <div style="font-size:15px;font-weight:800;letter-spacing:0.16em;color:#b45309">ALREADY COUNTED</div>
+        <div style="font-size:20px;font-weight:600;color:#7c4a08">{{ dupMsg }}</div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ flashTag }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;z-index:45;pointer-events:none;box-shadow:inset 0 0 0 16px #df2225, inset 0 0 200px rgba(223,34,37,0.28);animation:gflash .4s linear infinite"></div>
+      <div style="position:absolute;left:32px;right:32px;top:28px;z-index:46;pointer-events:none;padding:24px 30px;border-radius:16px;background:#df2225;color:#ffffff;display:flex;align-items:center;gap:22px;box-shadow:0 8px 24px rgba(0,0,0,0.18)">
+        <div style="font-size:17px;font-weight:800;letter-spacing:0.16em">UNKNOWN TAG</div>
+        <div style="font-size:22px;font-weight:600;font-family:'Courier New', monospace;letter-spacing:0.04em">{{ flashTag }}</div>
+        <div style="flex:1"></div>
+        <div style="font-size:17px;font-weight:700;letter-spacing:0.1em;opacity:0.8">NOT ON TODAY'S BOARD</div>
+      </div>
+    </sc-if>
+
+  </div>
+
+  <div style="flex:0 0 168px;display:flex;gap:18px;padding:20px 32px;background:#ffffff;border-top:1px solid #e5e5e5;position:relative;z-index:20">
+    <div onClick="{{ tapIn }}" style="flex:1;border-radius:18px;display:flex;align-items:center;gap:20px;padding:0 26px;background:{{ inTabBg }};border:2px solid {{ inTabEdge }}">
+      <div style="flex:0 0 auto;color:{{ inTabFg }};display:flex;align-items:center">
+        <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11"></path><path d="m7.5 9.5 4.5 4.5 4.5-4.5"></path><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"></path></svg>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <div style="font-size:15px;font-weight:800;letter-spacing:0.18em;color:{{ inTabSub }}">RECEIVING</div>
+        <div style="display:flex;align-items:baseline;gap:12px">
+          <div style="font-size:44px;font-weight:800;letter-spacing:-1.5px;color:{{ inTabFg }}">IN</div>
+          <div style="font-size:27px;font-weight:700;color:{{ inTabSub }};font-variant-numeric:tabular-nums">{{ inTabCount }}</div>
+        </div>
+      </div>
+    </div>
+    <div onClick="{{ tapOut }}" style="flex:1;border-radius:18px;display:flex;align-items:center;gap:20px;padding:0 26px;background:{{ outTabBg }};border:2px solid {{ outTabEdge }}">
+      <div style="flex:0 0 auto;color:{{ outTabFg }};display:flex;align-items:center">
+        <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V10"></path><path d="m7.5 14.5 4.5-4.5 4.5 4.5"></path><path d="M4 7V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2"></path></svg>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <div style="font-size:15px;font-weight:800;letter-spacing:0.18em;color:{{ outTabSub }}">SHIPPING</div>
+        <div style="display:flex;align-items:baseline;gap:12px">
+          <div style="font-size:44px;font-weight:800;letter-spacing:-1.5px;color:{{ outTabFg }}">OUT</div>
+          <div style="font-size:27px;font-weight:700;color:{{ outTabSub }};font-variant-numeric:tabular-nums">{{ outTabCount }}</div>
+        </div>
+      </div>
+    </div>
+    <div onClick="{{ openAdd }}" style="flex:0 0 128px;border-radius:18px;background:#00BCD4;display:flex;align-items:center;justify-content:center;color:#ffffff">
+      <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
+    </div>
+  </div>
+
+  <sc-if value="{{ showAdd }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;z-index:70;background:#ffffff;display:flex;flex-direction:column">
+      <div style="flex:0 0 132px;display:flex;align-items:center;gap:24px;padding:0 32px;border-bottom:1px solid #e5e5e5;background:#ffffff">
+        <div style="flex:1;display:flex;flex-direction:column;gap:8px">
+          <div style="font-size:15px;font-weight:800;letter-spacing:0.18em;color:#008A9C">MANUAL ADD · INBOUND</div>
+          <div style="font-size:38px;font-weight:700;letter-spacing:-0.5px">Add an Open PO to Today's Board</div>
+        </div>
+        <div onClick="{{ backToOverview }}" style="height:84px;padding:0 30px;border-radius:18px;background:#f5f5f5;border:1px solid #e5e5e5;display:flex;align-items:center;font-size:22px;font-weight:700;color:#737373">‹ Overview</div>
+        <div onClick="{{ closeAdd }}" style="width:84px;height:84px;border-radius:18px;background:#f5f5f5;border:1px solid #e5e5e5;display:flex;align-items:center;justify-content:center;font-size:44px;font-weight:300;color:#737373">×</div>
+      </div>
+      <div style="flex:0 0 auto;display:flex;gap:14px;padding:22px 32px;overflow-x:auto">
+        <sc-for list="{{ suppliers }}" as="s" hint-placeholder-count="4">
+          <div onClick="{{ s.pick }}" style="flex:0 0 auto;padding:18px 28px;border-radius:26px;font-size:20px;font-weight:700;white-space:nowrap;background:{{ s.bg }};color:{{ s.fg }};border:2px solid {{ s.edge }}">{{ s.name }}</div>
+        </sc-for>
+      </div>
+      <div style="flex:1;min-height:0;overflow-y:auto;padding:8px 32px 32px 32px;display:flex;flex-direction:column;gap:16px">
+        <sc-for list="{{ poolRows }}" as="p" hint-placeholder-count="5">
+          <div onClick="{{ p.pick }}" style="flex:0 0 auto;display:flex;align-items:center;gap:24px;padding:26px 28px;border-radius:16px;background:#ffffff;box-shadow:0 0 0 1px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.04)">
+            <div style="flex:1;display:flex;flex-direction:column;gap:6px;min-width:0">
+              <div style="font-size:34px;font-weight:700;letter-spacing:-0.5px">{{ p.id }}</div>
+              <div style="font-size:20px;font-weight:600;color:#737373">{{ p.party }}</div>
+              <div style="font-size:17px;font-weight:500;color:#a3a3a3">{{ p.meta }}</div>
+            </div>
+            <div style="font-size:19px;font-weight:800;letter-spacing:0.1em;color:#008A9C">SELECT ›</div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ pending }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;z-index:80;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;padding:80px">
+      <div style="width:100%;background:#ffffff;border-radius:20px;padding:44px;display:flex;flex-direction:column;gap:24px;box-shadow:0 12px 32px rgba(0,0,0,0.2)">
+        <div style="font-size:15px;font-weight:800;letter-spacing:0.18em;color:#008A9C">CONFIRM</div>
+        <div style="font-size:44px;font-weight:700;letter-spacing:-1px">{{ pendingId }}</div>
+        <div style="font-size:23px;font-weight:500;color:#737373;line-height:1.45;text-wrap:pretty">{{ pendingText }}</div>
+        <div style="display:flex;gap:16px;margin-top:12px">
+          <div onClick="{{ cancelAdd }}" style="flex:1;height:104px;border-radius:16px;background:#f5f5f5;border:1px solid #e5e5e5;display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:700;color:#737373">Cancel</div>
+          <div onClick="{{ confirmAdd }}" style="flex:2;height:104px;border-radius:16px;background:#00BCD4;display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:800;color:#ffffff">Add to Today ›</div>
+        </div>
+        <div style="font-size:16px;font-weight:600;color:#a3a3a3;letter-spacing:0.02em">Prototype: no supervisor PIN — open question for production.</div>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ showExc }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;z-index:75;background:#ffffff;display:flex;flex-direction:column">
+      <div style="flex:0 0 132px;display:flex;align-items:center;gap:24px;padding:0 32px;border-bottom:1px solid #e5e5e5;background:#ffffff">
+        <div style="flex:1;display:flex;flex-direction:column;gap:8px">
+          <div style="font-size:15px;font-weight:800;letter-spacing:0.18em;color:#b41c1e">EXCEPTIONS</div>
+          <div style="font-size:38px;font-weight:700;letter-spacing:-0.5px">{{ excTitle }}</div>
+        </div>
+        <div onClick="{{ backToOverview }}" style="height:84px;padding:0 30px;border-radius:18px;background:#f5f5f5;border:1px solid #e5e5e5;display:flex;align-items:center;font-size:22px;font-weight:700;color:#737373">‹ Overview</div>
+        <div onClick="{{ closeExc }}" style="width:84px;height:84px;border-radius:18px;background:#f5f5f5;border:1px solid #e5e5e5;display:flex;align-items:center;justify-content:center;font-size:44px;font-weight:300;color:#737373">×</div>
+      </div>
+      <div style="flex:1;min-height:0;overflow-y:auto;padding:24px 32px;display:flex;flex-direction:column;gap:14px">
+        <sc-for list="{{ excRows }}" as="e" hint-placeholder-count="3">
+          <div style="flex:0 0 auto;display:flex;align-items:center;gap:24px;padding:26px 28px;border-radius:16px;background:#fef2f2;border:1px solid #f0a1a2">
+            <div style="flex:1;display:flex;flex-direction:column;gap:8px">
+              <div style="font-size:26px;font-weight:700;font-family:'Courier New', monospace;letter-spacing:0.04em;color:#b41c1e">{{ e.tag }}</div>
+              <div style="font-size:18px;font-weight:600;color:#737373">{{ e.note }}</div>
+            </div>
+            <div style="font-size:24px;font-weight:700;color:#a3a3a3;font-variant-numeric:tabular-nums">{{ e.at }}</div>
+          </div>
+        </sc-for>
+      </div>
+      <div style="flex:0 0 auto;padding:24px 32px 32px 32px">
+        <div onClick="{{ clearExc }}" style="height:104px;border-radius:16px;background:#ffffff;border:1px solid #e5e5e5;display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:700;color:#737373">Clear List</div>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ demoOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;top:112px;right:0;bottom:168px;width:420px;z-index:90;background:#ffffff;border-left:1px solid #e5e5e5;padding:28px;display:flex;flex-direction:column;gap:14px;overflow-y:auto;box-shadow:-8px 0 24px rgba(0,0,0,0.08)">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:6px">
+        <div style="flex:1;font-size:15px;font-weight:800;letter-spacing:0.18em;color:#a3a3a3">GATE SIMULATOR</div>
+        <div onClick="{{ toggleDemo }}" style="width:48px;height:48px;border-radius:12px;background:#f5f5f5;display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:300;color:#737373">×</div>
+      </div>
+      <div onClick="{{ toggleAuto }}" style="height:92px;border-radius:14px;display:flex;align-items:center;padding:0 22px;gap:16px;background:{{ autoBg }};border:2px solid {{ autoEdge }}">
+        <div style="flex:1;font-size:21px;font-weight:700;color:{{ autoFg }}">Autoplay day</div>
+        <div style="font-size:17px;font-weight:800;letter-spacing:0.1em;color:{{ autoFg }}">{{ autoState }}</div>
+      </div>
+      <div onClick="{{ burstIn }}" style="height:88px;border-radius:14px;display:flex;align-items:center;padding:0 22px;background:#e0f7fa;border:1px solid #7fd9e4;font-size:21px;font-weight:700;color:#008A9C">Inbound pallet burst</div>
+      <div onClick="{{ burstOut }}" style="height:88px;border-radius:14px;display:flex;align-items:center;padding:0 22px;background:#fff4e6;border:1px solid #f5c48a;font-size:21px;font-weight:700;color:#C25E00">Outbound pallet burst</div>
+      <div onClick="{{ fireUnknown }}" style="height:88px;border-radius:14px;display:flex;align-items:center;padding:0 22px;background:#fef2f2;border:1px solid #f0a1a2;font-size:21px;font-weight:700;color:#b41c1e">Unknown tag</div>
+      <div onClick="{{ fireDup }}" style="height:88px;border-radius:14px;display:flex;align-items:center;padding:0 22px;background:#fffbeb;border:1px solid #f2ce8a;font-size:21px;font-weight:700;color:#b45309">Duplicate scan</div>
+      <div onClick="{{ resetDay }}" style="height:88px;border-radius:14px;display:flex;align-items:center;padding:0 22px;background:#f5f5f5;border:1px solid #e5e5e5;font-size:21px;font-weight:700;color:#737373">Reset day</div>
+      <div style="margin-top:auto;font-size:15px;font-weight:500;color:#a3a3a3;line-height:1.5;text-wrap:pretty">Mock gate events only. Production reads the bridge-WS scan stream Receiving already uses.</div>
+    </div>
+  </sc-if>
+
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1080,&quot;height&quot;:1920},&quot;idleSeconds&quot;:{&quot;editor&quot;:&quot;int&quot;,&quot;default&quot;:45,&quot;tsType&quot;:&quot;number&quot;,&quot;min&quot;:10,&quot;max&quot;:300,&quot;unit&quot;:&quot;s&quot;,&quot;section&quot;:&quot;Kiosk behaviour&quot;},&quot;scanSpeedMs&quot;:{&quot;editor&quot;:&quot;int&quot;,&quot;default&quot;:420,&quot;tsType&quot;:&quot;number&quot;,&quot;min&quot;:120,&quot;max&quot;:1200,&quot;unit&quot;:&quot;ms&quot;,&quot;section&quot;:&quot;Gate simulation&quot;},&quot;autoplayOnLoad&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Gate simulation&quot;}}">
+class Component extends DCLogic {
+  state = this.seed();
+
+  seed() {
+    const L = (sku, name, expected) => ({ sku, name, expected, received: 0 });
+    const inDocs = [
+      { id: 'PO-24802', party: 'Shantou Lianhe Plastics', meta: 'ETA 16:00', due: -1, lines: [
+        L('PC-2288', 'Temp Tattoo Sheet 50', 18), L('PC-2290', 'Sticker Roll 500', 14),
+        L('PC-2240', 'Pop-It Fidget Tray', 20) ] },
+      { id: 'PO-24817', party: 'Ningbo Sunrise Crafts', meta: 'ETA 09:30', due: 0, lines: [
+        L('BS-1042', 'Sticker Dress-Up Book', 24), L('BS-1077', 'Glitter Gel Pen Set 24', 18),
+        L('PC-2201', 'LED Slime Jar 6pk', 12), L('BS-1188', 'Nail Art Studio Kit', 16),
+        L('PC-2240', 'Pop-It Fidget Tray', 30), L('BS-1310', 'Scratch Art Kit A4', 20) ] },
+      { id: 'PO-24823', party: 'Yiwu Bright Toys', meta: 'ETA 11:00', due: 0, lines: [
+        L('PR-3301', 'Mini Claw Machine', 10), L('PR-3318', 'Bubble Wand Sword', 24),
+        L('LD-4402', 'Plush Kitten 20cm', 18), L('LD-4419', 'Unicorn Water Bottle 500ml', 22),
+        L('PR-3350', 'Wooden Puzzle Cube', 14) ] },
+      { id: 'PO-24831', party: 'Guangzhou Paperworks', meta: 'ETA 14:15', due: 0, lines: [
+        L('BS-1401', 'Foil Balloon Set 12', 26), L('BS-1425', 'Party Loot Bag 20pk', 30),
+        L('PC-2288', 'Temp Tattoo Sheet 50', 12), L('PC-2290', 'Sticker Roll 500', 16) ] }
+    ];
+    const outDocs = [
+      { id: 'SH-9036', party: 'Costco Depot 118', meta: 'Pickup 08:00', due: -1, lines: [
+        L('BS-1425', 'Party Loot Bag 20pk', 24), L('PC-2288', 'Temp Tattoo Sheet 50', 16) ] },
+      { id: 'SH-9042', party: 'Amazon FBA — ONT8', meta: 'Pickup 15:00', due: 0, lines: [
+        L('BS-1042', 'Sticker Dress-Up Book', 20), L('LD-4402', 'Plush Kitten 20cm', 16),
+        L('PC-2240', 'Pop-It Fidget Tray', 24), L('BS-1188', 'Nail Art Studio Kit', 12),
+        L('PR-3318', 'Bubble Wand Sword', 18) ] },
+      { id: 'SH-9047', party: 'Walmart DC 6094', meta: 'Pickup 16:30', due: 0, lines: [
+        L('BS-1401', 'Foil Balloon Set 12', 22), L('PC-2201', 'LED Slime Jar 6pk', 14),
+        L('BS-1310', 'Scratch Art Kit A4', 18), L('LD-4419', 'Unicorn Water Bottle 500ml', 20) ] },
+      { id: 'SH-9051', party: 'BSCOOL DTC Pallet', meta: 'Pickup 17:45', due: 0, lines: [
+        L('BS-1077', 'Glitter Gel Pen Set 24', 12), L('PC-2290', 'Sticker Roll 500', 10),
+        L('PR-3350', 'Wooden Puzzle Cube', 8) ] }
+    ];
+    const pool = [
+      { id: 'PO-24844', party: 'Yiwu Bright Toys', meta: 'Ordered 21 Jul · 4 lines · 68 cartons', lines: [
+        L('PR-3301', 'Mini Claw Machine', 18), L('PR-3318', 'Bubble Wand Sword', 20),
+        L('LD-4402', 'Plush Kitten 20cm', 16), L('PR-3350', 'Wooden Puzzle Cube', 14) ] },
+      { id: 'PO-24839', party: 'Shantou Lianhe Plastics', meta: 'Ordered 18 Jul · 3 lines · 54 cartons', lines: [
+        L('PC-2240', 'Pop-It Fidget Tray', 24), L('PC-2201', 'LED Slime Jar 6pk', 18), L('PC-2288', 'Temp Tattoo Sheet 50', 12) ] },
+      { id: 'PO-24836', party: 'Ningbo Sunrise Crafts', meta: 'Ordered 16 Jul · 3 lines · 60 cartons', lines: [
+        L('BS-1042', 'Sticker Dress-Up Book', 26), L('BS-1310', 'Scratch Art Kit A4', 20), L('BS-1188', 'Nail Art Studio Kit', 14) ] },
+      { id: 'PO-24828', party: 'Guangzhou Paperworks', meta: 'Ordered 12 Jul · 2 lines · 44 cartons', lines: [
+        L('BS-1425', 'Party Loot Bag 20pk', 28), L('PC-2290', 'Sticker Roll 500', 16) ] },
+      { id: 'PO-24815', party: 'Shantou Lianhe Plastics', meta: 'Ordered 07 Jul · 2 lines · 36 cartons', lines: [
+        L('LD-4419', 'Unicorn Water Bottle 500ml', 22), L('BS-1401', 'Foil Balloon Set 12', 14) ] }
+    ];
+    return { mode: 'idle', dir: 'in', activeId: null, inDocs, outDocs, pool,
+      exceptions: [], flashTag: null, dupMsg: null, demoOpen: false, autoplay: false,
+      showAdd: false, showExc: false, pending: null, filter: 'All', scanning: false,
+      clock: this.hhmm() };
+  }
+
+  hhmm() {
+    const d = new Date();
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+
+  dayShort(off) {
+    const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const d = new Date(); d.setDate(d.getDate() + off);
+    return String(d.getDate()).padStart(2, '0') + ' ' + mon[d.getMonth()];
+  }
+
+  dateLabel() {
+    const d = new Date();
+    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return days[d.getDay()] + ' · ' + String(d.getDate()).padStart(2, '0') + ' ' + mon[d.getMonth()] + ' ' + d.getFullYear();
+  }
+
+  componentDidMount() {
+    this.timers = [];
+    this.last = Date.now();
+    this.tick = setInterval(() => {
+      const c = this.hhmm();
+      if (c !== this.state.clock) this.setState({ clock: c });
+      const idle = (this.props.idleSeconds ?? 45) * 1000;
+      if (this.state.mode !== 'idle' && !this.state.showAdd && !this.state.showExc && Date.now() - this.last > idle) {
+        this.setState({ mode: 'idle', activeId: null });
+      }
+    }, 1000);
+    if (this.props.autoplayOnLoad) this.toggleAuto();
+  }
+
+  componentWillUnmount() { clearInterval(this.tick); this.stopAuto(); this.clearTimers(); }
+
+  clearTimers() { (this.timers || []).forEach(clearTimeout); this.timers = []; }
+  after(ms, fn) { this.timers.push(setTimeout(fn, ms)); }
+  touch() { this.last = Date.now(); }
+
+  sum(doc) {
+    return doc.lines.reduce((a, l) => ({ r: a.r + l.received, e: a.e + l.expected }), { r: 0, e: 0 });
+  }
+  totals(docs) {
+    return docs.reduce((a, d) => { const s = this.sum(d); return { r: a.r + s.r, e: a.e + s.e }; }, { r: 0, e: 0 });
+  }
+
+  hit(dir, docId) {
+    const key = dir === 'in' ? 'inDocs' : 'outDocs';
+    this.setState(s => {
+      const docs = s[key].map(d => {
+        if (d.id !== docId) return d;
+        const idx = d.lines.findIndex(l => l.received < l.expected);
+        if (idx < 0) return d;
+        const step = Math.min(d.lines[idx].expected - d.lines[idx].received, 1 + Math.floor(Math.random() * 3));
+        return { ...d, lines: d.lines.map((l, i) => i === idx ? { ...l, received: l.received + step } : l) };
+      });
+      const o = {}; o[key] = docs;
+      o.mode = 'live'; o.dir = dir; o.activeId = docId; o.scanning = true;
+      return o;
+    });
+    this.touch();
+    clearTimeout(this.scanOff);
+    this.scanOff = setTimeout(() => this.setState({ scanning: false }), 1100);
+  }
+
+  burst(dir) {
+    const docs = dir === 'in' ? this.state.inDocs : this.state.outDocs;
+    const ranked = docs.slice().sort((a, b) => ((a.due || 0) < 0 ? 0 : ((a.due || 0) === 0 ? 1 : 2)) - ((b.due || 0) < 0 ? 0 : ((b.due || 0) === 0 ? 1 : 2)));
+    const doc = ranked.find(d => d.lines.some(l => l.received < l.expected)) || ranked[0];
+    if (!doc) return;
+    this.setState({ mode: 'live', dir, activeId: doc.id, showAdd: false, showExc: false });
+    this.touch();
+    const speed = this.props.scanSpeedMs ?? 420;
+    const n = 6 + Math.floor(Math.random() * 5);
+    for (let i = 0; i < n; i++) this.after(i * speed, () => this.hit(dir, doc.id));
+  }
+
+  fireUnknown = () => {
+    const hex = () => Math.floor(Math.random() * 65536).toString(16).toUpperCase().padStart(4, '0');
+    const tag = 'E280-' + hex() + '-' + hex() + '-' + hex();
+    this.touch();
+    this.setState(s => ({ flashTag: tag, exceptions: [{ tag, note: 'No matching PO or shipment on today\u2019s board', at: this.hhmm() }, ...s.exceptions] }));
+    clearTimeout(this.flashOff);
+    this.flashOff = setTimeout(() => this.setState({ flashTag: null }), 2600);
+  };
+
+  fireDup = () => {
+    const docs = this.state.dir === 'in' ? this.state.inDocs : this.state.outDocs;
+    const doc = docs.find(d => d.id === this.state.activeId) || docs[0];
+    const line = doc.lines.find(l => l.received > 0) || doc.lines[0];
+    this.touch();
+    this.setState({ dupMsg: doc.id + ' · ' + line.sku + ' · ' + line.name });
+    clearTimeout(this.dupOff);
+    this.dupOff = setTimeout(() => this.setState({ dupMsg: null }), 2400);
+  };
+
+  stopAuto() { clearInterval(this.auto); this.auto = null; }
+
+  toggleAuto = () => {
+    if (this.state.autoplay) { this.stopAuto(); this.setState({ autoplay: false }); return; }
+    this.setState({ autoplay: true });
+    const step = () => {
+      const r = Math.random();
+      if (r < 0.42) this.burst('in');
+      else if (r < 0.78) this.burst('out');
+      else if (r < 0.9) this.fireUnknown();
+      else this.fireDup();
+    };
+    step();
+    this.auto = setInterval(step, 9000);
+  };
+
+  resetDay = () => {
+    this.stopAuto(); this.clearTimers();
+    const s = this.seed();
+    s.demoOpen = this.state.demoOpen;
+    this.setState(s);
+    this.touch();
+  };
+
+  photo(sku) {
+    const k = {
+      'BS-1042': 'stickers,book', 'BS-1077': 'gel,pens', 'PC-2201': 'slime,toy',
+      'BS-1188': 'nail,polish', 'PC-2240': 'fidget,toy', 'BS-1310': 'crayons,art',
+      'PR-3301': 'arcade,claw', 'PR-3318': 'bubbles,toy', 'LD-4402': 'plush,kitten',
+      'LD-4419': 'water,bottle', 'PR-3350': 'wooden,puzzle', 'BS-1401': 'foil,balloons',
+      'BS-1425': 'party,bag', 'PC-2288': 'temporary,tattoo', 'PC-2290': 'sticker,roll'
+    }[sku] || 'toy';
+    let n = 0; for (let i = 0; i < sku.length; i++) n = (n * 31 + sku.charCodeAt(i)) % 997;
+    return 'https://loremflickr.com/600/480/' + k + '?lock=' + n;
+  }
+
+  renderVals() {
+    const s = this.state;
+    const CY = '#00BCD4', CYT = '#008A9C', OR = '#FF8A00', ORT = '#C25E00';
+    const GR = '#16a34a', OFF = '#c7ccd3';
+    const active = docs => docs.filter(d => (d.due || 0) <= 0);
+    const inT = this.totals(active(s.inDocs)), outT = this.totals(active(s.outDocs));
+    const countLabel = (docs, noun) => {
+      const late = docs.filter(d => (d.due || 0) < 0).length;
+      const today = docs.filter(d => (d.due || 0) === 0).length;
+      const parts = [today + ' ' + noun + ' due today'];
+      if (late) parts.push(late + ' overdue');
+      return parts.join(' · ');
+    };
+    const pct = (r, e) => e ? Math.round(r / e * 100) : 0;
+    const ring = (p, c) => 'conic-gradient(' + c + ' ' + (p * 3.6) + 'deg, #e9ebee ' + (p * 3.6) + 'deg)';
+    const inP = pct(inT.r, inT.e), outP = pct(outT.r, outT.e);
+
+    const order = d => (d.due || 0) < 0 ? 0 : ((d.due || 0) === 0 ? 1 : 2);
+    const rows = (docs, dir, fill, txt, tint) => docs.filter(d => (d.due || 0) <= 0).sort((a, b) => order(a) - order(b)).map(d => {
+      const t = this.sum(d), p = pct(t.r, t.e), done = t.r >= t.e, started = t.r > 0;
+      const due = d.due || 0;
+      return { id: d.id, sub: d.party + ' · ' + d.meta, label: t.r + ' / ' + t.e, pct: p + '%',
+        dueLabel: due < 0 ? 'OVERDUE · ' + this.dayShort(due) : 'DUE TODAY',
+        dueBg: due < 0 ? '#fef2f2' : '#f5f5f5',
+        dueFg: due < 0 ? '#b41c1e' : '#525252',
+        dueEdge: due < 0 ? '#f0a1a2' : '#e5e5e5',
+        bar: done ? GR : (started ? fill : OFF),
+        color: done ? GR : (started ? txt : '#a3a3a3'),
+        status: done ? 'COMPLETE' : (started ? 'IN PROGRESS' : 'WAITING'),
+        chipBg: done ? '#f0fdf4' : (started ? tint : '#f5f5f5'),
+        chipFg: done ? '#15803d' : (started ? txt : '#a3a3a3'),
+        open: () => { this.touch(); this.setState({ mode: 'live', dir, activeId: d.id }); } };
+    });
+    const C = 465;
+
+    const activeDocs = s.dir === 'in' ? s.inDocs : s.outDocs;
+    const act = activeDocs.find(d => d.id === s.activeId) || activeDocs[0] || { id: '', party: '', meta: '', lines: [] };
+    const aT = this.sum(act), aP = pct(aT.r, aT.e), aDone = aT.r >= aT.e && aT.e > 0;
+    const fill = s.dir === 'in' ? CY : OR, txt = s.dir === 'in' ? CYT : ORT;
+
+    const tiles = act.lines.map(l => {
+      const done = l.received >= l.expected, p = pct(l.received, l.expected);
+      return { sku: l.sku, name: l.name, slotId: 'sku-' + l.sku, photo: this.photo(l.sku),
+        label: l.received + '/' + l.expected, pct: p + '%',
+        edge: done ? GR : (l.received > 0 ? fill : '#e5e5e5'),
+        badgeBg: done ? GR : (l.received > 0 ? txt : 'rgba(255,255,255,0.94)'),
+        badgeFg: done ? '#ffffff' : (l.received > 0 ? '#ffffff' : '#737373'),
+        bar: done ? GR : (l.received > 0 ? fill : OFF) };
+    });
+
+    const names = ['All'].concat(Array.from(new Set(s.pool.map(p => p.party))));
+    const suppliers = names.map(n => ({ name: n,
+      bg: n === s.filter ? '#00BCD4' : '#ffffff', fg: n === s.filter ? '#ffffff' : '#737373',
+      edge: n === s.filter ? '#00BCD4' : '#e5e5e5',
+      pick: () => this.setState({ filter: n }) }));
+
+    const poolRows = s.pool.filter(p => s.filter === 'All' || p.party === s.filter).map(p => ({
+      id: p.id, party: p.party, meta: p.meta, pick: () => { this.touch(); this.setState({ pending: p }); } }));
+
+    const tab = (on, tint, edge, fg) => ({ bg: on ? tint : '#ffffff', edge: on ? edge : '#e5e5e5',
+      fg: on ? fg : '#737373', sub: on ? fg : '#a3a3a3' });
+    const ti = tab(s.mode === 'live' && s.dir === 'in', '#e0f7fa', CY, CYT);
+    const to = tab(s.mode === 'live' && s.dir === 'out', '#fff4e6', OR, ORT);
+
+    return {
+      clock: s.clock, dateLabel: this.dateLabel(), scanning: s.scanning,
+      isIdle: s.mode === 'idle', isLive: s.mode === 'live',
+      inRing: ring(inP, CY), outRing: ring(outP, OR),
+      inDash: (inP / 100 * C) + ' ' + C, outDash: (outP / 100 * C) + ' ' + C,
+      inCap: inP > 0 ? 'round' : 'butt', outCap: outP > 0 ? 'round' : 'butt',
+      segs: act.lines.map(l => ({ flex: l.expected, pct: pct(l.received, l.expected) + '%',
+        color: l.received >= l.expected ? GR : fill })),
+      segLegend: act.lines.filter(l => l.received >= l.expected).length + ' of ' + act.lines.length + ' SKUs complete',
+      inPctLabel: inP + '%', outPctLabel: outP + '%',
+      inReceived: inT.r, inExpected: inT.e, outReceived: outT.r, outExpected: outT.e,
+      inDocLabel: countLabel(s.inDocs, 'POs'), outDocLabel: countLabel(s.outDocs, 'shipments'),
+      inRows: rows(s.inDocs, 'in', CY, CYT, '#e0f7fa'), outRows: rows(s.outDocs, 'out', OR, ORT, '#fff4e6'),
+      dirLabel: s.dir === 'in' ? 'IN · RECEIVING' : 'OUT · SHIPPING',
+      accentTxt: txt, accentSoft: s.dir === 'in' ? '#e0f7fa' : '#fff4e6',
+      liveHeadBg: '#ffffff',
+      activeId: act.id, activeParty: act.party, activeMeta: act.meta,
+      activeDueLabel: (act.due || 0) < 0 ? 'OVERDUE · ' + this.dayShort(act.due) : 'DUE TODAY',
+      activeDueBg: (act.due || 0) < 0 ? '#fef2f2' : '#f5f5f5',
+      activeDueFg: (act.due || 0) < 0 ? '#b41c1e' : '#525252',
+      activeDueEdge: (act.due || 0) < 0 ? '#f0a1a2' : '#e5e5e5',
+      activeReceived: aT.r, activeExpected: aT.e, activePct: aP + '%',
+      activeColor: aDone ? GR : txt, activeBar: aDone ? GR : fill, tiles,
+      inTabBg: ti.bg, inTabEdge: ti.edge, inTabFg: ti.fg, inTabSub: ti.sub, inTabCount: inT.r + '/' + inT.e,
+      outTabBg: to.bg, outTabEdge: to.edge, outTabFg: to.fg, outTabSub: to.sub, outTabCount: outT.r + '/' + outT.e,
+      tapIn: () => { this.touch(); this.setState({ mode: 'live', dir: 'in', activeId: (s.inDocs[0] || {}).id }); },
+      tapOut: () => { this.touch(); this.setState({ mode: 'live', dir: 'out', activeId: (s.outDocs[0] || {}).id }); },
+      goIdle: () => { this.touch(); this.setState({ mode: 'idle', activeId: null }); },
+      backToOverview: () => { this.touch(); this.setState({ mode: 'idle', activeId: null, showAdd: false, showExc: false, pending: null }); },
+      showAdd: s.showAdd, suppliers, poolRows,
+      openAdd: () => { this.touch(); this.setState({ showAdd: true, filter: 'All' }); },
+      closeAdd: () => this.setState({ showAdd: false, pending: null }),
+      pending: !!s.pending, pendingId: s.pending ? s.pending.id : '',
+      pendingText: s.pending ? s.pending.party + ' — ' + s.pending.meta + '. It joins today\u2019s board at 0 received and starts counting on the next gate read.' : '',
+      cancelAdd: () => this.setState({ pending: null }),
+      confirmAdd: () => this.setState(st => ({ inDocs: st.inDocs.concat([{ ...st.pending, meta: 'Added manually · ' + this.hhmm() }]),
+        pool: st.pool.filter(p => p.id !== st.pending.id), pending: null, showAdd: false,
+        mode: 'live', dir: 'in', activeId: st.pending.id })),
+      hasExceptions: s.exceptions.length > 0, excCount: s.exceptions.length,
+      excTitle: s.exceptions.length + ' unmatched tags today',
+      excRows: s.exceptions, showExc: s.showExc,
+      openExc: () => { this.touch(); this.setState({ showExc: true }); },
+      closeExc: () => this.setState({ showExc: false }),
+      clearExc: () => this.setState({ exceptions: [], showExc: false }),
+      flashTag: s.flashTag, dupMsg: s.dupMsg,
+      demoOpen: s.demoOpen, toggleDemo: () => this.setState(st => ({ demoOpen: !st.demoOpen })),
+      burstIn: () => this.burst('in'), burstOut: () => this.burst('out'),
+      fireUnknown: this.fireUnknown, fireDup: this.fireDup, resetDay: this.resetDay,
+      toggleAuto: this.toggleAuto, autoState: s.autoplay ? 'ON' : 'OFF',
+      autoBg: s.autoplay ? '#f0fdf4' : '#f5f5f5',
+      autoEdge: s.autoplay ? '#16a34a' : '#e5e5e5',
+      autoFg: s.autoplay ? '#15803d' : '#737373'
+    };
+  }
+}
+</script>
+</body>
+</html>

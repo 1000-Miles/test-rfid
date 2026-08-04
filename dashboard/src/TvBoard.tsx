@@ -16,7 +16,7 @@ interface InvRecord {
  * Warehouse TV wallboard — glanceable from across the floor.
  * Open with #tv. Industrial depot-signage look: hazard amber on near-black.
  */
-export default function TvBoard(props: { bridge: BridgeState }) {
+export default function TvBoard(props: { bridge: BridgeState; onExit: () => void }) {
   const { bridge } = props;
   const { status } = bridge;
   const latest: EntryRow | undefined = bridge.entries[0];
@@ -163,9 +163,9 @@ export default function TvBoard(props: { bridge: BridgeState }) {
               ))
             )}
           </div>
-          <a href="#" className="tv-mono text-xs text-[#f5edd8]/25 hover:text-[#f5edd8]/60 mt-4">
+          <button onClick={props.onExit} className="tv-mono text-xs text-[#f5edd8]/25 hover:text-[#f5edd8]/60 mt-4 self-start">
             ← exit TV mode
-          </a>
+          </button>
         </aside>
       </main>
 
