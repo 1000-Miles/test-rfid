@@ -53,19 +53,14 @@ const printer = new PrinterManager({ log: (text, level) => controller.log(`[prin
 
 // --- Mock Nexus (warehouse check-in simulation) --------------------------------
 const { MockNexus } = require('./nexus');
-const parseAnts = (v, dflt) => {
-  if (!v) return dflt;
-  const list = String(v).split(',').map((n) => parseInt(n, 10)).filter((n) => n >= 1 && n <= 16);
-  return list.length ? list : dflt;
-};
 const nexus = new MockNexus({
   dedupMs: Number(process.env.NEXUS_DEDUP_MS || 5000),
   quietMs: Number(process.env.NEXUS_QUIET_MS || 700),
   maxWindowMs: Number(process.env.NEXUS_MAX_WINDOW_MS || 4000),
-  outsideAntennas: parseAnts(process.env.NEXUS_OUTSIDE_ANTS, [1, 3]),
-  insideAntennas: parseAnts(process.env.NEXUS_INSIDE_ANTS, [2, 4]),
   location: process.env.NEXUS_LOCATION || 'WH-ENTRANCE-1',
   url: process.env.NEXUS_URL || '',
+  apiKey: process.env.NEXUS_API_KEY || '',
+  authHeader: process.env.NEXUS_AUTH_HEADER || '',
 });
 nexus.on('log', (text) => controller.log(`[nexus] ${text}`));
 nexus.on('movement', (event) => {
@@ -289,25 +284,24 @@ app.post('/debug/mock-tag', (req, res) => {
   res.json({ ok: true, epc: msg.epc, antenna: msg.antenna });
 });
 
-// Demo: simulate a full portal passage (outside->inside = in, reverse = out).
+// Demo: simulate a full IR passage (GPI1 first = in, GPI2 first = out).
+// Emits the trigger + direction-stamped tag reads, exactly like the
+// controller does during a real two-beam passage. Body: { epc?, direction? }.
 app.post('/debug/mock-passage', async (req, res) => {
   const catalogEpcs = Object.keys(nexus.catalog);
   const epc = String(
     req.body?.epc || (catalogEpcs.length ? catalogEpcs[Math.floor(Math.random() * catalogEpcs.length)] : 'AA00000000000000000000FF')
   ).toUpperCase();
   const dir = req.body?.direction === 'out' ? 'out' : 'in';
-  // pair 0 = lower (1/2), pair 1 = upper (3/4); default lower
-  const pair = Number(req.body?.pair) === 1 ? 1 : 0;
-  const outAnt = nexus.outsideAntennas[pair] ?? nexus.outsideAntennas[0];
-  const inAnt = nexus.insideAntennas[pair] ?? nexus.insideAntennas[0];
-  const first = dir === 'in' ? outAnt : inAnt;
-  const second = dir === 'in' ? inAnt : outAnt;
-  const fire = (antenna) =>
+  const input = dir === 'in' ? 1 : 2;
+  const passageId = `mock-${Date.now()}`; // unique per call, like a real passage id
+  controller.emit('message', { type: 'trigger', input, direction: dir, source: 'mock', timestamp: new Date().toISOString() });
+  const fire = () =>
     controller.emit('message', {
-      type: 'tag', epc, antenna, rssi: -60, tid: null, source: 'mock', timestamp: new Date().toISOString(),
+      type: 'tag', epc, antenna: 1, rssi: -60, tid: null, direction: dir, passageId, source: 'mock', timestamp: new Date().toISOString(),
     });
-  fire(first);
-  setTimeout(() => fire(second), 300);
+  fire();
+  setTimeout(fire, 300);
   res.json({ ok: true, epc, direction: dir });
 });
 
@@ -348,7 +342,7 @@ app.get('/antennas', async (_req, res) => {
       enabled: await uhf.getAntennas(),
       connected: await uhf.getAntennaLink(),
     }));
-    res.json({ ok: true, ...info, portal: { outside: nexus.outsideAntennas, inside: nexus.insideAntennas } });
+    res.json({ ok: true, ...info });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }

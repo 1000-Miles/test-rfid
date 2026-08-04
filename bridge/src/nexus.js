@@ -3,24 +3,30 @@
 /**
  * Mock Nexus — stand-in for the real warehouse inventory system.
  *
- * Real operation this simulates: an IR beam guards the warehouse entrance;
+ * Real operation this simulates: two IR beams guard the warehouse entrance;
  * when a pallet/box passes, the reader bursts and every EPC seen "checks in":
  * an entry event fires to Nexus, and inventory marks the item INSIDE.
  *
- * Direction (4-antenna portal, single IR, two stacked pairs):
- *   - `outsideAntennas` (default [1,3]) face outside the door,
- *     `insideAntennas` (default [2,4]) face inside. Pairs: 1/2 below, 3/4
- *     above — group logic covers both pairs and cross-pair sightings.
+ * Direction (two IR beams, decided by the bridge controller):
+ *   - GPI1 beam broken first = IN, GPI2 beam broken first = OUT. The
+ *     controller stamps that passage direction onto every tag message it
+ *     emits during the burst; this module just consumes `tag.direction`.
  *   - Reads for an EPC are buffered in a SLIDING window: the decision fires
  *     after `quietMs` (default 700ms) with no new reads, or `maxWindowMs`
  *     (default 4000ms) after the first read — whichever comes first. This
- *     keeps a whole slow passage in one decision.
- *       first seen on any outside ant -> then any inside ant = IN  (entry)
- *       first seen on any inside ant  -> then any outside    = OUT (exit)
- *       seen on only ONE side = stray read -> IGNORED, status never flips
- *   - Dedup: after a movement event, that EPC is ignored for `dedupMs`
- *     (default 5000). Strays only get a 1s cooldown so a real passage right
- *     after is not swallowed.
+ *     keeps a whole slow passage in one decision. The first read carrying a
+ *     direction wins for that EPC.
+ *   - Reads with NO direction (manual-mode reads, ambiguous both-beams-at-
+ *     once triggers, HW-mode UDP reads) are stray reads -> IGNORED, status
+ *     never flips.
+ *   - Dedup, two layers:
+ *       1. Passage-scoped: a tag fires at most ONE event per physical passage
+ *          (`tag.passageId` from the controller) — a pallet parked in the
+ *          doorway can't re-fire however long it sits there.
+ *       2. Time-based: after a movement event, that EPC is ignored for
+ *          `dedupMs` (default 5000) as a noise floor between passages.
+ *     Strays only get a 1s cooldown so a real passage right after is not
+ *     swallowed.
  *
  * Other behaviour:
  *   - Catalog lookup: data/catalog.json maps EPC -> item (sku, name, pallet).
@@ -30,7 +36,7 @@
  *     — that's the seam where the real Nexus plugs in later.
  *
  * Emits 'movement' events:
- *   { type: 'entry'|'exit', direction: 'in'|'out', method: 'antenna'|'toggle',
+ *   { type: 'entry'|'exit', direction: 'in'|'out', method: 'ir',
  *     epc, known, item, location, timestamp, antennas: number[] }.
  */
 
@@ -46,16 +52,17 @@ class MockNexus extends EventEmitter {
     this.dedupMs = opts.dedupMs ?? 5000;
     this.quietMs = opts.quietMs ?? 700;
     this.maxWindowMs = opts.maxWindowMs ?? 4000;
-    this.outsideAntennas = opts.outsideAntennas ?? [1, 3];
-    this.insideAntennas = opts.insideAntennas ?? [2, 4];
     this.location = opts.location ?? 'WH-ENTRANCE-1';
     this.url = opts.url || ''; // real Nexus endpoint, empty = mock-only
+    this.apiKey = opts.apiKey || ''; // sent as Authorization: Bearer <key>
+    this.authHeader = opts.authHeader || ''; // raw "Name: value" override for non-Bearer schemes
     this.catalog = {};
     this.inventory = new Map(); // epc -> record
     this.events = []; // newest first, capped
     this.maxEvents = 200;
     this._lastEventAt = new Map(); // epc -> ms epoch
-    this._pending = new Map(); // epc -> { reads: [{ant,rssi,t}], timer }
+    this._lastEventPassage = new Map(); // epc -> passageId of last fired event (one event per tag per passage)
+    this._pending = new Map(); // epc -> { reads: [{ant,rssi,dir,pid,t}], timer }
     this._unknownSeq = 0;
     this.loadCatalog();
   }
@@ -65,8 +72,6 @@ class MockNexus extends EventEmitter {
     if (Number.isFinite(cfg.dedupMs) && cfg.dedupMs >= 0) this.dedupMs = cfg.dedupMs;
     if (Number.isFinite(cfg.quietMs) && cfg.quietMs >= 100) this.quietMs = cfg.quietMs;
     if (Number.isFinite(cfg.maxWindowMs) && cfg.maxWindowMs >= this.quietMs) this.maxWindowMs = cfg.maxWindowMs;
-    if (Array.isArray(cfg.outsideAntennas) && cfg.outsideAntennas.length) this.outsideAntennas = cfg.outsideAntennas;
-    if (Array.isArray(cfg.insideAntennas) && cfg.insideAntennas.length) this.insideAntennas = cfg.insideAntennas;
     return this.summary();
   }
 
@@ -105,7 +110,7 @@ class MockNexus extends EventEmitter {
     // sliding window: re-arm the quiet timer on every read
     if (p.quiet) clearTimeout(p.quiet);
     p.quiet = setTimeout(() => this._decide(epc), this.quietMs);
-    p.reads.push({ ant: tag.antenna ?? null, rssi: tag.rssi ?? null, t: now });
+    p.reads.push({ ant: tag.antenna ?? null, rssi: tag.rssi ?? null, dir: tag.direction ?? null, pid: tag.passageId ?? null, t: now });
     return null;
   }
 
@@ -119,27 +124,30 @@ class MockNexus extends EventEmitter {
     if (p.reads.length === 0) return null;
     const now = Date.now();
 
-    const firstOn = (ants) => {
-      const r = p.reads.find((x) => ants.includes(x.ant));
-      return r ? r.t : null;
-    };
-    const tOut = firstOn(this.outsideAntennas);
-    const tIn = firstOn(this.insideAntennas);
-
     const rec0 = this.inventory.get(epc);
-    // SEQUENCE REQUIRED: direction only from real outside->inside (or reverse)
-    // evidence. One-sided sightings are stray reads (reflections, box parked
-    // near the door) — no event, no status change.
-    if (tOut == null || tIn == null || tOut === tIn) {
-      const side = tOut != null ? 'outside' : tIn != null ? 'inside' : 'unknown';
-      this.emit('log', `stray read ignored: ${epc} seen ${side}-only (${p.reads.length} reads), status stays ${rec0 ? rec0.status : 'untracked'}`);
-      // short cooldown only — a real passage moments later must still count
-      this._lastEventAt.set(epc, now - this.dedupMs + 1000);
+    // DIRECTION REQUIRED: the controller stamps the IR passage direction
+    // (GPI1 first = in, GPI2 first = out) on tags read during a burst. Reads
+    // without one (manual mode, ambiguous trigger, reflections) are stray —
+    // no event, no status change.
+    const firstDir = p.reads.find((x) => x.dir === 'in' || x.dir === 'out');
+    if (!firstDir) {
+      this.emit('log', `stray read ignored: ${epc} has no IR direction (${p.reads.length} reads), status stays ${rec0 ? rec0.status : 'untracked'}`);
+      // short cooldown only (min(dedupMs, 1s)) — a real passage moments later must still count
+      this._lastEventAt.set(epc, now - Math.max(0, this.dedupMs - 1000));
+      return null;
+    }
+    // Passage-scoped dedup: a tag fires at most ONE event per physical
+    // passage (beams broken -> clear), no matter how long it lingers in the
+    // doorway. A new passage gets a new id and counts again immediately.
+    if (firstDir.pid != null && this._lastEventPassage.get(epc) === firstDir.pid) {
+      this.emit('log', `duplicate suppressed: ${epc} already fired for passage #${firstDir.pid}`);
+      this._lastEventAt.set(epc, now - Math.max(0, this.dedupMs - 1000));
       return null;
     }
     this._lastEventAt.set(epc, now);
-    const direction = tOut < tIn ? 'in' : 'out';
-    const method = 'antenna';
+    if (firstDir.pid != null) this._lastEventPassage.set(epc, firstDir.pid);
+    const direction = firstDir.dir;
+    const method = 'ir';
 
     const known = Object.prototype.hasOwnProperty.call(this.catalog, epc);
     const item = known
@@ -183,9 +191,15 @@ class MockNexus extends EventEmitter {
   async _forward(event) {
     if (!this.url) return;
     try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (this.apiKey) headers['Authorization'] = `Bearer ${this.apiKey}`;
+      if (this.authHeader) {
+        const idx = this.authHeader.indexOf(':');
+        if (idx > 0) headers[this.authHeader.slice(0, idx).trim()] = this.authHeader.slice(idx + 1).trim();
+      }
       const res = await fetch(this.url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(event),
       });
       if (!res.ok) this.emit('log', `Nexus POST ${res.status}`);
@@ -212,8 +226,6 @@ class MockNexus extends EventEmitter {
       dedupMs: this.dedupMs,
       quietMs: this.quietMs,
       maxWindowMs: this.maxWindowMs,
-      outsideAntennas: this.outsideAntennas,
-      insideAntennas: this.insideAntennas,
       location: this.location,
     };
   }
@@ -222,6 +234,7 @@ class MockNexus extends EventEmitter {
     this.inventory.clear();
     this.events.length = 0;
     this._lastEventAt.clear();
+    this._lastEventPassage.clear();
     for (const p of this._pending.values()) {
       if (p.quiet) clearTimeout(p.quiet);
       if (p.max) clearTimeout(p.max);

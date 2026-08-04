@@ -36,7 +36,13 @@ class Controller extends EventEmitter {
     this.mode = 'manual'; // 'manual' | 'ir' | 'hw'
     this.irDurationMs = opts.irDurationMs ?? 500;
     this.irMinGapMs = opts.irMinGapMs ?? 200;
-    this.irTriggerInput = 1; // GPI1
+    this.irTriggerInput = 1; // GPI used for reader-side HW trigger mode
+    // Two-beam direction: whichever beam breaks FIRST decides the passage
+    // direction — GPI1 first = 'in', GPI2 first = 'out'. The passage stays
+    // open (and tags inherit its direction) until the burst ends with both
+    // beams clear.
+    this.passage = null; // { id, direction: 'in'|'out'|null, input, startedAt }
+    this._passageSeq = 0; // passage id: nexus dedups to one event per EPC per passage
     // 150ms: hardware shows beam breaks as short as ~100ms; 300ms missed fast swipes.
     this.gpiIntervalMs = opts.gpiIntervalMs ?? 150;
 
@@ -52,8 +58,10 @@ class Controller extends EventEmitter {
     this.udp.on('datagram', (d) => this._onUdpDatagram(d));
 
     this.lastGpi1 = false;
+    this.lastGpi2 = false;
     this.lastTriggerAt = 0;
     this.lastGpi = { gpi1: null, gpi2: null, raw: '' };
+    this._lastGpiPollAt = 0;
 
     this._running = false;
     this._lock = Promise.resolve(); // serializes DLL access
@@ -383,6 +391,7 @@ class Controller extends EventEmitter {
         antenna: d.parsed.antenna,
         rssi: d.parsed.rssi,
         tid: d.parsed.tid,
+        direction: null, // HW trigger mode is single-GPI — no direction info
         source: 'udp',
         timestamp: ts,
       });
@@ -397,6 +406,7 @@ class Controller extends EventEmitter {
       irDurationMs: this.irDurationMs,
       irMinGapMs: this.irMinGapMs,
       gpi: this.lastGpi,
+      passage: this.passage,
       udp: {
         listening: this.udp.listening,
         port: this.udpPort,
@@ -418,20 +428,33 @@ class Controller extends EventEmitter {
       if (this.connected) {
         if (this.reading) {
           const got = await this._withLock(() => this._drainTags());
+          // Keep watching the beams while reading — the second beam of a
+          // passage breaks DURING the burst, and the dashboard wants live GPI.
+          if (this.mode === 'ir' && Date.now() - this._lastGpiPollAt >= this.gpiIntervalMs) {
+            this._lastGpiPollAt = Date.now();
+            await this._withLock(() => this._pollGpiOnce());
+          }
           if (this.readingUntil && Date.now() >= this.readingUntil) {
             await this.stopReading();
-            // IR level-extension: if the beam is STILL broken when the burst
-            // expires, the pallet is still in the doorway — keep reading
-            // instead of waiting for a fresh clear->broken edge.
+            // IR level-extension: if EITHER beam is still broken when the
+            // burst expires, the pallet is still in the doorway — keep
+            // reading instead of waiting for a fresh clear->broken edge.
             if (this.mode === 'ir' && this.connected) {
               const g = await this._withLock(() => uhf.getGpi());
               if (g && g.rc === 0) {
                 this.lastGpi1 = g.gpi1 === true;
-                if (g.gpi1 === true) {
+                this.lastGpi2 = g.gpi2 === true;
+                if (g.gpi1 === true || g.gpi2 === true) {
                   this.log('IR burst extended — beam still broken.');
                   await this.startReading(this.irDurationMs);
+                } else {
+                  this._endPassage();
                 }
+              } else {
+                this._endPassage();
               }
+            } else {
+              this._endPassage();
             }
           }
           delay = got > 0 ? 0 : 10; // keep draining while tags flow
@@ -467,6 +490,8 @@ class Controller extends EventEmitter {
         antenna: tag.antenna,
         rssi: tag.rssi,
         tid: tag.tid,
+        direction: this.passage ? this.passage.direction : null,
+        passageId: this.passage ? this.passage.id : null,
         timestamp: new Date().toISOString(),
       };
       this.emit('message', msg);
@@ -507,21 +532,51 @@ class Controller extends EventEmitter {
       timestamp: new Date().toISOString(),
     });
 
-    // Edge detect: clear (false) -> broken (true) on GPI1.
-    const broken = gpi.gpi1 === true;
-    const edge = broken && !this.lastGpi1;
-    this.lastGpi1 = broken;
+    // Edge detect: clear (false) -> broken (true), on both beams.
+    const broken1 = gpi.gpi1 === true;
+    const broken2 = gpi.gpi2 === true;
+    const edge1 = broken1 && !this.lastGpi1;
+    const edge2 = broken2 && !this.lastGpi2;
+    this.lastGpi1 = broken1;
+    this.lastGpi2 = broken2;
 
-    if (edge && this.mode === 'ir') {
+    if (this.mode !== 'ir') return;
+
+    // Safety: a passage left open with no burst running and both beams clear
+    // (e.g. startReading failed) would block all future triggers — close it.
+    if (this.passage && !this.reading && !broken1 && !broken2) this._endPassage();
+
+    // First edge while no passage is open decides direction:
+    // GPI1 (outside beam) first = 'in', GPI2 (inside beam) first = 'out'.
+    if (!this.passage && (edge1 || edge2)) {
       const now = Date.now();
       if (now - this.lastTriggerAt >= this.irMinGapMs) {
         this.lastTriggerAt = now;
-        this.log('IR TRIGGER: GPI1 beam broken -> starting burst.');
-        this.emit('message', { type: 'trigger', input: 1, timestamp: new Date().toISOString() });
+        // Both edges landing in the same poll tick = order unknown. Still
+        // burst (we want the tag reads) but leave direction null — nexus
+        // treats direction-less reads as strays.
+        const direction = edge1 && edge2 ? null : edge1 ? 'in' : 'out';
+        const input = edge1 ? 1 : 2;
+        this.passage = { id: ++this._passageSeq, direction, input, startedAt: now };
+        if (direction) {
+          this.log(`IR TRIGGER: GPI${input} beam broken first -> direction ${direction.toUpperCase()}, starting burst.`);
+        } else {
+          this.log('IR TRIGGER: both beams broke in the same poll — direction unknown, starting burst anyway.', 'warn');
+        }
+        this.emit('message', { type: 'trigger', input, direction, timestamp: new Date().toISOString() });
         // start burst (schedule outside lock via microtask; loop will pick up READING)
         this.startReading(this.irDurationMs).catch((e) => this.log(e.message, 'error'));
       }
     }
+  }
+
+  /** Burst ended with both beams clear — close the passage. */
+  _endPassage() {
+    if (!this.passage) return;
+    const { direction, startedAt } = this.passage;
+    this.passage = null;
+    this.log(`Passage closed (direction ${direction ?? 'unknown'}, ${Date.now() - startedAt}ms).`);
+    this.emit('message', { type: 'passage-end', direction, timestamp: new Date().toISOString() });
   }
 }
 
