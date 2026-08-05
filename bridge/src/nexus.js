@@ -29,8 +29,11 @@
  *     swallowed.
  *
  * Other behaviour:
- *   - Catalog lookup: data/catalog.json maps EPC -> item (sku, name, pallet).
- *     Unknown EPCs are auto-registered as unknown items (still tracked).
+ *   - Catalog lookup: loaded from Supabase `operations_label_tag` (the real
+ *     printed-tag registry: EPC -> product_code/product_name/box_id) when
+ *     `catalogUrl`+`catalogKey` are set; each successful load is cached to
+ *     data/catalog.json so offline boots still know the tags. Unknown EPCs
+ *     are auto-registered as unknown items (still tracked).
  *   - In-memory inventory: epc -> { item, status: 'INSIDE'|'OUTSIDE', ... }.
  *   - If NEXUS_URL is set, each event is also POSTed there (fire-and-forget)
  *     — that's the seam where the real Nexus plugs in later.
@@ -56,6 +59,9 @@ class MockNexus extends EventEmitter {
     this.url = opts.url || ''; // real Nexus endpoint, empty = mock-only
     this.apiKey = opts.apiKey || ''; // sent as Authorization: Bearer <key>
     this.authHeader = opts.authHeader || ''; // raw "Name: value" override for non-Bearer schemes
+    this.catalogUrl = opts.catalogUrl || ''; // Supabase project URL for the tag registry
+    this.catalogKey = opts.catalogKey || ''; // Supabase key (service role or anon)
+    this.catalogSource = 'file'; // 'file' | 'supabase' — where the current catalog came from
     this.catalog = {};
     this.inventory = new Map(); // epc -> record
     this.events = []; // newest first, capped
@@ -78,11 +84,55 @@ class MockNexus extends EventEmitter {
   loadCatalog() {
     try {
       this.catalog = JSON.parse(fs.readFileSync(CATALOG_PATH, 'utf8'));
+      this.catalogSource = 'file';
     } catch (err) {
       this.catalog = {};
       this.emit('log', `catalog load failed (${err.message}) — all EPCs will be unknown`);
     }
     return this.catalog;
+  }
+
+  /**
+   * Load the catalog from Supabase `operations_label_tag` — the registry of
+   * every printed tag. On success the result also overwrites
+   * data/catalog.json so the next offline boot still knows the tags.
+   * Returns the catalog, or null when remote loading is not configured /
+   * failed (existing catalog is kept in that case).
+   */
+  async loadCatalogRemote() {
+    if (!this.catalogUrl || !this.catalogKey) return null;
+    const url =
+      `${this.catalogUrl.replace(/\/$/, '')}/rest/v1/operations_label_tag` +
+      `?select=epc,box_id,product_code,product_name,status&order=created_at.desc&limit=10000`;
+    try {
+      const res = await fetch(url, {
+        headers: { apikey: this.catalogKey, Authorization: `Bearer ${this.catalogKey}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const rows = await res.json();
+      const map = {};
+      for (const row of rows) {
+        if (!row.epc) continue;
+        map[String(row.epc).toUpperCase()] = {
+          sku: row.product_code || row.box_id || 'UNKNOWN-SKU',
+          name: row.product_name || 'Unnamed item',
+          pallet: row.box_id || null,
+          category: row.status || null,
+        };
+      }
+      this.catalog = map;
+      this.catalogSource = 'supabase';
+      this.emit('log', `catalog loaded from Supabase: ${rows.length} tags`);
+      try {
+        fs.writeFileSync(CATALOG_PATH, JSON.stringify(map, null, 2) + '\n', 'utf8');
+      } catch (err) {
+        this.emit('log', `catalog cache write failed (${err.message}) — in-memory catalog still active`);
+      }
+      return this.catalog;
+    } catch (err) {
+      this.emit('log', `Supabase catalog load failed (${err.message}) — keeping ${Object.keys(this.catalog).length} cached entries`);
+      return null;
+    }
   }
 
   /**
@@ -227,6 +277,8 @@ class MockNexus extends EventEmitter {
       quietMs: this.quietMs,
       maxWindowMs: this.maxWindowMs,
       location: this.location,
+      catalogSize: Object.keys(this.catalog).length,
+      catalogSource: this.catalogSource,
     };
   }
 
