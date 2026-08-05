@@ -13,12 +13,13 @@ const DEFAULT_PORT = Number(process.env.UR4_PORT || 8888);
 
 // --- Supabase forwarding (optional) ------------------------------------------
 const SB_URL = process.env.SUPABASE_URL || '';
-const SB_KEY = process.env.SUPABASE_ANON_KEY || '';
+const SB_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
 const SB_TABLE = process.env.SUPABASE_TABLE || 'rfid_reads';
 const SB_ENABLED = Boolean(SB_URL && SB_KEY);
+let sbForwardDisabled = false; // latched on 404 — table missing, don't spam warnings per read
 
 async function forwardToSupabase(tag) {
-  if (!SB_ENABLED) return;
+  if (!SB_ENABLED || sbForwardDisabled) return;
   try {
     const res = await fetch(`${SB_URL.replace(/\/$/, '')}/rest/v1/${SB_TABLE}`, {
       method: 'POST',
@@ -37,10 +38,49 @@ async function forwardToSupabase(tag) {
     });
     if (!res.ok) {
       const body = await res.text();
-      controller.log(`Supabase POST ${res.status}: ${body.slice(0, 200)}`, 'warn');
+      if (res.status === 404) {
+        sbForwardDisabled = true;
+        controller.log(`Supabase table "${SB_TABLE}" not found (404) — read forwarding disabled for this run.`, 'warn');
+      } else {
+        controller.log(`Supabase POST ${res.status}: ${body.slice(0, 200)}`, 'warn');
+      }
     }
   } catch (err) {
     controller.log(`Supabase forward error: ${err.message}`, 'warn');
+  }
+}
+
+// Movement -> Nexus DB: every portal entry/exit is written to
+// operations_tag_scan (same table the receiving flow uses). The event check
+// constraint allows ship|receive|putaway|transfer, so: in = receive, out =
+// ship, with reader='portal' marking gate scans.
+async function forwardMovementToSupabase(event) {
+  if (!SB_ENABLED) return;
+  try {
+    const res = await fetch(`${SB_URL.replace(/\/$/, '')}/rest/v1/operations_tag_scan`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: SB_KEY,
+        Authorization: `Bearer ${SB_KEY}`,
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({
+        epc: event.epc,
+        event: event.direction === 'in' ? 'receive' : 'ship',
+        product_code: event.item?.sku ?? null,
+        location: event.location,
+        reader: 'portal',
+        rssi: event.rssi ?? null,
+        note: `gate ${event.direction} via ${event.method}${event.known ? '' : ' (unknown EPC)'}`,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      controller.log(`movement -> operations_tag_scan ${res.status}: ${body.slice(0, 200)}`, 'warn');
+    }
+  } catch (err) {
+    controller.log(`movement -> operations_tag_scan error: ${err.message}`, 'warn');
   }
 }
 
@@ -61,6 +101,10 @@ const nexus = new MockNexus({
   url: process.env.NEXUS_URL || '',
   apiKey: process.env.NEXUS_API_KEY || '',
   authHeader: process.env.NEXUS_AUTH_HEADER || '',
+  // Tag registry: catalog is loaded from operations_label_tag in this
+  // Supabase project (and cached to data/catalog.json for offline boots).
+  catalogUrl: SB_URL,
+  catalogKey: SB_KEY,
 });
 nexus.on('log', (text) => controller.log(`[nexus] ${text}`));
 nexus.on('movement', (event) => {
@@ -70,6 +114,7 @@ nexus.on('movement', (event) => {
     }) dir=${event.direction} via=${event.method} ants=[${event.antennas}] epc=${event.epc}`
   );
   broadcast(event); // event.type is already 'entry' | 'exit'
+  forwardMovementToSupabase(event); // fire-and-forget into operations_tag_scan
 });
 
 // --- HTTP / Express -----------------------------------------------------------
@@ -370,7 +415,12 @@ app.post('/nexus/reset', (_req, res) => {
   nexus.reset();
   res.json({ ok: true, ...nexus.summary() });
 });
-app.post('/nexus/catalog/reload', (_req, res) => res.json({ ok: true, catalog: nexus.loadCatalog() }));
+app.post('/nexus/catalog/reload', async (_req, res) => {
+  // Prefer the live registry; fall back to the cached file when offline.
+  const remote = await nexus.loadCatalogRemote();
+  const catalog = remote || nexus.loadCatalog();
+  res.json({ ok: true, source: nexus.catalogSource, count: Object.keys(catalog).length, catalog });
+});
 app.post('/nexus/config', (req, res) => {
   const summary = nexus.setConfig(req.body || {});
   controller.log(`[nexus] config: dedup=${summary.dedupMs}ms quiet=${summary.quietMs}ms maxWindow=${summary.maxWindowMs}ms`);
@@ -408,6 +458,9 @@ controller.on('message', (msg) => {
 server.listen(PORT, () => {
   controller.log(`Bridge listening on http://localhost:${PORT}  (WS: ws://localhost:${PORT}/ws)`);
   controller.log(`Reader defaults: ${DEFAULT_IP}:${DEFAULT_PORT}. Supabase forwarding: ${SB_ENABLED ? 'ON' : 'off'}.`);
+  // Refresh the catalog from the live tag registry (falls back to the cached
+  // data/catalog.json already loaded by the constructor).
+  nexus.loadCatalogRemote();
   try {
     controller.start();
   } catch (err) {
