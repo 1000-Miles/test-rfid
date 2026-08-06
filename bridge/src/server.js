@@ -413,6 +413,119 @@ app.post('/antennas', async (req, res) => {
   }
 });
 
+// --- single-tag access ------------------------------------------------------
+// Encoding is done one tag at a time, and every write is addressed by TID so a
+// neighbouring tag can never be the one programmed. These routes are the HTTP
+// face of that; test/encode-tags.js is the batch tool built on the same calls.
+
+/** Shared guard: tag ops need the radio idle, and a filter that is real. */
+async function withTagAccess(res, fn) {
+  const uhf = require('./driver');
+  if (!controller.connected) {
+    res.status(409).json({ ok: false, error: 'not connected' });
+    return;
+  }
+  if (!uhf.readBank) {
+    res.status(501).json({ ok: false, error: 'the active driver does not implement tag access' });
+    return;
+  }
+  // The reader ignores commands mid-inventory, so a read/write issued during a
+  // burst would silently do nothing.
+  if (controller.reading) await controller.stopReading();
+  try {
+    res.json({ ok: true, ...(await controller._withLock(() => fn(uhf))) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+}
+
+/** Turn a request body's filter spec into a driver filter, or null. */
+function filterFrom(body, uhf) {
+  if (body?.tid) return uhf.filterByTid(body.tid);
+  if (body?.epc) return uhf.filterByEpc(body.epc);
+  return null;
+}
+
+// GET /tag  — singulate one tag and report PC + EPC (+ TID when readable).
+app.get('/tag', async (_req, res) => {
+  await withTagAccess(res, (uhf) => {
+    const single = uhf.inventorySingle();
+    if (!single) return { tag: null };
+    const filter = uhf.filterByEpc(single.epc);
+    const tid = uhf.readBank({ bank: uhf.BANK.TID, ptr: 0, words: 6, filter });
+    return {
+      tag: { ...single, epcWords: uhf.epcWordsFromPc(single.pc), tid: tid.rc === 0 ? tid.hex : null },
+    };
+  });
+});
+
+// POST /tag/read  { bank, ptr, words, tid?|epc?, accessPwd? }
+app.post('/tag/read', async (req, res) => {
+  const { bank, ptr = 0, words = 1, accessPwd } = req.body ?? {};
+  if (!Number.isInteger(bank) || bank < 0 || bank > 3) {
+    return res.status(400).json({ ok: false, error: 'bank must be 0 (RESERVED), 1 (EPC), 2 (TID) or 3 (USER)' });
+  }
+  await withTagAccess(res, (uhf) =>
+    uhf.readBank({ bank, ptr: Number(ptr), words: Number(words), filter: filterFrom(req.body, uhf), accessPwd })
+  );
+});
+
+// POST /tag/write  { bank, ptr, data, tid?|epc?, accessPwd? }
+// Addressing by `tid` is strongly preferred: an EPC filter matches whatever
+// currently carries that EPC, a TID filter matches one physical chip.
+app.post('/tag/write', async (req, res) => {
+  const { bank, ptr = 0, data, accessPwd, attempts } = req.body ?? {};
+  if (!Number.isInteger(bank) || bank < 0 || bank > 3) {
+    return res.status(400).json({ ok: false, error: 'bank must be 0 (RESERVED), 1 (EPC), 2 (TID) or 3 (USER)' });
+  }
+  if (typeof data !== 'string' || !data.trim()) return res.status(400).json({ ok: false, error: 'data (hex) required' });
+
+  // Retry by default. A Gen2 write needs materially more RF energy than a read,
+  // so a tag that inventories fine can still drop a single write — measured at
+  // -65dBm on the bench, roughly one miss in five. Retrying is safe precisely
+  // because every attempt is verified: we rewrite the SAME bytes and stop the
+  // moment the tag reads them back, so a retry can never compound a bad write.
+  const maxAttempts = Math.max(1, Math.min(5, Number(attempts) || 3));
+
+  await withTagAccess(res, async (uhf) => {
+    const filter = filterFrom(req.body, uhf);
+    const expected = data.replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+    const words = expected.length / 4;
+    const tries = [];
+
+    for (let i = 1; i <= maxAttempts; i++) {
+      const rc = await uhf.writeBank({ bank, ptr: Number(ptr), dataHex: expected, filter, accessPwd });
+      // Always read back — a write rc of 0 is not evidence that it stuck.
+      const back = await uhf.readBank({ bank, ptr: Number(ptr), words, filter, accessPwd });
+      tries.push({ attempt: i, rc, readBack: back.hex });
+      if (rc === 0 && back.hex === expected) {
+        return { rc, wrote: expected, readBack: back.hex, verified: true, attempts: i, tries };
+      }
+      // Let the tag re-power before trying again — back-to-back writes on a
+      // marginal link tend to fail the same way.
+      if (i < maxAttempts) await new Promise((r) => setTimeout(r, 60));
+    }
+
+    const last = tries[tries.length - 1];
+    return { rc: last.rc, wrote: expected, readBack: last.readBack, verified: false, attempts: tries.length, tries };
+  });
+});
+
+// Reader output power in dBm. GET reads it; POST sets it for this session only
+// (save=false) — a bench power bump must not silently become the gate's setting.
+app.get('/tag/power', async (_req, res) => {
+  await withTagAccess(res, async (uhf) => ({ dBm: await uhf.getPower() }));
+});
+
+app.post('/tag/power', async (req, res) => {
+  const dBm = Number(req.body?.dBm);
+  if (!Number.isInteger(dBm) || dBm < 1 || dBm > 30) return res.status(400).json({ ok: false, error: 'dBm must be 1..30' });
+  await withTagAccess(res, async (uhf) => {
+    const rc = await uhf.setPower(dBm, false);
+    return { rc, dBm: await uhf.getPower() };
+  });
+});
+
 app.get('/nexus/summary', (_req, res) => res.json({ ok: true, ...nexus.summary() }));
 app.get('/nexus/inventory', (_req, res) => res.json({ ok: true, inventory: nexus.getInventory() }));
 app.get('/nexus/events', (req, res) => res.json({ ok: true, events: nexus.getEvents(Number(req.query.limit) || 50) }));
