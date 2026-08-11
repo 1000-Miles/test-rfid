@@ -1,5 +1,5 @@
 import type { DocLine, Direction } from './documents';
-import { pct } from './documents';
+import { lineUnits, pct } from './documents';
 
 /**
  * Shared vocabulary for the gate board screens — the design tokens from the
@@ -65,18 +65,23 @@ export const dueChip = (due: number) =>
  * One SKU line of one document. `doc` adds the owning PO / shipment strip —
  * needed when tiles from several documents share a grid.
  */
-export function Tile(props: { line: DocLine; dir: Direction; doc?: { id: string; due: number }; onClick?: () => void }) {
+export function Tile(props: { line: DocLine; dir: Direction; doc?: { label: string; due: number }; onClick?: () => void }) {
   const a = accent(props.dir);
   const { line, doc } = props;
   const done = line.received >= line.expected;
   const started = line.received > 0;
   const due = doc ? dueChip(doc.due) : null;
+  // Cartons are what staff act on at the gate — that stays the big badge over
+  // the photo. Units are supporting detail (only known when Nexus can derive
+  // units-per-carton), so it earns one quiet line of text, not a second badge
+  // competing with the first on an already-small card.
+  const units = lineUnits(line);
 
   return (
     <div
       onClick={props.onClick}
       style={{
-        borderRadius: u(16),
+        borderRadius: u(12),
         background: C.white,
         border: `2px solid ${done ? C.green : started ? a.fill : C.border}`,
         overflow: 'hidden',
@@ -87,33 +92,43 @@ export function Tile(props: { line: DocLine; dir: Direction; doc?: { id: string;
       }}
     >
       {doc && due && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: u(10), padding: `${u(10)} ${u(14)}`, background: doc.due < 0 ? C.redBg : C.surface, borderBottom: `1px solid ${C.border}` }}>
-          <div style={{ fontSize: u(18), fontWeight: 800, letterSpacing: '0.01em', color: C.fg }}>{doc.id}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: u(8), padding: `${u(7)} ${u(11)}`, background: doc.due < 0 ? C.redBg : C.surface, borderBottom: `1px solid ${C.border}` }}>
+          <div style={{ fontSize: u(14), fontWeight: 800, letterSpacing: '0.01em', color: C.fg, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{doc.label}</div>
           <div style={{ flex: 1 }} />
-          <div style={{ fontSize: u(12), fontWeight: 800, letterSpacing: '0.1em', color: due.fg }}>{due.short}</div>
+          <div style={{ fontSize: u(10), fontWeight: 800, letterSpacing: '0.1em', color: due.fg, flex: '0 0 auto' }}>{due.short}</div>
         </div>
       )}
 
-      <div style={{ position: 'relative', height: u(230), background: C.surface }}>
+      {/* Photo first, then the product's own emoji, then the shared box icon —
+          the same precedence Nexus's own UI uses for the same idea record. */}
+      <div style={{ position: 'relative', height: u(140), background: C.surface }}>
         {line.photoUrl ? (
           <img src={line.photoUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
         ) : (
           <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: done ? C.greenBg : started ? a.soft : C.surface, color: done ? C.greenDk : started ? a.text : C.off }}>
-            <Icon.Box size={72} />
+            {line.emoji ? <div style={{ fontSize: u(48), lineHeight: 1 }}>{line.emoji}</div> : <Icon.Box size={44} />}
           </div>
         )}
-        <div style={{ position: 'absolute', left: u(12), top: u(12), padding: `${u(5)} ${u(12)}`, borderRadius: u(26), background: 'rgba(255,255,255,0.92)', boxShadow: '0 1px 4px rgba(0,0,0,0.18)', fontSize: u(13), fontWeight: 700, letterSpacing: '0.1em', color: '#525252', fontFamily: "'Courier New', monospace", pointerEvents: 'none' }}>
+        <div style={{ position: 'absolute', left: u(8), top: u(8), padding: `${u(3)} ${u(9)}`, borderRadius: u(20), background: 'rgba(255,255,255,0.92)', boxShadow: '0 1px 4px rgba(0,0,0,0.18)', fontSize: u(11), fontWeight: 700, letterSpacing: '0.08em', color: '#525252', fontFamily: "'Courier New', monospace", pointerEvents: 'none' }}>
           {line.sku}
         </div>
-        <div style={{ position: 'absolute', right: u(12), bottom: u(12), padding: `${u(8)} ${u(16)}`, borderRadius: u(26), fontSize: u(26), fontWeight: 800, fontVariantNumeric: 'tabular-nums', pointerEvents: 'none', background: done ? C.green : started ? a.text : 'rgba(255,255,255,0.94)', color: done || started ? C.white : C.muted, boxShadow: '0 2px 12px rgba(0,0,0,0.28)' }}>
+        <div style={{ position: 'absolute', right: u(8), bottom: u(8), padding: `${u(5)} ${u(11)}`, borderRadius: u(20), fontSize: u(17), fontWeight: 800, fontVariantNumeric: 'tabular-nums', pointerEvents: 'none', background: done ? C.green : started ? a.text : 'rgba(255,255,255,0.94)', color: done || started ? C.white : C.muted, boxShadow: '0 2px 10px rgba(0,0,0,0.24)' }}>
           {line.received}/{line.expected}
         </div>
       </div>
 
-      <div style={{ padding: `${u(14)} ${u(16)} ${u(18)} ${u(16)}`, display: 'flex', flexDirection: 'column', gap: u(10), flex: 1 }}>
-        <div style={{ fontSize: u(19), fontWeight: 600, lineHeight: 1.25, color: C.fg }}>{line.name}</div>
-        <div style={{ marginTop: 'auto', height: u(8), borderRadius: u(5), background: '#e9ebee', overflow: 'hidden' }}>
-          <div style={{ height: '100%', borderRadius: u(5), width: `${pct(line.received, line.expected)}%`, background: done ? C.green : started ? a.fill : C.off, transition: 'width .3s ease' }} />
+      <div style={{ padding: `${u(9)} ${u(11)} ${u(11)} ${u(11)}`, display: 'flex', flexDirection: 'column', gap: u(7), flex: 1 }}>
+        <div style={{ fontSize: u(14), fontWeight: 600, lineHeight: 1.25, color: C.fg, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{line.name}</div>
+        {units && (
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: u(5), fontSize: u(11) }}>
+            <span style={{ fontWeight: 800, letterSpacing: '0.08em', color: C.faint }}>UNITS</span>
+            <span style={{ fontWeight: 700, color: C.muted, fontVariantNumeric: 'tabular-nums' }}>
+              {units.received.toLocaleString()}/{units.expected.toLocaleString()}
+            </span>
+          </div>
+        )}
+        <div style={{ marginTop: 'auto', height: u(6), borderRadius: u(4), background: '#e9ebee', overflow: 'hidden' }}>
+          <div style={{ height: '100%', borderRadius: u(4), width: `${pct(line.received, line.expected)}%`, background: done ? C.green : started ? a.fill : C.off, transition: 'width .3s ease' }} />
         </div>
       </div>
     </div>

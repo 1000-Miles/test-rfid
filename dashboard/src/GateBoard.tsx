@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { activeDocs, docTotals, pct, sumTotals, type Direction, type GateDoc, type GateBoardApi } from './documents';
+import { activeDocs, docTitle, docTotals, pct, sumTotals, type Direction, type DocLine, type FeedState, type GateDoc, type GateBoardApi } from './documents';
 import { accent, C, dueChip, Icon, RING_CIRCUMFERENCE, Tile, u } from './boardKit';
 import { AddButton, ReceivingTab, ShippingTab } from './FooterTabs';
 import DirectionView from './DirectionView';
+import Qr from './Qr';
 import type { BridgeState } from './useBridge';
 
 /**
@@ -95,6 +96,11 @@ export default function GateBoard(props: { bridge: BridgeState; board: GateBoard
       <Header
         scanning={bridge.status.reading || justRead}
         online={bridge.wsConnected && bridge.status.connected}
+        feed={board.feed}
+        onRefresh={() => {
+          touch();
+          board.refresh();
+        }}
         exceptionCount={exceptions.length}
         onExceptions={() => {
           touch();
@@ -177,7 +183,15 @@ export default function GateBoard(props: { bridge: BridgeState; board: GateBoard
 
 /* ---------------------------------------------------------------- header */
 
-function Header(props: { scanning: boolean; online: boolean; exceptionCount: number; onExceptions: () => void; onControls: () => void }) {
+function Header(props: {
+  scanning: boolean;
+  online: boolean;
+  feed: FeedState;
+  onRefresh: () => void;
+  exceptionCount: number;
+  onExceptions: () => void;
+  onControls: () => void;
+}) {
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
@@ -189,43 +203,106 @@ function Header(props: { scanning: boolean; online: boolean; exceptionCount: num
   const clock = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
   const dateLabel = `${days[now.getDay()]} · ${String(now.getDate()).padStart(2, '0')} ${mon[now.getMonth()]} ${now.getFullYear()}`;
 
+  // Two rows on the right of the QR, not one — the bigger QR (148, up from
+  // 104) left zero horizontal slack in the old single-row layout: measured at
+  // true kiosk width, the fixed-width children summed to exactly the
+  // available content width with the READING pill and exceptions badge not
+  // even counted, so either one appearing would overflow. The header is tall
+  // enough (u(196)) to hold identity+clock on one line and status+gear on the
+  // line below, which frees real width instead of squeezing text further.
   return (
-    <div style={{ flex: `0 0 ${u(112)}`, display: 'flex', alignItems: 'center', gap: u(22), padding: `0 ${u(32)}`, background: C.white, borderBottom: `1px solid ${C.border}`, position: 'relative', zIndex: 20 }}>
-      <div style={{ width: u(62), height: u(62), borderRadius: u(14), background: C.cyan, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: u(18), fontWeight: 800, color: C.white, letterSpacing: u(-0.4) }}>
-        1000M
+    <div style={{ flex: `0 0 ${u(176)}`, display: 'flex', alignItems: 'stretch', gap: u(26), padding: `${u(16)} ${u(32)}`, background: C.white, borderBottom: `1px solid ${C.border}`, position: 'relative', zIndex: 20 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: u(6), flex: '0 0 auto' }}>
+        <Qr size={144} />
+        <div style={{ fontSize: u(10), fontWeight: 800, letterSpacing: '0.12em', color: C.faint }}>SCAN · LIVE VIEW</div>
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: u(5) }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: u(10) }}>
-          <span style={{ width: u(11), height: u(11), borderRadius: '50%', background: props.online ? C.green : C.red }} title={props.online ? 'Bridge and reader online' : 'Bridge or reader offline'} />
-          <div style={{ fontSize: u(25), fontWeight: 700, letterSpacing: '0.01em' }}>RFID GATE 01</div>
+
+      {/* A thin divider ties the QR to the info column as one composed unit
+          instead of two blocks separated by a gap — and the two info rows are
+          pulled together with a modest, explicit gap (not space-between,
+          which was stretching them to the very top and bottom of the header
+          and leaving a dead zone in the middle) so they read as one group,
+          centered against the QR's height. */}
+      <div style={{ flex: '0 0 auto', width: 1, background: C.border, alignSelf: 'stretch' }} />
+
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: u(20) }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: u(16) }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: u(12), minWidth: 0 }}>
+            <span
+              className={props.online ? 'gate-pulse-online' : undefined}
+              style={{ width: u(13), height: u(13), borderRadius: '50%', background: props.online ? C.green : C.red, flex: '0 0 auto' }}
+              title={props.online ? 'Bridge and reader online' : 'Bridge or reader offline'}
+            />
+            <div style={{ fontSize: u(34), fontWeight: 800, letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>RFID GATE 01</div>
+          </div>
+          <div style={{ flex: 1 }} />
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: u(4), flex: '0 0 auto' }}>
+            <div style={{ fontSize: u(34), fontWeight: 700, letterSpacing: u(-0.5), fontVariantNumeric: 'tabular-nums', lineHeight: 1, whiteSpace: 'nowrap' }}>{clock}</div>
+            <div style={{ fontSize: u(16), fontWeight: 600, letterSpacing: '0.08em', color: C.muted, whiteSpace: 'nowrap' }}>{dateLabel}</div>
+          </div>
         </div>
-        <div style={{ fontSize: u(15), fontWeight: 600, letterSpacing: '0.14em', color: C.muted }}>WAREHOUSE A · DOCK 3</div>
-      </div>
-      <div style={{ flex: 1 }} />
 
-      {props.scanning && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: u(12), padding: `${u(12)} ${u(22)}`, borderRadius: u(26), background: C.cyanBg, border: `1px solid ${C.cyanEdge}` }}>
-          <div className="gate-dot" style={{ width: u(14), height: u(14), borderRadius: '50%', background: C.cyan }} />
-          <div style={{ fontSize: u(17), fontWeight: 700, letterSpacing: '0.12em', color: C.cyanDk }}>READING</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: u(14) }}>
+          {props.scanning && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: u(12), padding: `${u(12)} ${u(22)}`, borderRadius: u(26), background: C.cyanBg, border: `1px solid ${C.cyanEdge}`, flex: '0 0 auto' }}>
+              <div className="gate-dot" style={{ width: u(14), height: u(14), borderRadius: '50%', background: C.cyan }} />
+              <div style={{ fontSize: u(17), fontWeight: 700, letterSpacing: '0.12em', color: C.cyanDk, whiteSpace: 'nowrap' }}>READING</div>
+            </div>
+          )}
+
+          <FeedChip feed={props.feed} onRefresh={props.onRefresh} />
+
+          {props.exceptionCount > 0 && (
+            <div onClick={props.onExceptions} style={{ display: 'flex', alignItems: 'center', gap: u(12), padding: `${u(12)} ${u(24)}`, borderRadius: u(26), background: C.redBg, border: `1px solid ${C.redEdge}`, cursor: 'pointer', flex: '0 0 auto' }}>
+              <Icon.Warning size={24} color={C.red} />
+              <div style={{ fontSize: u(26), fontWeight: 800, color: C.red, lineHeight: 1, whiteSpace: 'nowrap' }}>{props.exceptionCount}</div>
+              <div style={{ fontSize: u(15), fontWeight: 700, letterSpacing: '0.1em', color: C.redDk, whiteSpace: 'nowrap' }}>EXCEPTIONS</div>
+            </div>
+          )}
+
+          <div style={{ flex: 1 }} />
+
+          <div onClick={props.onControls} title="Engineering console" style={{ width: u(56), height: u(56), borderRadius: u(14), background: C.surface, border: `1px solid ${C.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.muted, cursor: 'pointer', flex: '0 0 auto' }}>
+            <Icon.Gear size={26} />
+          </div>
         </div>
-      )}
-
-      {props.exceptionCount > 0 && (
-        <div onClick={props.onExceptions} style={{ display: 'flex', alignItems: 'center', gap: u(12), padding: `${u(12)} ${u(24)}`, borderRadius: u(26), background: C.redBg, border: `1px solid ${C.redEdge}`, cursor: 'pointer' }}>
-          <Icon.Warning size={24} color={C.red} />
-          <div style={{ fontSize: u(26), fontWeight: 800, color: C.red, lineHeight: 1 }}>{props.exceptionCount}</div>
-          <div style={{ fontSize: u(15), fontWeight: 700, letterSpacing: '0.1em', color: C.redDk }}>EXCEPTIONS</div>
-        </div>
-      )}
-
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: u(4) }}>
-        <div style={{ fontSize: u(34), fontWeight: 700, letterSpacing: u(-0.5), fontVariantNumeric: 'tabular-nums', lineHeight: 1 }}>{clock}</div>
-        <div style={{ fontSize: u(16), fontWeight: 600, letterSpacing: '0.08em', color: C.muted }}>{dateLabel}</div>
       </div>
+    </div>
+  );
+}
 
-      <div onClick={props.onControls} title="Engineering console" style={{ width: u(62), height: u(62), borderRadius: u(14), background: C.surface, border: `1px solid ${C.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.muted, cursor: 'pointer' }}>
-        <Icon.Gear size={28} />
-      </div>
+/**
+ * Document-feed state, and the manual refresh.
+ *
+ * Always visible: the board polls every minute, so the useful thing to show is
+ * WHEN the documents were last true — a kiosk that silently displays a
+ * three-hour-old board is worse than one that admits it. Amber and red only
+ * appear when the feed is cached or down. Tapping re-pulls immediately, for
+ * when someone has just created a batch and doesn't want to wait out the poll.
+ */
+function FeedChip(props: { feed: FeedState; onRefresh: () => void }) {
+  const { status, fetchedAt } = props.feed;
+  // hour12:false to match the header's own 24h clock, and to avoid a trailing
+  // " PM" that made this chip wrap under a squeeze.
+  const stamp = fetchedAt ? new Date(fetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
+
+  const look =
+    status === 'error'
+      ? { label: 'DOCS UNAVAILABLE', detail: 'tap to retry', bg: C.redBg, edge: C.redEdge, fg: C.redDk }
+      : status === 'stale'
+        ? { label: 'CACHED DOCS', detail: stamp ? `as of ${stamp}` : 'tap to retry', bg: C.amberBg, edge: C.amberEdge, fg: C.amberDk }
+        : status === 'loading'
+          ? { label: 'UPDATING', detail: '', bg: C.surface, edge: C.border, fg: C.muted }
+          : { label: 'DOCS', detail: stamp ? `updated ${stamp}` : '', bg: C.surface, edge: C.border, fg: C.muted };
+
+  return (
+    <div
+      onClick={props.onRefresh}
+      title="Reload today's receiving and shipping documents from Nexus"
+      style={{ display: 'flex', alignItems: 'center', gap: u(12), padding: `${u(12)} ${u(22)}`, borderRadius: u(26), background: look.bg, border: `1px solid ${look.edge}`, cursor: 'pointer' }}
+    >
+      <div style={{ fontSize: u(15), fontWeight: 800, letterSpacing: '0.12em', color: look.fg }}>{look.label}</div>
+      {look.detail && <div style={{ fontSize: u(15), fontWeight: 600, color: C.muted }}>{look.detail}</div>}
     </div>
   );
 }
@@ -239,9 +316,20 @@ function SummaryCard(props: { dir: Direction; docs: GateDoc[]; totals: { receive
   const late = props.docs.filter((d) => d.due < 0).length;
   const dueToday = props.docs.filter((d) => d.due === 0).length;
   const docLabel = [`${dueToday} ${noun} due today`, ...(late ? [`${late} overdue`] : [])].join(' · ');
+  // What staff actually recognise at a glance is the PRODUCT crossing the
+  // door, not the paperwork it rides on — so the idle board shows one tile per
+  // SKU line (photo, name, progress) rather than one row per PO/shipment.
+  // The owning document still travels with each tile as its label strip.
+  const items: { line: DocLine; doc: GateDoc }[] = props.docs.flatMap((doc) => doc.lines.map((line) => ({ line, doc })));
+  // Photo tiles are far taller than the old text rows, so a fixed 50/50 split
+  // between Inbound and Outbound either clips a busy side's tiles or wastes
+  // half the screen on an empty one. Weighting by rows-of-tiles instead lets
+  // whichever direction has more happening claim more of the screen; a
+  // minimum of 1 keeps an empty section's ring and message from being squashed.
+  const rows = Math.max(1, Math.ceil(items.length / 4));
 
   return (
-    <div style={{ flex: 1, minHeight: 0, background: C.white, borderRadius: u(20), boxShadow: '0 0 0 1px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.04)', padding: `${u(26)} ${u(28)}`, display: 'flex', flexDirection: 'column', gap: u(20) }}>
+    <div style={{ flex: rows, minHeight: 0, background: C.white, borderRadius: u(20), boxShadow: '0 0 0 1px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.04)', padding: `${u(26)} ${u(28)}`, display: 'flex', flexDirection: 'column', gap: u(20) }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: u(28) }}>
         <div style={{ position: 'relative', width: u(172), height: u(172), flex: `0 0 ${u(172)}` }}>
           <svg viewBox="0 0 172 172" style={{ width: '100%', height: '100%', transform: 'rotate(-90deg)', display: 'block' }}>
@@ -276,53 +364,18 @@ function SummaryCard(props: { dir: Direction; docs: GateDoc[]; totals: { receive
         </div>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: u(12) }}>
-        {props.docs.length === 0 ? (
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+        {items.length === 0 ? (
           <div style={{ fontSize: u(19), fontWeight: 600, color: C.faint, padding: `${u(20)} 0` }}>
             Nothing {props.dir === 'in' ? 'inbound' : 'outbound'} on today’s board.
           </div>
         ) : (
-          props.docs.map((doc) => <DocRow key={doc.id} doc={doc} dir={props.dir} onOpen={() => props.onOpen(doc.id)} />)
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: u(12) }}>
+            {items.map(({ line, doc }) => (
+              <Tile key={`${doc.id}-${line.sku}`} line={line} dir={props.dir} doc={{ label: docTitle(doc), due: doc.due }} onClick={() => props.onOpen(doc.id)} />
+            ))}
+          </div>
         )}
-      </div>
-    </div>
-  );
-}
-
-function DocRow(props: { doc: GateDoc; dir: Direction; onOpen: () => void }) {
-  const a = accent(props.dir);
-  const t = docTotals(props.doc);
-  const p = pct(t.received, t.expected);
-  const done = t.received >= t.expected && t.expected > 0;
-  const started = t.received > 0;
-  const due = dueChip(props.doc.due);
-
-  const bar = done ? C.green : started ? a.fill : C.off;
-  const color = done ? C.green : started ? a.text : C.faint;
-  const status = done ? 'COMPLETE' : started ? 'IN PROGRESS' : 'WAITING';
-  const chipBg = done ? C.greenBg : started ? a.soft : C.surface;
-  const chipFg = done ? C.greenDk : started ? a.text : C.faint;
-
-  return (
-    <div onClick={props.onOpen} style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: u(18), padding: `${u(14)} ${u(20)}`, borderRadius: u(14), background: C.white, border: `1px solid ${C.border}`, cursor: 'pointer' }}>
-      <div style={{ flex: `0 0 ${u(46)}`, width: u(46), height: u(46), borderRadius: u(12), background: a.soft, color: a.text, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        {props.dir === 'in' ? <Icon.Box size={23} /> : <Icon.Truck size={23} />}
-      </div>
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: u(6), minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: u(12) }}>
-          <div style={{ fontSize: u(24), fontWeight: 700, letterSpacing: '0.01em' }}>{props.doc.id}</div>
-          <div style={{ padding: `${u(4)} ${u(12)}`, borderRadius: u(26), fontSize: u(14), fontWeight: 800, letterSpacing: '0.08em', background: chipBg, color: chipFg }}>{status}</div>
-          <div style={{ padding: `${u(4)} ${u(12)}`, borderRadius: u(26), fontSize: u(14), fontWeight: 800, letterSpacing: '0.08em', background: due.bg, color: due.fg, border: `1px solid ${due.edge}` }}>{due.label}</div>
-        </div>
-        <div style={{ fontSize: u(15), fontWeight: 500, color: C.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {props.doc.party} · {props.doc.meta}
-        </div>
-        <div style={{ height: u(10), borderRadius: u(8), background: C.track, overflow: 'hidden', marginTop: u(2) }}>
-          <div style={{ height: '100%', borderRadius: u(8), width: `${p}%`, background: bar, transition: 'width .3s ease' }} />
-        </div>
-      </div>
-      <div style={{ fontSize: u(38), fontWeight: 800, letterSpacing: u(-1), fontVariantNumeric: 'tabular-nums', color, minWidth: u(170), textAlign: 'right' }}>
-        {t.received} / {t.expected}
       </div>
     </div>
   );
@@ -353,7 +406,7 @@ function DocumentView(props: { dir: Direction; doc: GateDoc; onBack: () => void;
               <div style={{ padding: `${u(8)} ${u(18)}`, borderRadius: u(26), fontSize: u(15), fontWeight: 800, letterSpacing: '0.12em', background: due.bg, color: due.fg, border: `1px solid ${due.edge}` }}>{due.label}</div>
               <div style={{ fontSize: u(16), fontWeight: 600, letterSpacing: '0.08em', color: C.muted }}>{doc.meta}</div>
             </div>
-            <div style={{ fontSize: u(66), fontWeight: 800, lineHeight: 0.95, letterSpacing: u(-2) }}>{doc.id}</div>
+            <div style={{ fontSize: u(66), fontWeight: 800, lineHeight: 0.95, letterSpacing: u(-2) }}>{docTitle(doc)}</div>
             <div style={{ fontSize: u(24), fontWeight: 600, color: C.muted }}>{doc.party}</div>
           </div>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: u(10), paddingTop: u(8) }}>
@@ -378,7 +431,7 @@ function DocumentView(props: { dir: Direction; doc: GateDoc; onBack: () => void;
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: `${u(24)} ${u(32)} ${u(32)} ${u(32)}` }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: u(20) }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: u(14) }}>
           {doc.lines.map((line) => (
             <Tile key={line.sku} line={line} dir={props.dir} />
           ))}
@@ -461,7 +514,7 @@ function AddScreen(props: {
           rows.map((p) => (
             <div key={p.id} onClick={() => props.onPick(p)} style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: u(24), padding: `${u(26)} ${u(28)}`, borderRadius: u(16), background: C.white, boxShadow: '0 0 0 1px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.04)', cursor: 'pointer' }}>
               <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: u(6), minWidth: 0 }}>
-                <div style={{ fontSize: u(34), fontWeight: 700, letterSpacing: u(-0.5) }}>{p.id}</div>
+                <div style={{ fontSize: u(34), fontWeight: 700, letterSpacing: u(-0.5) }}>{docTitle(p)}</div>
                 <div style={{ fontSize: u(20), fontWeight: 600, color: C.muted }}>{p.party}</div>
                 <div style={{ fontSize: u(17), fontWeight: 500, color: C.faint }}>{p.meta}</div>
               </div>
@@ -479,7 +532,7 @@ function ConfirmModal(props: { doc: GateDoc; onCancel: () => void; onConfirm: ()
     <div style={{ position: 'absolute', inset: 0, zIndex: 80, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: u(80) }}>
       <div style={{ width: '100%', background: C.white, borderRadius: u(20), padding: u(44), display: 'flex', flexDirection: 'column', gap: u(24), boxShadow: '0 12px 32px rgba(0,0,0,0.2)' }}>
         <div style={{ fontSize: u(15), fontWeight: 800, letterSpacing: '0.18em', color: C.cyanDk }}>CONFIRM</div>
-        <div style={{ fontSize: u(44), fontWeight: 700, letterSpacing: u(-1) }}>{props.doc.id}</div>
+        <div style={{ fontSize: u(44), fontWeight: 700, letterSpacing: u(-1) }}>{docTitle(props.doc)}</div>
         <div style={{ fontSize: u(23), fontWeight: 500, color: C.muted, lineHeight: 1.45 }}>
           {props.doc.party} — {props.doc.meta}. It joins today’s board at 0 received and starts counting on the next gate read.
         </div>

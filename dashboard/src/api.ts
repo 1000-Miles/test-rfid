@@ -1,8 +1,16 @@
 import type { Mode, PrinterConfig, PrinterStatusInfo, PrintResult, Status } from './types';
 
-// Bridge host: ?bridge=<ip> in the URL targets a remote bridge (e.g. the
-// Raspberry Pi / VM), default is the local one.
-const BRIDGE_HOST = new URLSearchParams(window.location.search).get('bridge') || 'localhost';
+// Bridge host: ?bridge=<ip> in the URL targets a genuinely remote bridge (e.g.
+// a Raspberry Pi / VM elsewhere on the network).
+//
+// The default is the PAGE'S OWN hostname, not a hardcoded 'localhost' — the
+// bridge always runs on the same physical PC that serves this page, just on a
+// different port. Opened as localhost:5173 on the kiosk itself, that resolves
+// to localhost:3001, same as before. Opened from a phone via the QR code
+// (Qr.tsx) at e.g. 192.168.254.125:5173, 'localhost' would mean the PHONE
+// itself and every bridge call would fail — the page's own hostname is
+// 192.168.254.125 either way, so it reaches the right machine automatically.
+const BRIDGE_HOST = new URLSearchParams(window.location.search).get('bridge') || window.location.hostname;
 export const BRIDGE_HTTP = `http://${BRIDGE_HOST}:3001`;
 export const BRIDGE_WS = `ws://${BRIDGE_HOST}:3001/ws`;
 
@@ -49,6 +57,11 @@ export const api = {
     return res.json();
   },
   setNexusConfig: (cfg: { dedupMs?: number; quietMs?: number; maxWindowMs?: number }) => post('/nexus/config', cfg),
+  /** The bridge PC's real LAN IPv4 — what a phone on the same network can reach (never localhost). */
+  network: async (): Promise<{ ok: boolean; ip: string | null }> => {
+    const res = await fetch(`${BRIDGE_HTTP}/network`);
+    return res.json();
+  },
   /** Simulate a full IR passage — emits the same trigger + direction-stamped reads a real one does. */
   mockPassage: (body: { epc?: string; direction?: 'in' | 'out' }) =>
     post<{ ok: boolean; epc: string; direction: string }>('/debug/mock-passage', body),

@@ -2,10 +2,30 @@
 
 require('dotenv').config();
 
+const os = require('os');
 const http = require('http');
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const { Controller } = require('./controller');
+
+// Interface name fragments that mean "not the real LAN link" on this Windows
+// warehouse PC — VPN, VirtualBox, and Hyper-V/WSL adapters all show up in
+// os.networkInterfaces() with a private-looking address that nothing else on
+// the warehouse LAN can actually route to. Picking one of those would produce
+// a QR code that silently fails on a phone.
+const VIRTUAL_IFACE_PATTERN = /virtualbox|vethernet|hyper-v|vmware|loopback|docker|wsl|tailscale|vpn/i;
+
+/** Best-guess LAN IPv4 for this machine — what a phone on the same network can reach. */
+function lanAddress() {
+  const ifaces = os.networkInterfaces();
+  for (const [name, addrs] of Object.entries(ifaces)) {
+    if (VIRTUAL_IFACE_PATTERN.test(name)) continue;
+    for (const addr of addrs || []) {
+      if (addr.family === 'IPv4' && !addr.internal) return addr.address;
+    }
+  }
+  return null; // no real NIC found — caller decides how to degrade
+}
 
 const PORT = Number(process.env.PORT || 3001);
 const DEFAULT_IP = process.env.UR4_IP || '192.168.254.202';
@@ -17,6 +37,14 @@ const SB_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANO
 const SB_TABLE = process.env.SUPABASE_TABLE || 'rfid_reads';
 const SB_ENABLED = Boolean(SB_URL && SB_KEY);
 let sbForwardDisabled = false; // latched on 404 — table missing, don't spam warnings per read
+
+// --- Push cutover burn-in -----------------------------------------------------
+// Until this date the bridge dual-writes movements: the new push to Nexus AND
+// the legacy direct insert below. Past it the legacy write goes inert and the
+// bridge nags on every boot, so the dead code gets deleted rather than
+// quietly living forever. Unset = burn-in already over (push only).
+const BURN_IN_UNTIL = process.env.MOVEMENT_BURN_IN_UNTIL || '';
+const BURN_IN_ACTIVE = Boolean(BURN_IN_UNTIL) && Date.now() < Date.parse(`${BURN_IN_UNTIL}T23:59:59Z`);
 
 async function forwardToSupabase(tag) {
   if (!SB_ENABLED || sbForwardDisabled) return;
@@ -50,12 +78,21 @@ async function forwardToSupabase(tag) {
   }
 }
 
+// LEGACY direct write, kept only for the push cutover burn-in ------------------
 // Movement -> Nexus DB: every portal entry/exit is written to
 // operations_tag_scan (same table the receiving flow uses). The event check
 // constraint allows ship|receive|putaway|transfer, so: in = receive, out =
 // ship, with reader='portal' marking gate scans.
+//
+// SUPERSEDED BY THE OUTBOX. POST /api/movement is now the canonical writer: it
+// is the only path that also moves warehouse_carton/warehouse_pallet status,
+// and it survives an outage because the outbox journals first. This function
+// runs alongside it until MOVEMENT_BURN_IN_UNTIL so that a bug in the new push
+// path stays invisible to operations, then it should be DELETED along with its
+// call site. Running both is safe (no duplicate rows): the ingest dedupes on
+// physical passage time, so even a replayed event collapses onto this row.
 async function forwardMovementToSupabase(event) {
-  if (!SB_ENABLED) return;
+  if (!SB_ENABLED || !BURN_IN_ACTIVE) return;
   try {
     const res = await fetch(`${SB_URL.replace(/\/$/, '')}/rest/v1/operations_tag_scan`, {
       method: 'POST',
@@ -91,30 +128,74 @@ const controller = new Controller();
 const { PrinterManager } = require('./printer');
 const printer = new PrinterManager({ log: (text, level) => controller.log(`[printer] ${text}`, level) });
 
-// --- Mock Nexus (warehouse check-in simulation) --------------------------------
-const { MockNexus } = require('./nexus');
-const nexus = new MockNexus({
+// --- Passage detection (raw reads -> one movement event per passage) -----------
+const { PassageDetector } = require('./passage');
+const nexus = new PassageDetector({
   dedupMs: Number(process.env.NEXUS_DEDUP_MS || 5000),
   quietMs: Number(process.env.NEXUS_QUIET_MS || 700),
   maxWindowMs: Number(process.env.NEXUS_MAX_WINDOW_MS || 4000),
   location: process.env.NEXUS_LOCATION || 'WH-ENTRANCE-1',
-  url: process.env.NEXUS_URL || '',
-  apiKey: process.env.NEXUS_API_KEY || '',
-  authHeader: process.env.NEXUS_AUTH_HEADER || '',
   // Tag registry: catalog is loaded from operations_label_tag in this
   // Supabase project (and cached to data/catalog.json for offline boots).
   catalogUrl: SB_URL,
   catalogKey: SB_KEY,
 });
-nexus.on('log', (text) => controller.log(`[nexus] ${text}`));
+
+// --- Outbox (durable push to Nexus POST /api/movement) -------------------------
+// NEXUS_URL is the full ingest URL. The key travels as Authorization: Bearer and
+// must equal the MOVEMENT_API_KEY configured on the Nexus deployment — a
+// mismatch 401s every event, which shows up as a rising queueDepth in /status
+// rather than as lost data.
+//
+// MOVEMENT_API_KEY is preferred because that is the variable Nexus itself reads;
+// NEXUS_API_KEY is the fallback for deployments that only carry the older name.
+const { Outbox } = require('./outbox');
+const outbox = new Outbox({
+  url: process.env.NEXUS_URL || '',
+  apiKey: process.env.MOVEMENT_API_KEY || process.env.NEXUS_API_KEY || '',
+  timeoutMs: Number(process.env.MOVEMENT_TIMEOUT_MS || 10_000),
+  baseBackoffMs: Number(process.env.MOVEMENT_BACKOFF_MS || 1_000),
+  maxBackoffMs: Number(process.env.MOVEMENT_MAX_BACKOFF_MS || 60_000),
+  drainPerSec: Number(process.env.MOVEMENT_DRAIN_PER_SEC || 5),
+  log: (text, level) => controller.log(`[outbox] ${text}`, level),
+});
+
+// --- Board feed (real receiving / shipping documents for the kiosk) ------------
+// Base URL defaults to NEXUS_URL with the /api/... path stripped, so a single
+// setting covers both the movement push and the document reads.
+const { BoardFeed } = require('./board');
+const board = new BoardFeed({
+  baseUrl: process.env.NEXUS_BASE_URL || deriveNexusBase(process.env.NEXUS_URL || ''),
+  token: process.env.OPERATIONS_HANDHELD_TOKEN || '',
+  log: (text, level) => controller.log(`[board] ${text}`, level),
+});
+
+function deriveNexusBase(movementUrl) {
+  try {
+    const u = new URL(movementUrl);
+    return u.origin;
+  } catch {
+    return '';
+  }
+}
+
+nexus.on('log', (text) => controller.log(`[passage] ${text}`));
 nexus.on('movement', (event) => {
   controller.log(
-    `[nexus] ${event.type === 'entry' ? 'CHECK-IN ' : 'CHECK-OUT'} ${event.item.sku} (${
+    `[passage] ${event.type === 'entry' ? 'CHECK-IN ' : 'CHECK-OUT'} ${event.item.sku} (${
       event.known ? event.item.name : 'UNKNOWN EPC'
     }) dir=${event.direction} via=${event.method} ants=[${event.antennas}] epc=${event.epc}`
   );
   broadcast(event); // event.type is already 'entry' | 'exit'
-  forwardMovementToSupabase(event); // fire-and-forget into operations_tag_scan
+  // Journal FIRST (survives an outage), then the pump delivers. A failure here
+  // means the event is not durable anywhere, so it is logged loudly rather than
+  // swallowed the way a delivery failure is.
+  try {
+    outbox.enqueue(event);
+  } catch (err) {
+    controller.log(`[outbox] FAILED TO JOURNAL movement ${event.epc}: ${err.message}`, 'error');
+  }
+  forwardMovementToSupabase(event); // legacy dual-write, inert after the burn-in
 });
 
 // --- HTTP / Express -----------------------------------------------------------
@@ -188,7 +269,23 @@ app.post('/mode', async (req, res) => {
 });
 
 app.get('/status', (_req, res) => {
-  res.json({ ...controller.getStatus(), supabase: SB_ENABLED, defaults: { ip: DEFAULT_IP, port: DEFAULT_PORT } });
+  res.json({
+    ...controller.getStatus(),
+    supabase: SB_ENABLED,
+    defaults: { ip: DEFAULT_IP, port: DEFAULT_PORT },
+    // Movement delivery health. A gate that has stopped reporting shows up here
+    // as a rising queueDepth with a stale lastPushAt — the retry policy is
+    // deliberately silent-and-forever, so this is how a human finds out.
+    movement: { ...outbox.status(), burnInUntil: BURN_IN_UNTIL || null, legacyDirectWrite: BURN_IN_ACTIVE },
+  });
+});
+
+// LAN address of this PC — used by the kiosk to build a QR code that a phone
+// on the same warehouse network can actually open (localhost/127.0.0.1 in the
+// kiosk's own browser bar means nothing to a second device).
+app.get('/network', (_req, res) => {
+  const ip = lanAddress();
+  res.json({ ok: Boolean(ip), ip });
 });
 
 // Diagnostic: raw GPI/IO bytes to calibrate the GPI bit mapping against hardware.
@@ -359,8 +456,11 @@ app.post('/debug/mock-passage', async (req, res) => {
 app.get('/power', async (_req, res) => {
   try {
     const uhf = require('./driver');
-    const dBm = await controller._withLock(() => uhf.getPower());
-    res.json({ ok: dBm != null, dBm });
+    const { dBm, perAntenna } = await controller._withLock(async () => ({
+      dBm: await uhf.getPower(),
+      perAntenna: uhf.getAntennaPower ? await uhf.getAntennaPower() : null,
+    }));
+    res.json({ ok: dBm != null, dBm, perAntenna });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -539,12 +639,71 @@ app.post('/nexus/catalog/reload', async (_req, res) => {
   const catalog = remote || nexus.loadCatalog();
   res.json({ ok: true, source: nexus.catalogSource, count: Object.keys(catalog).length, catalog });
 });
+// --- Board documents ----------------------------------------------------------
+// Today's real receiving batches and open shipments, already mapped into the
+// kiosk's document shape. Serves a disk-cached copy when Nexus is unreachable,
+// flagged `stale` so the UI can say so rather than silently showing old counts.
+// `delivery` rides along so the kiosk can tell whether Nexus has already
+// absorbed the passages it counted locally. Without it the board cannot know
+// when to stop adding its own overlay, and would double-count.
+app.get('/board/documents', async (_req, res) => {
+  const doc = await board.get();
+  const ob = outbox.status();
+  res.json({ ...doc, delivery: { queueDepth: ob.queueDepth, lastPushAt: ob.lastPushAt } });
+});
+
+app.get('/board/status', (_req, res) => res.json({ ok: true, ...board.status() }));
+
+// --- Movement outbox routes -------------------------------------------------
+app.get('/movement/status', (_req, res) =>
+  res.json({ ok: true, ...outbox.status(), burnInUntil: BURN_IN_UNTIL || null, legacyDirectWrite: BURN_IN_ACTIVE })
+);
+
+// Re-push already-delivered history. Safe to run at any time and with any
+// range — the ingest dedupes on physical passage time, so replaying the whole
+// journal produces zero duplicate rows. This is the recovery path when the pump
+// misbehaved: replay, don't reconstruct.
+// Body: { fromSeq? } or { fromTimestamp? } (ISO). Omit both to replay everything.
+app.post('/movement/replay', (req, res) => {
+  const fromSeq = req.body?.fromSeq != null ? Number(req.body.fromSeq) : undefined;
+  const fromTimestamp = req.body?.fromTimestamp || undefined;
+  if (fromSeq != null && !Number.isFinite(fromSeq)) {
+    return res.status(400).json({ ok: false, error: 'fromSeq must be a number' });
+  }
+  const requeued = outbox.replay({ fromSeq, fromTimestamp });
+  controller.log(`[outbox] replay requeued ${requeued} event(s)`);
+  res.json({ ok: true, requeued, ...outbox.status() });
+});
+
 app.post('/nexus/config', (req, res) => {
   const summary = nexus.setConfig(req.body || {});
   controller.log(`[nexus] config: dedup=${summary.dedupMs}ms quiet=${summary.quietMs}ms maxWindow=${summary.maxWindowMs}ms`);
   res.json({ ok: true, ...summary });
 });
 
+
+/**
+ * Compare the local clock against Nexus's Date response header. A drifting
+ * warehouse PC writes wrong created_at values AND breaks the ±10s ingest
+ * dedupe, producing duplicates and mis-ordered history that a replay cannot
+ * fix — so it must be visible before it does damage, not after.
+ */
+async function reportClockOffset() {
+  if (!process.env.NEXUS_URL) return;
+  try {
+    const res = await fetch(process.env.NEXUS_URL, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
+    const serverDate = res.headers.get('date');
+    if (!serverDate) return;
+    const skewMs = Date.now() - Date.parse(serverDate);
+    if (Math.abs(skewMs) > 30_000) {
+      controller.log(`CLOCK SKEW ${Math.round(skewMs / 1000)}s vs Nexus — fix Windows time sync before trusting gate timestamps.`, 'error');
+    } else {
+      controller.log(`Clock offset vs Nexus: ${Math.round(skewMs / 1000)}s.`);
+    }
+  } catch {
+    // Offline at boot is the normal case this whole design exists for.
+  }
+}
 
 // --- WebSocket ----------------------------------------------------------------
 const server = http.createServer(app);
@@ -576,6 +735,27 @@ controller.on('message', (msg) => {
 server.listen(PORT, () => {
   controller.log(`Bridge listening on http://localhost:${PORT}  (WS: ws://localhost:${PORT}/ws)`);
   controller.log(`Reader defaults: ${DEFAULT_IP}:${DEFAULT_PORT}. Supabase forwarding: ${SB_ENABLED ? 'ON' : 'off'}.`);
+
+  const ob = outbox.status();
+  if (!ob.configured) {
+    controller.log('NEXUS_URL is unset — movements are journalled but never delivered. Set it to the /api/movement URL.', 'warn');
+  } else {
+    controller.log(`Movement push -> ${ob.url} (queued: ${ob.queueDepth}, dead: ${ob.deadLetters}).`);
+  }
+  if (BURN_IN_ACTIVE) {
+    controller.log(`Push cutover burn-in until ${BURN_IN_UNTIL}: legacy direct Supabase write is ALSO active.`);
+  } else if (BURN_IN_UNTIL) {
+    controller.log(
+      `Burn-in ended ${BURN_IN_UNTIL} — the legacy direct Supabase write is now inert. DELETE forwardMovementToSupabase and this notice.`,
+      'warn'
+    );
+  }
+  // Clock skew corrupts data no replay can repair: the event timestamp is both
+  // the ingest dedupe key and the row's created_at. Surface the offset at boot.
+  reportClockOffset();
+  outbox.start();
+  board.start(); // warm the document cache so the first kiosk paint is instant
+
   // Refresh the catalog from the live tag registry (falls back to the cached
   // data/catalog.json already loaded by the constructor).
   nexus.loadCatalogRemote();
@@ -588,6 +768,7 @@ server.listen(PORT, () => {
 
 process.on('SIGINT', async () => {
   controller.log('Shutting down...');
+  outbox.stop(); // journal is already durable; anything unsent resumes on boot
   await controller.stop();
   process.exit(0);
 });

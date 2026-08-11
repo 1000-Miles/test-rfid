@@ -112,6 +112,12 @@ function load() {
     UHFGetPower: lib.func('int UHFGetPower(uint8_t *uPower)'),
     // save: 1 = persist across power cycles. uPower in dBm (UR4 max 30).
     UHFSetPower: lib.func('int UHFSetPower(uint8_t save, uint8_t uPower)'),
+    // Per-antenna power. UHFSetPower only writes ANT1/global on the UR4;
+    // multi-antenna rigs must set each port. Signatures from vendor UHFAPP.exe
+    // P/Invoke. Get fills ppower with [ant, readPower, writePower] triplets,
+    // nBytesReturned[in]=buffer size, [out]=bytes written.
+    UHFSetAntennaPower: lib.func('int UHFSetAntennaPower(uint8_t save, uint8_t num, uint8_t read_power, uint8_t write_power)'),
+    UHFGetAntennaPower: lib.func('int UHFGetAntennaPower(uint8_t *ppower, _Inout_ int *nBytesReturned)'),
 
     // --- antennas (vendor UHFAPI.cs 1266): 2-byte bitmask, buf[1] bit0=ANT1 ---
     UHFSetANT: lib.func('int UHFSetANT(uint8_t saveflag, const uint8_t *buf)'),
@@ -672,9 +678,36 @@ function getPower() {
   return rc === 0 ? buf[0] : null;
 }
 
-/** Set output power in dBm (UR4: 1..30). @returns {number} 0 on success. */
+/**
+ * Set output power in dBm (UR4: 1..30) on every enabled antenna port.
+ * Falls back to the single/global UHFSetPower if per-antenna setting fails
+ * (older firmware) or no antenna list is readable.
+ * @returns {number} 0 only if every antenna succeeded.
+ */
 function setPower(dBm, save = true) {
-  return load().UHFSetPower(save ? 1 : 0, Number(dBm) & 0xff);
+  const f = load();
+  const s = save ? 1 : 0;
+  const p = Number(dBm) & 0xff;
+  const ports = getAntennas();
+  if (!ports || !ports.length) return f.UHFSetPower(s, p);
+  let rc = 0;
+  for (const port of ports) rc |= f.UHFSetAntennaPower(s, port, p, p);
+  if (rc !== 0) return f.UHFSetPower(s, p);
+  return 0;
+}
+
+/** Read power per enabled antenna. @returns {{[port:number]:{read:number,write:number}}|null} */
+function getAntennaPower() {
+  const f = load();
+  const buf = Buffer.alloc(256);
+  const n = Buffer.alloc(4);
+  n.writeInt32LE(buf.length, 0);
+  if (f.UHFGetAntennaPower(buf, n) !== 0) return null;
+  const len = Math.min(n.readInt32LE(0), buf.length);
+  const out = {};
+  // [ant, readPower, writePower] triplets
+  for (let i = 0; i + 2 < len; i += 3) out[buf[i]] = { read: buf[i + 1], write: buf[i + 2] };
+  return out;
 }
 
 /** Enable a set of antenna ports, e.g. setAntennas([1,2]). @returns 0 on success. */
@@ -1031,6 +1064,7 @@ module.exports = guardExports({
   REGIONS,
   getProtocolType,
   getRFLink,
+  getAntennaPower,
   getWorkTime,
   setWorkTime,
   setAntennas,

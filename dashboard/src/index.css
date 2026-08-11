@@ -73,6 +73,21 @@ body {
 .gate-dot {
   animation: gate-dot 0.7s linear infinite;
 }
+/* Calm "system is alive" breathing glow — deliberately slower and softer than
+   .gate-dot's urgent scan pulse, so the two states read as different: online
+   is a quiet fact, an active read is something happening right now. */
+@keyframes gate-pulse-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(22, 163, 74, 0);
+  }
+}
+.gate-pulse-online {
+  animation: gate-pulse-glow 2.6s ease-in-out infinite;
+}
 @keyframes gate-flash {
   0%,
   100% {

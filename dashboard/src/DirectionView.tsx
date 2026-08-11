@@ -1,4 +1,4 @@
-import { docTotals, pct, sumTotals, type Direction, type DocLine, type GateDoc } from './documents';
+import { docTitle, docTotals, pct, sumTotals, type Direction, type DocLine, type GateDoc } from './documents';
 import { accent, C, Tile, u } from './boardKit';
 
 /**
@@ -73,7 +73,7 @@ export default function DirectionView(props: {
           {docs.map((doc) => {
             const t = docTotals(doc);
             return (
-              <div key={doc.id} title={doc.id} style={{ height: u(20), borderRadius: u(12), background: C.track, overflow: 'hidden', flex: t.expected }}>
+              <div key={doc.id} title={docTitle(doc)} style={{ height: u(20), borderRadius: u(12), background: C.track, overflow: 'hidden', flex: t.expected }}>
                 <div style={{ height: '100%', borderRadius: u(12), width: `${pct(t.received, t.expected)}%`, background: t.received >= t.expected ? C.green : a.fill, transition: 'width .3s ease' }} />
               </div>
             );
@@ -88,9 +88,9 @@ export default function DirectionView(props: {
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: `${u(24)} ${u(32)} ${u(32)} ${u(32)}` }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: u(20) }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: u(14) }}>
           {items.map(({ line, doc }) => (
-            <Tile key={`${doc.id}-${line.sku}`} line={line} dir={dir} doc={{ id: doc.id, due: doc.due }} onClick={() => props.onOpenDoc(doc.id)} />
+            <Tile key={`${doc.id}-${line.sku}`} line={line} dir={dir} doc={{ label: docTitle(doc), due: doc.due }} onClick={() => props.onOpenDoc(doc.id)} />
           ))}
         </div>
       </div>
