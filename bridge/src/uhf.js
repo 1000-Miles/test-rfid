@@ -49,9 +49,15 @@ function load() {
     // --- connection (doc 1510-1521) ---
     TCPConnect: lib.func('int TCPConnect(const char *hostaddr, int hostport)'),
     TCPDisconnect: lib.func('void TCPDisconnect()'),
-    // USB desktop readers (e.g. Chainway R1): open/close the connected USB device.
+    // USB desktop readers (e.g. Chainway R1/R3): open/close the connected USB device.
     UsbOpen: lib.func('int UsbOpen()'),
     UsbClose: lib.func('void UsbClose()'),
+    UsbReadDeviceInfo: lib.func('int UsbReadDeviceInfo(_Out_ char *info, int len)'),
+    // Serial transport. Desktop readers that expose a USB-CDC virtual COM port
+    // (rather than the libusb path UsbOpen uses) connect through here instead.
+    ComOpen: lib.func('int ComOpen(int port)'),
+    ComOpenWithBaud: lib.func('int ComOpenWithBaud(int port, int baudrate)'),
+    ClosePort: lib.func('void ClosePort()'),
 
     // --- inventory (doc 2231-2277) ---
     UHFInventory: lib.func('int UHFInventory()'),
@@ -59,9 +65,50 @@ function load() {
     // rLen[out] gets the tag record length; rData[out] the record bytes (<=256).
     UHF_GetReceived_EX: lib.func('int UHF_GetReceived_EX(_Out_ int *rLen, uint8_t *rData)'),
 
-    // --- info / diagnostics (header 127, 171) ---
+    // --- single-tag access (header 421-501) -----------------------------------
+    // Every one of these takes a Gen2 SELECT filter up front, so an operation can
+    // be addressed at ONE chip instead of "whichever tag answers first":
+    //   FilterBank      1=EPC, 2=TID, 3=USER   (0 is not a valid filter bank)
+    //   FilterStartaddr bit offset WITHIN that bank
+    //   FilterLen       mask length in BITS; 0 = no filter (any tag may answer)
+    // and then address the operation itself:
+    //   uBank           0=RESERVED, 1=EPC, 2=TID, 3=USER (vendor demo BankPicker)
+    //   uPtr / uCnt     offset + length in WORDS (16-bit), not bytes
+    // Note uCnt is uint32 on read but uint8 on write — that asymmetry is the
+    // vendor's, not a typo.
+    UHFReadData: lib.func(
+      'int UHFReadData(const uint8_t *uAccessPwd, uint8_t FilterBank, uint32_t FilterStartaddr, uint32_t FilterLen, const uint8_t *FilterData,' +
+        ' uint8_t uBank, uint32_t uPtr, uint32_t uCnt, _Out_ uint8_t *uReadDatabuf, _Out_ uint32_t *uReadDataLen)'
+    ),
+    UHFWriteData: lib.func(
+      'int UHFWriteData(const uint8_t *uAccessPwd, uint8_t FilterBank, uint32_t FilterStartaddr, uint32_t FilterLen, const uint8_t *FilterData,' +
+        ' uint8_t uBank, uint32_t uPtr, uint8_t uCnt, const uint8_t *uWriteDatabuf)'
+    ),
+    // Returns C++ `bool` (1 byte in AL). Bound as uint8_t so we read AL rather
+    // than a full EAX whose upper bits MSVC leaves undefined.
+    UHFLockTag: lib.func(
+      'uint8_t UHFLockTag(const uint8_t *uAccessPwd, uint8_t FilterBank, uint32_t FilterStartaddr, uint32_t FilterLen, const uint8_t *FilterData,' +
+        ' const uint8_t *lockbuf)'
+    ),
+    // One-shot singulation: rLrn[0] = UII byte length, rData = PC + EPC.
+    UHFInventorySingle: lib.func('int UHFInventorySingle(_Out_ uint8_t *rLrn, _Out_ uint8_t *rData)'),
+    // Persistent inventory filter (separate from the per-operation filters above).
+    UHFSetFilter: lib.func('int UHFSetFilter(uint8_t saveflag, uint8_t bank, uint32_t startaddr, uint32_t datalen, const uint8_t *databuf)'),
+
+    // --- info / diagnostics (header 89-111, 127, 171) ---
     // version[0] = length, version[1..] = version bytes.
     UHFGetSoftwareVersion: lib.func('int UHFGetSoftwareVersion(uint8_t *version)'),
+    UHFGetHardwareVersion: lib.func('int UHFGetHardwareVersion(_Out_ uint8_t *version)'),
+    UHFGetReaderVersion: lib.func('int UHFGetReaderVersion(_Out_ uint8_t *version)'),
+    UHFGetDeviceID: lib.func('int UHFGetDeviceID(_Out_ uint32_t *id)'),
+    UHFGetTemperature: lib.func('int UHFGetTemperature(_Out_ uint32_t *temperature)'),
+    // region: 0x01 China1, 0x02 China2, 0x04 Europe, 0x08 USA, 0x16 Korea, 0x32 Japan
+    UHFSetRegion: lib.func('int UHFSetRegion(uint8_t saveflag, uint8_t region)'),
+    UHFGetRegion: lib.func('int UHFGetRegion(_Out_ uint8_t *region)'),
+    // type: 0x00 ISO18000-6C, 0x01 GB/T 29768, 0x02 GJB 7377.1
+    UHFGetProtocolType: lib.func('int UHFGetProtocolType(_Out_ uint8_t *type)'),
+    // mode: 0 DSB_ASK/FM0/40k, 1 PR_ASK/Miller4/250k, 2 PR_ASK/Miller4/300k, 3 DSB_ASK/FM0/400k
+    UHFGetRFLink: lib.func('int UHFGetRFLink(_Out_ uint8_t *uMode)'),
     UHFGetPower: lib.func('int UHFGetPower(uint8_t *uPower)'),
     // save: 1 = persist across power cycles. uPower in dBm (UR4 max 30).
     UHFSetPower: lib.func('int UHFSetPower(uint8_t save, uint8_t uPower)'),
@@ -123,7 +170,7 @@ function load() {
 // ---------------------------------------------------------------------------
 
 let connected = false;
-let linkType = null; // 'tcp' | 'usb' — so disconnect() closes the right transport
+let linkType = null; // 'tcp' | 'usb' | 'com' — so disconnect() closes the right transport
 
 /**
  * Connect to the reader over TCP (network readers, e.g. UR4).
@@ -150,12 +197,85 @@ function connectUsb() {
   return rc;
 }
 
+/**
+ * Open a reader on a serial / USB-CDC virtual COM port.
+ * @param {number} port  COM number — 3 for COM3, not the string.
+ * @param {number|null} baud  null = the DLL's default rate.
+ * @returns {number} 0 on success, other = SDK error code.
+ */
+function connectCom(port, baud = null) {
+  const f = load();
+  const n = Number(port);
+  if (!Number.isInteger(n) || n < 1 || n > 255) throw new Error(`connectCom: bad port ${port}`);
+  const rc = baud == null ? f.ComOpen(n) : f.ComOpenWithBaud(n, Number(baud));
+  connected = rc === 0;
+  if (connected) linkType = 'com';
+  return rc;
+}
+
+/** Vendor device-info string from an open USB reader, or null. */
+function usbDeviceInfo() {
+  const f = load();
+  const buf = Buffer.alloc(256);
+  const rc = f.UsbReadDeviceInfo(buf, buf.length);
+  if (rc !== 0) return null;
+  const end = buf.indexOf(0);
+  return buf.subarray(0, end === -1 ? buf.length : end).toString('latin1').trim() || null;
+}
+
 function disconnect() {
   if (!fns) return;
   if (linkType === 'usb') fns.UsbClose();
+  else if (linkType === 'com') fns.ClosePort();
   else fns.TCPDisconnect();
   connected = false;
   linkType = null;
+}
+
+/** Which transport the current link uses: 'tcp' | 'usb' | 'com' | null. */
+function getLinkType() {
+  return linkType;
+}
+
+/**
+ * Does a real reader actually answer on the currently open link?
+ *
+ * Measured on this DLL with NOTHING plugged in (2026-08-06):
+ *   - UsbOpen() returns 0. "Success" does not mean a device was found.
+ *   - UHFGetSoftwareVersion / UHFGetReaderVersion return 0 and hand back a
+ *     string baked into the DLL ("V1.0.7,R1_Nu,2025-06-27 11:12:21"), so a
+ *     plausible-looking version string proves nothing either.
+ *   - UHFGetPower / UHFGetANT return 0 while leaving the output buffer
+ *     unwritten or filled with a constant — observed 123 dBm, then 43 dBm,
+ *     then 0 dBm on consecutive runs of the same empty link.
+ *   - UHFInventorySingle SEGFAULTS the process.
+ *
+ * UHFGetRegion and UHFGetProtocolType were the only calls that consistently
+ * FAILED on the phantom link, so they are the gate. Call this after any
+ * connect and treat a false as "not connected" — the alternative is a bridge
+ * that reports itself online and then dies on the first tag operation.
+ */
+function isReaderAlive() {
+  if (!connected) return false; // no link at all — these calls segfault, see requireLink
+  try {
+    const region = getRegion();
+    const proto = getProtocolType();
+    return Boolean(region && region.code !== 0 && proto && proto.code <= 0x02);
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Refuse to enter the DLL without an open link.
+ *
+ * Calling a reader command before any connect() takes the PROCESS DOWN with a
+ * segfault rather than returning an error code — verified 2026-08-06 with
+ * UHFGetRegion. Turning that into a thrown JS error is the difference between a
+ * bug report and a dead bridge mid-shift.
+ */
+function requireLink(what) {
+  if (!connected) throw new Error(`${what}: not connected — open a link first (connectUsb / connectCom / connect)`);
 }
 
 function isConnected() {
@@ -291,6 +411,257 @@ function getSoftwareVersion() {
 
 function setLogLevel(level) {
   load().SetLogLevel(level);
+}
+
+// ---------------------------------------------------------------------------
+// Single-tag access: read / write / lock one chip's memory banks
+// ---------------------------------------------------------------------------
+
+/** Gen2 memory banks, as indexed by the SDK (matches the vendor demo's picker). */
+const BANK = { RESERVED: 0, EPC: 1, TID: 2, USER: 3 };
+
+/**
+ * EPC-bank layout, in words:
+ *   word 0 = CRC-16   (chip-maintained)
+ *   word 1 = PC       (bits 15..11 = EPC length in words)
+ *   word 2+ = the EPC itself
+ * So a 96-bit EPC is 6 words written at word 2, and PC reads 0x3000.
+ */
+const EPC_DATA_PTR = 2;
+/** Bit offset of the EPC inside the EPC bank — CRC(16) + PC(16). */
+const EPC_FILTER_BIT_OFFSET = 32;
+
+const DEFAULT_ACCESS_PWD = '00000000';
+
+function hexToBuf(hex, label) {
+  const clean = String(hex ?? '').replace(/[^0-9a-fA-F]/g, '');
+  if (clean.length % 2 !== 0) throw new Error(`${label}: odd number of hex digits ("${hex}")`);
+  return Buffer.from(clean, 'hex');
+}
+
+function accessPwdBuf(pwd) {
+  const buf = hexToBuf(pwd ?? DEFAULT_ACCESS_PWD, 'accessPwd');
+  if (buf.length !== 4) throw new Error(`accessPwd must be 8 hex digits (4 bytes), got ${buf.length}`);
+  return buf;
+}
+
+/**
+ * A Gen2 SELECT filter — which single chip an operation is addressed at.
+ * `{ bank, startBit, data }`, or null for "no filter" (any tag in the field may
+ * answer, which is only safe when exactly one tag is present).
+ */
+function noFilter() {
+  return null;
+}
+
+/** Address an operation at the chip with this TID. TIDs are factory-unique and immutable. */
+function filterByTid(tidHex) {
+  const data = hexToBuf(tidHex, 'filterByTid');
+  if (!data.length) throw new Error('filterByTid: empty TID');
+  return { bank: BANK.TID, startBit: 0, data };
+}
+
+/**
+ * Address an operation at the chip currently carrying this EPC.
+ *
+ * `startBit` defaults to 32 because the mask offset is counted from the start
+ * of the EPC *bank*, which begins with CRC(16) + PC(16). If EPC-filtered
+ * operations never match on some reader, pass 0 — that firmware counts from
+ * the start of the EPC instead. Getting it wrong is fail-safe: the filter
+ * matches nothing and the operation returns an error rather than acting on
+ * the wrong tag.
+ */
+function filterByEpc(epcHex, startBit = EPC_FILTER_BIT_OFFSET) {
+  const data = hexToBuf(epcHex, 'filterByEpc');
+  if (!data.length) throw new Error('filterByEpc: empty EPC');
+  return { bank: BANK.EPC, startBit, data };
+}
+
+/**
+ * Spread a filter (or null) into the 4 SDK filter arguments.
+ * The no-filter case still passes a real one-byte buffer rather than NULL —
+ * a length of 0 means the DLL should never read it, but handing a C API a
+ * null pointer it may not expect is a needless way to lose the process.
+ */
+const EMPTY_FILTER_DATA = Buffer.alloc(1);
+function filterArgs(filter) {
+  if (!filter) return [BANK.EPC, 0, 0, EMPTY_FILTER_DATA];
+  return [filter.bank, filter.startBit, filter.data.length * 8, filter.data];
+}
+
+/**
+ * Read `words` 16-bit words from a tag's memory bank.
+ * @param {object} opts
+ * @param {number} opts.bank      BANK.RESERVED | EPC | TID | USER
+ * @param {number} opts.ptr       start offset, in WORDS
+ * @param {number} opts.words     length, in WORDS
+ * @param {object|null} opts.filter  from filterByTid/filterByEpc, or null
+ * @param {string} [opts.accessPwd]  8 hex digits; default '00000000'
+ * @returns {{rc:number, hex:(string|null), bytes:(Buffer|null)}}
+ *   rc 0 = success. A non-zero rc means the read failed — no tag in range, the
+ *   filter matched nothing, the bank is read-locked, or the address is past the
+ *   end of that bank (which is how an over-long read reports "no such memory").
+ */
+function readBank({ bank, ptr, words, filter = null, accessPwd } = {}) {
+  const f = load();
+  requireLink('readBank');
+  const out = Buffer.alloc(512);
+  const outLen = [0];
+  const rc = f.UHFReadData(accessPwdBuf(accessPwd), ...filterArgs(filter), bank, ptr, words, out, outLen);
+  if (rc !== 0) return { rc, hex: null, bytes: null };
+  const n = Math.min(outLen[0], out.length);
+  const bytes = out.subarray(0, n);
+  return { rc, hex: bytes.toString('hex').toUpperCase(), bytes };
+}
+
+/**
+ * Write hex data into a tag's memory bank. `dataHex` must be a whole number of
+ * 16-bit words (i.e. a multiple of 4 hex digits) — Gen2 has no sub-word write.
+ * @returns {number} 0 on success.
+ */
+function writeBank({ bank, ptr, dataHex, filter = null, accessPwd } = {}) {
+  const f = load();
+  requireLink('writeBank');
+  const data = hexToBuf(dataHex, 'writeBank');
+  if (data.length === 0) throw new Error('writeBank: no data');
+  if (data.length % 2 !== 0) throw new Error(`writeBank: data must be whole 16-bit words (got ${data.length} bytes)`);
+  const words = data.length / 2;
+  if (words > 255) throw new Error(`writeBank: too many words (${words}); uCnt is a single byte`);
+  return f.UHFWriteData(accessPwdBuf(accessPwd), ...filterArgs(filter), bank, ptr, words, data);
+}
+
+/**
+ * Lock / permalock a bank. `lockbuf` is the raw 3-byte Gen2 lock payload:
+ * bits 0-9 Action, bits 10-19 Mask (see the Gen2 spec's Lock command).
+ *
+ * IRREVERSIBLE for permalock bits. Nothing in this repo calls it — it is bound
+ * so lock STATE can be reasoned about, and so a deliberate lock is possible
+ * later without reaching around the wrapper.
+ * @returns {boolean} true on success.
+ */
+function lockTag({ lockbufHex, filter = null, accessPwd } = {}) {
+  const f = load();
+  requireLink('lockTag');
+  const lockbuf = hexToBuf(lockbufHex, 'lockTag');
+  if (lockbuf.length !== 3) throw new Error(`lockTag: lockbuf must be 3 bytes (6 hex digits), got ${lockbuf.length}`);
+  return f.UHFLockTag(accessPwdBuf(accessPwd), ...filterArgs(filter), lockbuf) !== 0;
+}
+
+/**
+ * Singulate ONE tag and return its PC + EPC. Cheaper and more deterministic
+ * than starting an inventory and draining, which is what we want before a write.
+ * @returns {{pc:string, epc:string, raw:string}|null} null when no tag answered.
+ */
+function inventorySingle() {
+  const f = load();
+  requireLink('inventorySingle');
+  // Oversized on purpose: the header types rLrn as a bare pointer, so a reader
+  // in a bad state can write more than the one length byte we expect.
+  const rLrn = Buffer.alloc(64);
+  const rData = Buffer.alloc(512);
+  const rc = f.UHFInventorySingle(rLrn, rData);
+  if (rc !== 0) return null;
+  const uiiLen = rLrn[0];
+  if (uiiLen < 2 || uiiLen > rData.length) return null;
+  const uii = rData.subarray(0, uiiLen);
+  return {
+    pc: uii.subarray(0, 2).toString('hex').toUpperCase(),
+    epc: uii.subarray(2).toString('hex').toUpperCase(),
+    raw: uii.toString('hex').toUpperCase(),
+  };
+}
+
+/**
+ * Build the PC word for an EPC of `words` 16-bit words, preserving every other
+ * bit of the tag's existing PC (UMI, XPC-indicator, numbering-system toggle).
+ * PC bits 15..11 hold the EPC length in words.
+ * @param {string} currentPcHex  the PC read off the tag, 4 hex digits
+ * @param {number} words         EPC length in words (6 for a 96-bit EPC)
+ * @returns {string} 4 hex digits
+ */
+function pcWordFor(currentPcHex, words) {
+  const cur = hexToBuf(currentPcHex, 'pcWordFor');
+  if (cur.length !== 2) throw new Error(`pcWordFor: PC must be 4 hex digits, got "${currentPcHex}"`);
+  if (!Number.isInteger(words) || words < 0 || words > 31) throw new Error(`pcWordFor: bad word count ${words}`);
+  const pc = (cur.readUInt16BE(0) & 0x07ff) | (words << 11);
+  return pc.toString(16).toUpperCase().padStart(4, '0');
+}
+
+/** EPC length in 16-bit words, as declared by a PC word. */
+function epcWordsFromPc(pcHex) {
+  const buf = hexToBuf(pcHex, 'epcWordsFromPc');
+  if (buf.length !== 2) return null;
+  return buf.readUInt16BE(0) >> 11;
+}
+
+// ---------------------------------------------------------------------------
+// Reader identity / radio configuration
+// ---------------------------------------------------------------------------
+
+/** Vendor version blobs are [len, ...bytes]; the bytes are usually ASCII. */
+function decodeVersion(buf) {
+  const vlen = buf[0];
+  if (!vlen || vlen >= buf.length) return null;
+  const bytes = buf.subarray(1, 1 + vlen);
+  const ascii = bytes.toString('latin1');
+  return { hex: bytes.toString('hex').toUpperCase(), ascii: /^[\x20-\x7e]+$/.test(ascii) ? ascii : null };
+}
+
+function getHardwareVersion() {
+  const f = load();
+  const buf = Buffer.alloc(64);
+  return f.UHFGetHardwareVersion(buf) === 0 ? decodeVersion(buf) : null;
+}
+
+function getReaderVersion() {
+  const f = load();
+  const buf = Buffer.alloc(64);
+  return f.UHFGetReaderVersion(buf) === 0 ? decodeVersion(buf) : null;
+}
+
+function getDeviceId() {
+  const f = load();
+  const id = [0];
+  return f.UHFGetDeviceID(id) === 0 ? id[0] : null;
+}
+
+function getTemperature() {
+  const f = load();
+  const t = [0];
+  return f.UHFGetTemperature(t) === 0 ? t[0] : null;
+}
+
+const REGIONS = { 0x01: 'China1 (920-925MHz)', 0x02: 'China2 (840-845MHz)', 0x04: 'Europe (865-868MHz)', 0x08: 'USA (902-928MHz)', 0x16: 'Korea', 0x32: 'Japan' };
+
+/** @returns {{code:number, name:string}|null} */
+function getRegion() {
+  const f = load();
+  const buf = Buffer.alloc(4);
+  if (f.UHFGetRegion(buf) !== 0) return null;
+  return { code: buf[0], name: REGIONS[buf[0]] ?? `unknown (0x${buf[0].toString(16)})` };
+}
+
+/** @param {number} code see REGIONS. @returns {number} 0 on success. */
+function setRegion(code, save = true) {
+  return load().UHFSetRegion(save ? 1 : 0, Number(code) & 0xff);
+}
+
+const PROTOCOLS = { 0x00: 'ISO18000-6C (EPC Gen2)', 0x01: 'GB/T 29768', 0x02: 'GJB 7377.1' };
+
+function getProtocolType() {
+  const f = load();
+  const buf = Buffer.alloc(4);
+  if (f.UHFGetProtocolType(buf) !== 0) return null;
+  return { code: buf[0], name: PROTOCOLS[buf[0]] ?? `unknown (0x${buf[0].toString(16)})` };
+}
+
+const RF_LINKS = { 0: 'DSB_ASK/FM0/40kHz', 1: 'PR_ASK/Miller4/250kHz', 2: 'PR_ASK/Miller4/300kHz', 3: 'DSB_ASK/FM0/400kHz' };
+
+function getRFLink() {
+  const f = load();
+  const buf = Buffer.alloc(4);
+  if (f.UHFGetRFLink(buf) !== 0) return null;
+  return { code: buf[0], name: RF_LINKS[buf[0]] ?? `unknown (${buf[0]})` };
 }
 
 /** Read current output power (dBm), or null on failure. */
@@ -554,12 +925,81 @@ function setWorkModePara(ioTrigger, durationMs, minGapMs, outputMode) {
   return load().UHFSetWorkModePara(param);
 }
 
-module.exports = {
+/**
+ * Exports that talk to the reader and therefore need an open link.
+ *
+ * Guarding at the boundary rather than inside each function, because the DLL
+ * does not return an error when there is no link — it takes the PROCESS DOWN.
+ * `GET /power` with the reader unplugged killed the whole bridge that way
+ * (2026-08-06), and hand-written per-function guards are exactly the kind of
+ * thing a new helper forgets. guardExports throws at require() time if a name
+ * here no longer exists, so a rename can't silently drop a guard.
+ *
+ * Deliberately NOT listed: load / connect* / disconnect / isConnected /
+ * getLinkType / isReaderAlive (they establish or interrogate the link itself),
+ * setLogLevel and bindUdp/unbindUdp (DLL-local, no reader involved), and the
+ * pure helpers (parseTag, pcWordFor, filters, constants).
+ */
+const NEEDS_LINK = [
+  'usbDeviceInfo',
+  'startInventory',
+  'stopInventory',
+  'pollTag',
+  'getSoftwareVersion',
+  'getPower',
+  'setPower',
+  'readBank',
+  'writeBank',
+  'lockTag',
+  'inventorySingle',
+  'getHardwareVersion',
+  'getReaderVersion',
+  'getDeviceId',
+  'getTemperature',
+  'getRegion',
+  'setRegion',
+  'getProtocolType',
+  'getRFLink',
+  'getWorkTime',
+  'setWorkTime',
+  'setAntennas',
+  'getAntennas',
+  'getAntennaLink',
+  'readIOStatus',
+  'getGpi',
+  'getIOControl',
+  'getWorkMode',
+  'setWorkMode',
+  'setWorkModePara',
+  'getWorkModePara',
+  'setDestIp',
+  'getDestIp',
+  'setReaderIp',
+  'getReaderIp',
+];
+
+function guardExports(api) {
+  for (const name of NEEDS_LINK) {
+    const fn = api[name];
+    if (typeof fn !== 'function') throw new Error(`guardExports: no export named "${name}" — update NEEDS_LINK`);
+    api[name] = (...args) => {
+      requireLink(name);
+      return fn(...args);
+    };
+  }
+  return api;
+}
+
+module.exports = guardExports({
   load,
   connect,
   connectUsb,
+  connectCom,
+  usbDeviceInfo,
   disconnect,
   isConnected,
+  getLinkType,
+  isReaderAlive,
   startInventory,
   stopInventory,
   pollTag,
@@ -567,6 +1007,30 @@ module.exports = {
   getSoftwareVersion,
   getPower,
   setPower,
+  // single-tag access
+  BANK,
+  EPC_DATA_PTR,
+  EPC_FILTER_BIT_OFFSET,
+  DEFAULT_ACCESS_PWD,
+  noFilter,
+  filterByTid,
+  filterByEpc,
+  readBank,
+  writeBank,
+  lockTag,
+  inventorySingle,
+  pcWordFor,
+  epcWordsFromPc,
+  // reader identity / radio
+  getHardwareVersion,
+  getReaderVersion,
+  getDeviceId,
+  getTemperature,
+  getRegion,
+  setRegion,
+  REGIONS,
+  getProtocolType,
+  getRFLink,
   getWorkTime,
   setWorkTime,
   setAntennas,
@@ -592,4 +1056,4 @@ module.exports = {
   setReaderIp,
   getReaderIp,
   paths: { LIB_DIR, UHFAPI_PATH, LIBUSB_PATH },
-};
+});

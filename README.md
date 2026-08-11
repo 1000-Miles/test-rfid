@@ -181,6 +181,127 @@ The label prints but the chip doesn't verify (or the printer voids it): tune **o
 the light, set the offset so the chip sits over the printer's antenna, then raise write power.
 `^RS`-based tuning can also be sent from the raw ZPL console (`extraZpl` config slots it into every label).
 
+## Desktop reader — identify + encode tags
+
+A desktop USB reader (Chainway R3 / R1) encodes tags at a bench rather than on
+the line. Three CLI tools, run in order. All of them auto-detect the transport:
+`UsbOpen()` first, then every registered COM port.
+
+```bash
+cd bridge
+node test/probe-reader.js      # 1. is a reader there, and what is it set to
+node test/tag-info.js          # 2. what chip is this tag, how big, is it locked
+node test/encode-tags.js       # 3. dry run — show what would be written
+node test/encode-tags.js --commit --count 10
+```
+
+Two more when something misbehaves:
+
+```bash
+node test/diagnose-write.js    # a write failed — which of the 5 causes is it
+node test/calibrate-signal.js  # where do writes actually stop working
+```
+
+`calibrate-signal.js` steps reader power down with the tag left in place, so the
+only variable is signal, and records RSSI against single-attempt (un-retried)
+write success. It exists because Tag Station's signal bands were first set from
+general RFID lore and were wrong for this rig — they called -62 dBm "weak" when
+a tag flat on metal reads exactly there, while writes verified 5/5 at -65.3 dBm.
+Run it and feed the suggested bands back into `signalBand()` in
+`tag-station-client.tsx`.
+
+### ⚠️ `UsbOpen()` returns 0 with nothing plugged in
+
+Verified 2026-08-06 on this DLL. It is not a "maybe" — several getters then
+return rc=0 while leaving their output buffer unwritten (`UHFGetPower` reported
+123 dBm, then 43 dBm, then 0 dBm on consecutive runs of an empty link), the
+version strings come back as constants baked into the DLL
+(`V1.0.7,R1_Nu,2025-06-27`), and **`UHFInventorySingle` segfaults the process**.
+
+So an SDK return code of 0 must never be treated as "connected". `uhf.isReaderAlive()`
+is the gate: `UHFGetRegion` + `UHFGetProtocolType` were the only calls that
+consistently failed on the phantom link. Every CLI tool and `controller.connectUsb()`
+go through it.
+
+### ⚠️ A desktop reader has no GPIO — don't health-check it with GPI
+
+The controller polls GPI every 150 ms while idle and treats 3 consecutive
+failures as a lost link. That is correct for the **UR4 gate**, where GPI1/GPI2
+are the IR beams. A **desktop reader (R3/R1) has no GPIO at all**, so every poll
+fails and the bridge declared a perfectly healthy reader dead ~450 ms after
+connecting — then `_reconnectLoop` closed the USB handle and only ever retried
+over TCP, so the link never came back.
+
+The visible symptom was a *write* that failed with a non-zero rc: the request
+guard saw `connected: true`, the reconnect loop closed the handle underneath it,
+and the write ran against a dead handle. It looked exactly like a locked tag.
+
+`controller._detectGpio()` now probes GPIO capability once per link and reports
+it as `hasGpio` on `/status`. When false: GPI polling is off, liveness uses
+`isReaderAlive()` every 5 s instead, IR/HW modes are refused with a clear error,
+and reconnect re-opens over **the transport that was actually in use**.
+
+### Encoding safety
+
+Three independent layers, because a mis-write only surfaces later, in the
+warehouse, as a pallet that resolves to the wrong thing:
+
+1. **One tag in the field.** `requireSingleTag` refuses to act if a second answers.
+2. **Every write is addressed by TID.** The TID is factory-unique and immutable,
+   so a tag that wanders into range mid-write cannot be the chip programmed.
+   This — not low power — is what makes "wrote to a neighbour in the bag" impossible.
+3. **Low power** on top (default 10 dBm, `--power N`).
+
+Verification uses two oracles that fail independently: a TID-filtered read-back
+of the EPC bank, **and** a fresh over-the-air singulation that must now report
+the new EPC. Both must agree. Every attempt lands in `data/pallet-encode-log.jsonl`.
+
+Prove the verifier actually bites before trusting a green run:
+
+```bash
+node test/encode-tags.js --commit --prove-fail   # must report PROVE-FAIL PASSED
+```
+
+It writes the real EPC but verifies against a deliberately wrong one, so a run
+that still reports "verified" means the check is broken.
+
+### EPC namespaces
+
+An EPC is raw hex, so a prefix can only use `0-9 A-F` — "PL" for pallet is not
+encodable. The first two chars are an opaque **tag-kind code**:
+
+| Prefix | Meaning | Minted by |
+|---|---|---|
+| `BC01…` | carton | Nexus `operations_next_epcs` |
+| `BA01…` | pallet | Nexus `operations_next_pallet_epcs` (`--nexus`) |
+| `BA0F…` | bench | locally, `data/pallet-epc.json` |
+
+All are 24 hex chars / 96-bit. The bench prefix differs on purpose: bench tags
+can never collide with the real `BA01` space, and a stray one is obvious in a scan.
+
+### Regional note
+
+Chinese-supplied readers ship on the China band (920–925 MHz). The Philippines
+allocates **918–920 MHz** for UHF RFID with a 500 mW ERP cap, and NTC requires
+readers to be type-approved and registered. `probe-reader.js` reports the current
+region and `--set-region 8` selects the USA preset (902–928 MHz), the closest one
+that covers the Philippine allocation. Not blocking for desk encoding; settle it
+before any fixed reader is deployed.
+
+Anti-metal tags often read *better* against metal than in free air — if one won't
+read, lay it flat on a metal surface.
+
+### Bridge tag-access API
+
+| Method | Path | Body | Notes |
+|---|---|---|---|
+| GET | `/tag` | — | singulate one tag: PC, EPC, EPC word count, TID |
+| POST | `/tag/read` | `{ bank, ptr, words, tid?\|epc?, accessPwd? }` | bank 0=RESERVED 1=EPC 2=TID 3=USER; ptr/words in **words** |
+| POST | `/tag/write` | `{ bank, ptr, data, tid?\|epc?, accessPwd? }` | always reads back; returns `verified` |
+
+Prefer `tid` over `epc` for addressing: an EPC filter matches whatever currently
+carries that EPC, a TID filter matches one physical chip.
+
 ## Chainway C5P handheld — in-facility stock audit
 
 The UR4 gate watches what enters/leaves; the **C5P handheld** roams the floor to audit

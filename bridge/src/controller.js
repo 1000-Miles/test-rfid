@@ -57,6 +57,10 @@ class Controller extends EventEmitter {
     this.udp.on('error', (err) => this.log(`UDP listener error: ${err.message}`, 'error'));
     this.udp.on('datagram', (d) => this._onUdpDatagram(d));
 
+    // null = not probed yet on this link; set by _detectGpio at connect.
+    // The UR4 gate has GPIO (the IR beams); desktop readers (R3/R1) do not.
+    this.hasGpio = null;
+
     this.lastGpi1 = false;
     this.lastGpi2 = false;
     this.lastTriggerAt = 0;
@@ -114,7 +118,10 @@ class Controller extends EventEmitter {
     if (this.reading) await this.stopReading();
     const rc = await this._withLock(() => uhf.connect(ip, Number(port)));
     this.connected = rc === 0;
-    if (this.connected) this._wantConnected = true;
+    if (this.connected) {
+      this._wantConnected = true;
+      this.lastTransport = 'tcp';
+    }
     this.log(`TCPConnect(${ip}, ${port}) -> ${rc} (${rc === 0 ? 'OK' : 'FAIL'})`);
     if (this.connected) {
       // Reset the reader to a known-good state for command-mode reading. After
@@ -144,6 +151,7 @@ class Controller extends EventEmitter {
       this.lastReaderIp = ip;
       this.lastReaderPort = Number(port);
       this._gpiFailCount = 0;
+      await this._withLock(() => this._detectGpio());
       // Connect reset forces work mode 0; if HW trigger mode is selected,
       // re-arm it now so the reader goes back to pushing tags over UDP.
       if (this.mode === 'hw') {
@@ -157,9 +165,21 @@ class Controller extends EventEmitter {
   async connectUsb() {
     if (this.reading) await this.stopReading();
     const rc = await this._withLock(() => uhf.connectUsb());
-    this.connected = rc === 0;
     this.log(`UsbOpen() -> ${rc} (${rc === 0 ? 'OK' : 'FAIL'})`);
+    // UsbOpen() returns 0 with NOTHING plugged in (verified 2026-08-06), and a
+    // tag operation on that phantom link segfaults the whole bridge — so rc
+    // alone must never set `connected`. Require a reader to actually answer.
+    if (rc === 0 && !(uhf.isReaderAlive ? await this._withLock(() => uhf.isReaderAlive()) : true)) {
+      await this._withLock(() => uhf.disconnect());
+      this.connected = false;
+      this.log('UsbOpen() succeeded but no reader answered — treating as NOT connected.', 'error');
+      this._emitStatus();
+      return 2; // ERR_CONNECT_FAILURE, matching the SDK's "reader unreachable"
+    }
+    this.connected = rc === 0;
     if (this.connected) {
+      this._wantConnected = true;
+      this.lastTransport = 'usb';
       // Same known-good reset as TCP connect: clear any leftover inventory and
       // force command mode so tags flow through the poll loop.
       await this._withLock(() => {
@@ -179,6 +199,8 @@ class Controller extends EventEmitter {
           this.log(`reset warning: ${e.message}`, 'warn');
         }
       });
+      this._gpiFailCount = 0;
+      await this._withLock(() => this._detectGpio());
     }
     this._emitStatus();
     return rc;
@@ -224,6 +246,12 @@ class Controller extends EventEmitter {
 
   async setMode(cfg = {}) {
     const prev = this.mode;
+    // Both IR modes trigger off a GPI beam. On a reader with no GPIO the mode
+    // would sit there silently never firing, which reads as "the rig is broken"
+    // rather than "wrong reader for the job".
+    if ((cfg.mode === 'ir' || cfg.mode === 'hw') && this.hasGpio === false) {
+      throw new Error(`this reader has no GPIO — ${cfg.mode.toUpperCase()} triggering needs a gate reader (UR4). Use manual mode.`);
+    }
     if (cfg.mode === 'manual' || cfg.mode === 'ir' || cfg.mode === 'hw') this.mode = cfg.mode;
     if (Number.isFinite(cfg.irDurationMs)) this.irDurationMs = cfg.irDurationMs;
     if (Number.isFinite(cfg.irMinGapMs)) this.irMinGapMs = cfg.irMinGapMs;
@@ -334,6 +362,23 @@ class Controller extends EventEmitter {
       await this._withLock(() => {
         try { uhf.disconnect(); } catch (_) { /* already dead */ }
       });
+
+      // A USB reader has no IP to probe. Re-opening it is the only way back —
+      // and connectUsb() verifies a reader actually answers, so this waits for
+      // the real device rather than latching onto UsbOpen()'s phantom success.
+      if (this.lastTransport === 'usb') {
+        while (this._running && this._wantConnected && !this.connected) {
+          try {
+            await this.connectUsb();
+          } catch (err) {
+            this.log(`USB reconnect attempt failed: ${err.message}`, 'warn');
+          }
+          if (!this.connected) await sleep(5000);
+        }
+        if (this.connected) this.log('Auto-reconnect OK — reader is back.');
+        return;
+      }
+
       while (this._running && this._wantConnected && !this.connected && ip) {
         if (await this._tcpProbe(ip, port)) {
           await sleep(1500); // let the reader finish booting
@@ -403,6 +448,8 @@ class Controller extends EventEmitter {
       connected: this.connected,
       reading: this.reading,
       mode: this.mode,
+      // null until a link is open. false = desktop reader: no GPI, no IR modes.
+      hasGpio: this.hasGpio,
       irDurationMs: this.irDurationMs,
       irMinGapMs: this.irMinGapMs,
       gpi: this.lastGpi,
@@ -458,6 +505,11 @@ class Controller extends EventEmitter {
             }
           }
           delay = got > 0 ? 0 : 10; // keep draining while tags flow
+        } else if (this.hasGpio === false) {
+          // No GPIO to poll. Idle cheaply and check liveness occasionally
+          // rather than hammering a call this reader will never answer.
+          await this._withLock(() => this._pollAlive());
+          delay = 500;
         } else {
           await this._withLock(() => this._pollGpiOnce());
           delay = this.gpiIntervalMs;
@@ -510,13 +562,63 @@ class Controller extends EventEmitter {
     return n;
   }
 
+  /**
+   * Decide once, per link, whether this reader has GPIO at all.
+   *
+   * The UR4 gate does — GPI1/GPI2 are the IR beams. A desktop reader (R3/R1)
+   * does NOT, so every GPI read fails, and treating that as a health signal
+   * declared a perfectly working reader dead within half a second and flipped
+   * `connected` to false under live requests. Verified on an R3, 2026-08-06.
+   */
+  async _detectGpio() {
+    // try/catch, not .catch() — the DLL driver is synchronous and returns a
+    // plain object, only the sidecar returns a promise. `await` handles both.
+    let gpi;
+    try {
+      gpi = await uhf.getGpi();
+    } catch (_) {
+      gpi = { rc: -1 };
+    }
+    this.hasGpio = Boolean(gpi && gpi.rc === 0);
+    this.log(
+      this.hasGpio
+        ? 'Reader has GPIO — GPI polling and IR trigger modes available.'
+        : 'Reader has no GPIO (desktop reader) — GPI polling off; IR modes unavailable.'
+    );
+    return this.hasGpio;
+  }
+
+  /**
+   * Liveness for readers without GPIO. Cheap, infrequent, and uses a call the
+   * SDK actually answers on both families — unlike GPI, which is UR4-only.
+   */
+  async _pollAlive() {
+    const now = Date.now();
+    if (now - (this._lastAliveAt || 0) < 5000) return;
+    this._lastAliveAt = now;
+    let alive = true;
+    try {
+      if (uhf.isReaderAlive) alive = await uhf.isReaderAlive();
+    } catch (_) {
+      alive = false;
+    }
+    if (alive) {
+      this._gpiFailCount = 0;
+      return;
+    }
+    this._gpiFailCount = (this._gpiFailCount || 0) + 1;
+    if (this._gpiFailCount >= 3) this._onLinkLost();
+  }
+
   /** Read GPI once, broadcast, and (in IR mode) detect the trigger edge. */
   async _pollGpiOnce() {
     const gpi = await uhf.getGpi();
 
     // Link health: a power-cycled reader leaves the DLL with a dead socket
     // that the bridge can't otherwise see. 3 consecutive failed reads = lost.
+    // Only meaningful on a reader that HAS GPIO — see _detectGpio.
     if (gpi.rc !== 0) {
+      if (this.hasGpio === false) return;
       this._gpiFailCount = (this._gpiFailCount || 0) + 1;
       if (this._gpiFailCount >= 3) this._onLinkLost();
       return;
