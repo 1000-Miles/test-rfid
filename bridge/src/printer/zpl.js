@@ -36,6 +36,25 @@ function testEpc(prefix = 'AA00', counter = 1) {
 }
 
 /**
+ * Default canvas used to compute coordinates when the caller leaves
+ * widthDots/heightDots null (= "use the printer's calibrated label size").
+ * ^PW/^LL are still not emitted in that case — the printer's own calibration
+ * governs the media — but the ROW COORDINATES have to be computed against some
+ * canvas, and it must be the real one. Our media is 60×40 mm on the 300 dpi
+ * CP30 (12 dots/mm) = 709×472 dots.
+ */
+const DEFAULT_WIDTH_DOTS = 709;
+const DEFAULT_HEIGHT_DOTS = 472;
+
+/**
+ * Typical heading length — a 20-char box ID ("BSC-227-A004227-0042"), two
+ * spaces, and a ~24-char product name. Used ONLY to decide how many lines the
+ * heading row reserves; the reservation must not depend on the actual text or
+ * two labels would space their rows differently.
+ */
+const HEADING_REF_CHARS = 46;
+
+/**
  * Build a complete print+encode label format.
  * Coordinates are printhead dots — our CP30 is the 300 dpi model (12 dots/mm),
  * so 60×40 mm media = 709×472 dots. widthDots/heightDots are optional overrides
@@ -109,11 +128,14 @@ function buildLabel(opts = {}) {
   const epcText = semantic ? hex : `EPC ${hex}`;
 
   // ── Layout ─────────────────────────────────────────────────────────────────
-  // Everything below is computed from the label size (never hardcoded) so it
-  // stays correct at any resolution — the rows are measured, then spaced with
-  // EQUAL gaps and centred on the label.
-  const W = widthDots || 400;
-  const H = heightDots || Math.round(W * 1.03);
+  // Every coordinate is derived from the LABEL SIZE ALONE — never from the text
+  // — so the same row lands in the same place on every label. Each row owns a
+  // fixed-height SLOT; text too long for its slot shrinks its own font to fit
+  // instead of growing the slot and pushing everything below it down. That is
+  // what keeps a calibration test print and a live carton label identically
+  // spaced even though their product names are different lengths.
+  const W = widthDots || DEFAULT_WIDTH_DOTS;
+  const H = heightDots || DEFAULT_HEIGHT_DOTS;
   const target = Math.round(W * 0.9); // 90% span for the wide elements
   // One shared left margin for every row so their left edges line up.
   const left = fx(0);
@@ -121,27 +143,75 @@ function buildLabel(opts = {}) {
   // long product name WRAPS (^FB) instead of running off the right edge.
   const textWidth = Math.max(120, W - left - Math.round(W * 0.05));
 
-  // Text rows — the heading is the largest; the detail lines under it a step
-  // smaller. Estimate each row's wrapped line count so the spacing stays even
-  // regardless of text length (the printer does the real wrapping via ^FB; this
-  // only budgets the vertical space for it).
-  const HEAD = { h: 34, w: 18, lead: 8, maxLines: 3 };
-  const DETAIL = { h: 28, w: 14, lead: 6, maxLines: 2 };
-  const measure = (text, m) => {
-    const charsPerLine = Math.max(1, Math.floor(textWidth / m.w));
-    const lines = Math.min(m.maxLines, Math.max(1, Math.ceil(text.length / charsPerLine)));
-    return { ...m, text, block: lines * m.h + (lines - 1) * m.lead };
-  };
-  const measured = textRows.map((t, i) => measure(t, i === 0 ? HEAD : DETAIL));
+  const clampInt = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(v)));
+  // ^A0 (scalable font 0) draws roughly this wide per unit of height.
+  const CHAR_ASPECT = 0.55;
 
-  // EPC row — one line, char width sized so the whole string fills ~90%.
-  const epcW = Math.max(6, Math.floor(target / epcText.length));
-  const epcH = Math.round(epcW * 1.5);
+  // Row slots, as a proportion of the label height, all scaled together by
+  // `scale` (see the fit loop below).
+  //
+  // The three fields the warehouse actually reads — product name, assortment
+  // number, PO number — all print at ONE size (TEXT_H); the rows differ only in
+  // how many lines they reserve. The EPC, a reference string nobody reads across
+  // a warehouse, is deliberately smaller so it doesn't take height from them.
+  // `lines` is the space a slot RESERVES, not a measurement of the text: the
+  // heading gets three because it carries the box ID AND the product name, and a
+  // name long enough to need the third line should get there by wrapping rather
+  // than by shrinking its font.
+  const plan = (scale) => {
+    const TEXT_H = clampInt(H * 0.16 * scale, 16, 140);
+    // How many lines the heading RESERVES is derived from the label WIDTH and a
+    // reference heading length — never from the actual text — so it is the same
+    // on every label, while a label wide enough to take the heading in fewer
+    // lines doesn't leave blank ones between the product name and the assortment
+    // number below it.
+    const headChars = Math.max(1, Math.floor((textWidth * 0.95) / Math.max(1, Math.floor(TEXT_H * CHAR_ASPECT))));
+    const headLines = Math.max(1, Math.min(3, Math.ceil(HEADING_REF_CHARS / headChars)));
+    const HEAD = { h: TEXT_H, lines: headLines, lead: Math.round(TEXT_H * 0.14) };
+    const DETAIL = { h: TEXT_H, lines: 1, lead: 0 };
+    const epcSlot = { h: clampInt(H * 0.05 * scale, 12, 60), lines: 1, lead: 0 };
+    const barH = clampInt(H * 0.135 * scale, 30, 200);
+    const gap = Math.max(8, Math.round(H * 0.02 * scale));
+    const slots = textRows.map((t, i) => ({ text: t, ...(i === 0 ? HEAD : DETAIL) }));
+    const block = (s) => s.lines * s.h + (s.lines - 1) * s.lead;
+    const heights = [...slots.map(block), epcSlot.h, ...(barcode ? [barH] : [])];
+    const stackH = heights.reduce((a, b) => a + b, 0) + gap * (heights.length - 1);
+    return { slots, block, epcSlot, barH, gap, stackH };
+  };
+
+  // Shrink the WHOLE stack — never one row — until it fits inside the label's
+  // margins. Scaling everything together keeps the rows in proportion, and keeps
+  // the result content-independent: short media just prints the same design
+  // smaller. A couple of passes converge; the per-slot floors above win after
+  // that, which is the point (legibility, not a fit at any cost).
+  const margin = Math.round(H * 0.05);
+  const usable = Math.max(1, H - margin * 2);
+  let scale = 1;
+  let L = plan(scale);
+  for (let i = 0; i < 4 && L.stackH > usable; i++) {
+    scale *= usable / L.stackH;
+    L = plan(scale);
+  }
+
+  // Largest character cell that draws `text` inside `lines` lines of `slot.h`.
+  // The 0.95 factor leaves slack for ^FB's word wrapping, which can break a line
+  // early and so needs a little more room than a raw character count implies.
+  const fitFont = (text, slot) => {
+    const maxW = Math.max(4, Math.floor(slot.h * CHAR_ASPECT));
+    const perLine = Math.max(1, Math.ceil(text.length / slot.lines));
+    const w = Math.max(5, Math.min(maxW, Math.floor((textWidth * 0.95) / perLine)));
+    return { w, h: Math.max(10, Math.round(w / CHAR_ASPECT)) };
+  };
+
+  const measured = L.slots.map((s) => ({ ...s, ...fitFont(s.text, s), block: L.block(s) }));
+  const epcFont = fitFont(epcText, L.epcSlot);
+  const epcW = epcFont.w;
+  const epcH = epcFont.h;
 
   // Barcode row (visual only; read by RFID, not laser). A Code 128's width =
   // (11·S + 13) modules; estimate S (digit pairs compress via subset C), then pick
   // the largest integer module whose bars fit the full width.
-  const barH = 120;
+  const barH = L.barH;
   let mod = 0;
   if (barcode) {
     let sym = 1; // start char
@@ -158,19 +228,19 @@ function buildLabel(opts = {}) {
   }
 
   // Distribute the rows with EQUAL gaps and centre the stack vertically — rows
-  // sit close together, not spread across the whole height. The gap is clamped so
-  // it's neither cramped nor absurdly sparse on a tall label.
-  const gap = Math.max(20, Math.round(H * 0.04));
-  const blocks = [...measured.map((m) => m.block), epcH, ...(barcode ? [barH] : [])];
-  const stackH = blocks.reduce((a, b) => a + b, 0) + gap * (blocks.length - 1);
-  let y = Math.max(Math.round(H * 0.05), Math.round((H - stackH) / 2));
+  // sit close together, not spread across the whole height. Every block here is a
+  // fixed SLOT height, so the stack — and therefore the start Y and every row
+  // below it — depends only on which rows are present, never on how long their
+  // text is.
+  const gap = L.gap;
+  let y = Math.max(margin, Math.round((H - L.stackH) / 2));
 
   for (const m of measured) {
-    z.push(`^FO${left},${fy(y)}^A0N,${m.h},${m.w}^FB${textWidth},${m.maxLines},${m.lead},L,0^FD${m.text}^FS`);
+    z.push(`^FO${left},${fy(y)}^A0N,${m.h},${m.w}^FB${textWidth},${m.lines},${m.lead},L,0^FD${m.text}^FS`);
     y += m.block + gap;
   }
   z.push(`^FO${left},${fy(y)}^A0N,${epcH},${epcW}^FD${epcText}^FS`);
-  y += epcH + gap;
+  y += L.epcSlot.h + gap;
   if (barcode) z.push(`^FO${left},${fy(y)}^BY${mod},2,${barH}^BCN,${barH},N,N,N^FD${hex}^FS`);
   z.push(`^PQ${qty}`);
   z.push('^XZ');
