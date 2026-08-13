@@ -10,6 +10,7 @@ import { accent, C, Tile, u } from './boardKit';
 export default function DirectionView(props: {
   dir: Direction;
   docs: GateDoc[];
+  focus: string | null;
   onBack: () => void;
   onOpenDoc: (id: string) => void;
 }) {
@@ -39,11 +40,14 @@ export default function DirectionView(props: {
 
   return (
     <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', background: C.white }}>
-      <div style={{ flex: '0 0 auto', padding: `${u(26)} ${u(32)} ${u(22)} ${u(32)}`, background: C.white, borderBottom: `1px solid ${C.border}` }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: u(20) }}>
-          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: u(10) }}>
+      {/* Landscape keeps this band as low as it can — the grid below only fits
+          two rows of tiles in 1080 of height — so the title and the count sit
+          on one line and the document bar shares its row with the tally. */}
+      <div style={{ flex: '0 0 auto', padding: `${u(18)} ${u(28)} ${u(14)} ${u(28)}`, background: C.white, borderBottom: `1px solid ${C.border}` }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: u(20) }}>
+          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: u(8) }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: u(14) }}>
-              <div onClick={props.onBack} style={{ display: 'flex', alignItems: 'center', gap: u(10), height: u(60), padding: `0 ${u(24)}`, borderRadius: u(26), background: C.surface, border: `1px solid ${C.border}`, fontSize: u(19), fontWeight: 700, color: C.muted, cursor: 'pointer' }}>
+              <div onClick={props.onBack} style={{ display: 'flex', alignItems: 'center', gap: u(10), height: u(50), padding: `0 ${u(22)}`, borderRadius: u(26), background: C.surface, border: `1px solid ${C.border}`, fontSize: u(18), fontWeight: 700, color: C.muted, cursor: 'pointer' }}>
                 ‹ Overview
               </div>
               <div style={{ padding: `${u(8)} ${u(18)}`, borderRadius: u(26), fontSize: u(15), fontWeight: 800, letterSpacing: '0.16em', background: a.soft, color: a.text }}>
@@ -55,42 +59,46 @@ export default function DirectionView(props: {
                 </div>
               )}
             </div>
-            <div style={{ fontSize: u(58), fontWeight: 800, lineHeight: 0.95, letterSpacing: u(-1.5) }}>
-              Today’s {dir === 'in' ? 'Inbound' : 'Outbound'}
-            </div>
-            <div style={{ fontSize: u(24), fontWeight: 600, color: C.muted }}>
-              {docs.length} {noun} · {items.length} SKU lines
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: u(20), minWidth: 0 }}>
+              <div style={{ fontSize: u(52), fontWeight: 800, lineHeight: 1, letterSpacing: u(-1.5), whiteSpace: 'nowrap' }}>
+                Today’s {dir === 'in' ? 'Inbound' : 'Outbound'}
+              </div>
+              <div style={{ fontSize: u(22), fontWeight: 600, color: C.muted, whiteSpace: 'nowrap' }}>
+                {docs.length} {noun} · {items.length} SKU lines
+              </div>
             </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: u(10), paddingTop: u(8) }}>
-            <div style={{ fontSize: u(132), fontWeight: 800, lineHeight: 0.8, letterSpacing: u(-6), fontVariantNumeric: 'tabular-nums', color: allDone ? C.green : a.text }}>{totals.received}</div>
-            <div style={{ fontSize: u(52), fontWeight: 700, color: C.faint, fontVariantNumeric: 'tabular-nums' }}>/ {totals.expected}</div>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: u(10), flex: '0 0 auto' }}>
+            <div style={{ fontSize: u(104), fontWeight: 800, lineHeight: 0.8, letterSpacing: u(-5), fontVariantNumeric: 'tabular-nums', color: allDone ? C.green : a.text }}>{totals.received}</div>
+            <div style={{ fontSize: u(44), fontWeight: 700, color: C.faint, fontVariantNumeric: 'tabular-nums' }}>/ {totals.expected}</div>
           </div>
         </div>
 
-        {/* one segment per document, weighted by how much it expects */}
-        <div style={{ display: 'flex', gap: u(6), marginTop: u(20), alignItems: 'center' }}>
-          {docs.map((doc) => {
-            const t = docTotals(doc);
-            return (
-              <div key={doc.id} title={docTitle(doc)} style={{ height: u(20), borderRadius: u(12), background: C.track, overflow: 'hidden', flex: t.expected }}>
-                <div style={{ height: '100%', borderRadius: u(12), width: `${pct(t.received, t.expected)}%`, background: t.received >= t.expected ? C.green : a.fill, transition: 'width .3s ease' }} />
-              </div>
-            );
-          })}
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: u(10), marginTop: u(12), fontSize: u(16), fontWeight: 600, color: C.faint }}>
-          <div style={{ width: u(12), height: u(12), borderRadius: u(4), background: allDone ? C.green : a.fill }} />
-          <div>
-            {complete} of {docs.length} {noun} complete
+        <div style={{ display: 'flex', alignItems: 'center', gap: u(16), marginTop: u(14) }}>
+          {/* one segment per document, weighted by how much it expects */}
+          <div style={{ flex: 1, display: 'flex', gap: u(6), alignItems: 'center' }}>
+            {docs.map((doc) => {
+              const t = docTotals(doc);
+              return (
+                <div key={doc.id} title={docTitle(doc)} style={{ height: u(18), borderRadius: u(12), background: C.track, overflow: 'hidden', flex: t.expected }}>
+                  <div style={{ height: '100%', borderRadius: u(12), width: `${pct(t.received, t.expected)}%`, background: t.received >= t.expected ? C.green : a.fill, transition: 'width .3s ease' }} />
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: u(10), fontSize: u(16), fontWeight: 600, color: C.faint, flex: '0 0 auto' }}>
+            <div style={{ width: u(12), height: u(12), borderRadius: u(4), background: allDone ? C.green : a.fill }} />
+            <div style={{ whiteSpace: 'nowrap' }}>
+              {complete} of {docs.length} {noun} complete
+            </div>
           </div>
         </div>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: `${u(24)} ${u(32)} ${u(32)} ${u(32)}` }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: u(14) }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: `${u(20)} ${u(28)} ${u(24)} ${u(28)}` }}>
+        <div style={{ display: 'grid', gridTemplateColumns: `repeat(auto-fill, minmax(${u(212)}, 1fr))`, gap: u(14) }}>
           {items.map(({ line, doc }) => (
-            <Tile key={`${doc.id}-${line.sku}`} line={line} dir={dir} doc={{ label: docTitle(doc), due: doc.due }} onClick={() => props.onOpenDoc(doc.id)} />
+            <Tile key={`${doc.id}-${line.sku}`} line={line} dir={dir} focused={props.focus === `${doc.id}-${line.sku}`} doc={{ label: docTitle(doc), due: doc.due }} onClick={() => props.onOpenDoc(doc.id)} />
           ))}
         </div>
       </div>

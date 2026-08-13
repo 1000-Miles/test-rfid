@@ -46,13 +46,14 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 
-/* --------------- Gate board (portrait kiosk, 1080 × 1920) ---------------
-   --u is one design pixel. At 1080 × 1920 it resolves to exactly 1px, so the
-   board is pixel-identical to the prototype; on any other viewport every
-   dimension scales together and the list regions take up the slack. The 1.4px
-   ceiling keeps type sane on very large displays. */
+/* -------------- Gate board (landscape kiosk, 1920 × 1080) --------------
+   --u is one design pixel. At 1920 × 1080 it resolves to exactly 1px; on any
+   other viewport every dimension scales together and the grid regions take up
+   the slack. The 1.4px ceiling keeps type sane on very large displays.
+   Height is now the scarce axis, so the board spends it deliberately: a short
+   header, both directions side by side, and a short footer. */
 .gate {
-  --u: min(0.0926vw, 0.0521vh, 1.4px);
+  --u: min(0.0521vw, 0.0926vh, 1.4px);
   font-family: 'Montserrat', ui-sans-serif, system-ui, sans-serif;
 }
 .gate ::-webkit-scrollbar {
@@ -87,6 +88,27 @@ body {
 }
 .gate-pulse-online {
   animation: gate-pulse-glow 2.6s ease-in-out infinite;
+}
+/* The product a gate read just counted. A ring that breathes rather than
+   blinks: on a wall panel that nobody is watching continuously, the tile has to
+   still be findable several seconds after the beep, and a hard blink reads as a
+   fault. Paired with scrollIntoView in Tile. */
+@keyframes gate-focus {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 3px rgba(0, 188, 212, 0.55),
+      0 6px 20px rgba(0, 0, 0, 0.16);
+  }
+  50% {
+    box-shadow:
+      0 0 0 9px rgba(0, 188, 212, 0),
+      0 6px 20px rgba(0, 0, 0, 0.16);
+  }
+}
+.gate-focus {
+  animation: gate-focus 1.6s ease-in-out infinite;
+  z-index: 1;
 }
 @keyframes gate-flash {
   0%,

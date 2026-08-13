@@ -9,7 +9,7 @@ import TvBoard from './TvBoard';
 /**
  * Shell and router.
  *
- *   /gateboard — the portrait gate board (kiosk); also where `/` lands
+ *   /gateboard — the gate board (landscape kiosk); also where `/` lands
  *   /tv        — the landscape TV wallboard; the old `#tv` hash still works
  *
  * The gear on the board opens the engineering console over whichever screen

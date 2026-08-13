@@ -395,8 +395,12 @@ export function applyMovement(state: BoardState, entry: EntryRow): { state: Boar
 
 export interface GateBoardApi {
   board: BoardState;
-  /** Latest counted movement — the board follows this into the live view. */
-  lastCounted: { docId: string; dir: Direction; seq: number } | null;
+  /**
+   * Latest counted movement — the board follows this to the product that was
+   * just credited. `sku` is null only for a manual board addition, which has a
+   * document but no particular line to point at.
+   */
+  lastCounted: { docId: string; sku: string | null; name: string | null; dir: Direction; seq: number } | null;
   /** Unknown tag banner text, cleared automatically. */
   flashTag: string | null;
   /** "Already counted" toast text, cleared automatically. */
@@ -449,7 +453,7 @@ export function useGateBoard(entries: EntryRow[]): GateBoardApi {
     commit(next);
 
     for (const outcome of outcomes) {
-      if (outcome.kind === 'counted') setLastCounted({ docId: outcome.docId, dir: outcome.dir, seq: ++seq.current });
+      if (outcome.kind === 'counted') setLastCounted({ docId: outcome.docId, sku: outcome.sku, name: outcome.name, dir: outcome.dir, seq: ++seq.current });
       else if (outcome.kind === 'unknown') setFlashTag(outcome.tag);
       else setDupMsg(outcome.message);
     }
@@ -477,7 +481,7 @@ export function useGateBoard(entries: EntryRow[]): GateBoardApi {
         docs: [...prev.docs, { ...doc, due: 0, meta: `Added manually · ${hhmm()}` }],
         pool: prev.pool.filter((p) => p.id !== docId),
       });
-      setLastCounted({ docId, dir: 'in', seq: ++seq.current });
+      setLastCounted({ docId, sku: null, name: null, dir: 'in', seq: ++seq.current });
     },
     [commit]
   );
