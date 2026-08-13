@@ -548,11 +548,13 @@ function filterFrom(body, uhf) {
 
 // GET /tag  — singulate one tag and report PC + EPC (+ TID when readable).
 app.get('/tag', async (_req, res) => {
-  await withTagAccess(res, (uhf) => {
-    const single = uhf.inventorySingle();
+  // awaits everywhere: the DLL driver is synchronous but the sidecar (Linux)
+  // returns promises — `await` handles both.
+  await withTagAccess(res, async (uhf) => {
+    const single = await uhf.inventorySingle();
     if (!single) return { tag: null };
     const filter = uhf.filterByEpc(single.epc);
-    const tid = uhf.readBank({ bank: uhf.BANK.TID, ptr: 0, words: 6, filter });
+    const tid = await uhf.readBank({ bank: uhf.BANK.TID, ptr: 0, words: 6, filter });
     return {
       tag: { ...single, epcWords: uhf.epcWordsFromPc(single.pc), tid: tid.rc === 0 ? tid.hex : null },
     };

@@ -34,6 +34,12 @@ import java.util.concurrent.Executors;
  *   GET  /power                  POST /power?dbm=&ants=1,2
  *   GET  /antennas               POST /antennas?ports=1,3
  *   GET  /workmode               POST /workmode?mode=0
+ *   GET  /tag/single             (singulate ONE tag: pc + epc)
+ *   POST /tag/read?bank=&ptr=&words=[&fbank=&fptr=&fdata=][&pwd=]
+ *   POST /tag/write?bank=&ptr=&data=[&fbank=&fptr=&fdata=][&pwd=]
+ *     Filter fields mirror the DLL driver: fptr is the mask offset in BITS,
+ *     fdata is hex; the mask length is derived from fdata. No fdata = no
+ *     filter (any tag in the field may answer — single-tag bench use only).
  */
 public class UhfSidecar {
     static final RFIDWithUHFNetworkUR4 uhf = new RFIDWithUHFNetworkUR4();
@@ -177,6 +183,50 @@ public class UhfSidecar {
                 }
             }
             return sb.append("]}").toString();
+        }));
+
+        server.createContext("/tag/single", ex -> handle(ex, q -> {
+            UHFTAGInfo info = uhf.inventorySingleTag();
+            if (info == null) return "{\"ok\":true,\"tag\":null}";
+            return "{\"ok\":true,\"tag\":{\"pc\":" + jstr(info.getPc()) +
+                   ",\"epc\":" + jstr(info.getEPC()) + "}}";
+        }));
+
+        server.createContext("/tag/read", ex -> handle(ex, q -> {
+            String pwd = q.getOrDefault("pwd", "00000000");
+            int bank = Integer.parseInt(q.get("bank"));
+            int ptr = Integer.parseInt(q.getOrDefault("ptr", "0"));
+            int words = Integer.parseInt(q.getOrDefault("words", "1"));
+            String fdata = q.get("fdata");
+            String hex;
+            if (fdata == null || fdata.isEmpty()) {
+                hex = uhf.readData(pwd, bank, ptr, words);
+            } else {
+                int fbank = Integer.parseInt(q.getOrDefault("fbank", "1"));
+                int fptr = Integer.parseInt(q.getOrDefault("fptr", "32")); // bits
+                hex = uhf.readData(pwd, fbank, fptr, fdata.length() * 4, fdata, bank, ptr, words);
+            }
+            return "{\"ok\":" + (hex != null) + ",\"hex\":" + jstr(hex) + "}";
+        }));
+
+        server.createContext("/tag/write", ex -> handle(ex, q -> {
+            String pwd = q.getOrDefault("pwd", "00000000");
+            int bank = Integer.parseInt(q.get("bank"));
+            int ptr = Integer.parseInt(q.getOrDefault("ptr", "0"));
+            String data = q.get("data");
+            if (data == null || data.isEmpty() || data.length() % 4 != 0)
+                return "{\"ok\":false,\"error\":\"data must be whole 16-bit words of hex\"}";
+            int words = data.length() / 4;
+            String fdata = q.get("fdata");
+            boolean ok;
+            if (fdata == null || fdata.isEmpty()) {
+                ok = uhf.writeData(pwd, bank, ptr, words, data);
+            } else {
+                int fbank = Integer.parseInt(q.getOrDefault("fbank", "1"));
+                int fptr = Integer.parseInt(q.getOrDefault("fptr", "32")); // bits
+                ok = uhf.writeData(pwd, fbank, fptr, fdata.length() * 4, fdata, bank, ptr, words, data);
+            }
+            return "{\"ok\":" + ok + "}";
         }));
 
         server.createContext("/workmode", ex -> handle(ex, q -> {

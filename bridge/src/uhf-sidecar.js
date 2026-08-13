@@ -172,6 +172,80 @@ async function getSoftwareVersion() {
 
 function setLogLevel() {}
 
+// --- single-tag access (read / write / singulate) ---------------------------
+// Same surface + shapes as uhf.js so server.js's /tag routes work unchanged on
+// Linux. Filters are the same { bank, startBit, data:Buffer } objects; the
+// sidecar receives them as fbank/fptr(bits)/fdata(hex) query params.
+
+const BANK = { RESERVED: 0, EPC: 1, TID: 2, USER: 3 };
+const EPC_DATA_PTR = 2;
+const EPC_FILTER_BIT_OFFSET = 32; // CRC(16) + PC(16)
+
+function hexToBuf(hex, label) {
+  const clean = String(hex ?? '').replace(/[^0-9a-fA-F]/g, '');
+  if (clean.length % 2 !== 0) throw new Error(`${label}: odd number of hex digits ("${hex}")`);
+  return Buffer.from(clean, 'hex');
+}
+
+function filterByTid(tidHex) {
+  const data = hexToBuf(tidHex, 'filterByTid');
+  if (!data.length) throw new Error('filterByTid: empty TID');
+  return { bank: BANK.TID, startBit: 0, data };
+}
+
+function filterByEpc(epcHex, startBit = EPC_FILTER_BIT_OFFSET) {
+  const data = hexToBuf(epcHex, 'filterByEpc');
+  if (!data.length) throw new Error('filterByEpc: empty EPC');
+  return { bank: BANK.EPC, startBit, data };
+}
+
+function filterParams(filter) {
+  if (!filter) return {};
+  return {
+    fbank: filter.bank,
+    fptr: filter.startBit,
+    fdata: filter.data.toString('hex').toUpperCase(),
+  };
+}
+
+/** @returns {{rc:number, hex:(string|null), bytes:(Buffer|null)}} — mirrors uhf.js */
+async function readBank({ bank, ptr = 0, words = 1, filter = null, accessPwd } = {}) {
+  const r = await call('POST', '/tag/read', { bank, ptr, words, pwd: accessPwd, ...filterParams(filter) });
+  if (!r.ok || !r.hex) return { rc: -1, hex: null, bytes: null };
+  const hex = String(r.hex).toUpperCase();
+  return { rc: 0, hex, bytes: Buffer.from(hex, 'hex') };
+}
+
+/** @returns {number} 0 on success — mirrors uhf.js */
+async function writeBank({ bank, ptr = 0, dataHex, filter = null, accessPwd } = {}) {
+  const clean = String(dataHex ?? '').replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+  if (!clean.length) throw new Error('writeBank: no data');
+  if (clean.length % 4 !== 0) throw new Error(`writeBank: data must be whole 16-bit words (got ${clean.length / 2} bytes)`);
+  const r = await call('POST', '/tag/write', { bank, ptr, data: clean, pwd: accessPwd, ...filterParams(filter) });
+  return r.ok ? 0 : -1;
+}
+
+/** Singulate ONE tag. @returns {{pc:string, epc:string, raw:string}|null} */
+async function inventorySingle() {
+  const r = await call('GET', '/tag/single');
+  if (!r.ok || !r.tag || !r.tag.epc) return null;
+  const pc = String(r.tag.pc || '').toUpperCase();
+  const epc = String(r.tag.epc).toUpperCase();
+  return { pc, epc, raw: pc + epc };
+}
+
+/** EPC length in 16-bit words, as declared by a PC word (pure JS, same as uhf.js). */
+function epcWordsFromPc(pcHex) {
+  const buf = hexToBuf(pcHex, 'epcWordsFromPc');
+  if (buf.length !== 2) return null;
+  return buf.readUInt16BE(0) >> 11;
+}
+
+/** Liveness for _pollAlive: the reader answers a version query or it is gone. */
+async function isReaderAlive() {
+  return Boolean(await getSoftwareVersion());
+}
+
 const unsupported = (name) => () => {
   throw new Error(`${name} not supported by the sidecar driver (DLL driver only)`);
 };
@@ -180,8 +254,12 @@ module.exports = {
   capabilities,
   load,
   connect,
+  connectUsb: () => {
+    throw new Error('USB readers need the DLL driver (Windows) — connect over TCP on Linux');
+  },
   disconnect,
   isConnected: () => true, // controller tracks its own state
+  isReaderAlive,
   startInventory,
   stopInventory,
   drainTags,
@@ -195,8 +273,17 @@ module.exports = {
   setWorkMode,
   getSoftwareVersion,
   setLogLevel,
+  // single-tag access (encode/read/write) — served by the Java sidecar
+  BANK,
+  EPC_DATA_PTR,
+  filterByTid,
+  filterByEpc,
+  readBank,
+  writeBank,
+  inventorySingle,
+  epcWordsFromPc,
   // debug/HW-mode surface not available via sidecar:
-  readIOStatus: unsupported('readIOStatus'),
+  readIOStatus: async () => null, // /debug/io still answers (gpi only) on Linux
   getIOControl: unsupported('getIOControl'),
   setGpiConfig: () => ({}),
   getGpiConfig: () => ({ source: 'sidecar' }),
