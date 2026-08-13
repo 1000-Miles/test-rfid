@@ -4,8 +4,9 @@
  * Printer manager for the Chainway CP30: builds ZPL and sends it over the
  * configured transport.
  *
- *   usb -> Windows print queue (RAW datatype via winspool), queue name in
- *          config.printerName. Works with the "Generic / Text Only" driver.
+ *   usb -> the OS print queue named in config.printerName:
+ *            Windows: RAW datatype via winspool ("Generic / Text Only" driver)
+ *            Linux:   CUPS `lp -o raw` (raw queue, no filter)
  *   tcp -> raw socket to <host>:9100 (printer on Ethernet/Wi-Fi).
  *
  * Config + the test-EPC counter persist to bridge/data/printer.json so EPCs
@@ -15,8 +16,10 @@
 const fs = require('fs');
 const net = require('net');
 const path = require('path');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const zpl = require('./zpl');
+
+const IS_WINDOWS = process.platform === 'win32';
 
 const STATE_PATH = path.join(__dirname, '..', '..', 'data', 'printer.json');
 // Append-only durable log of every physical print — the airtight source of truth
@@ -70,6 +73,28 @@ function sanitizeLayout(body = {}) {
     if (body[k] !== undefined) out[k] = Math.round(Number(body[k]) || 0);
   }
   return out;
+}
+
+// Linux 'usb' transport: pipe raw ZPL into a CUPS queue (`lp -o raw`), the
+// moral equivalent of the Windows RAW-datatype spool job. The queue is usually
+// auto-created by CUPS/usblp when the CP30 is plugged in; `-o raw` bypasses any
+// filter so the printer gets our ZPL bytes untouched.
+function sendRawCups(printerName, data) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('lp', ['-d', printerName, '-o', 'raw', '-'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', (d) => (err += d));
+    child.on('error', (e) => reject(new Error(`lp spawn failed: ${e.message} (is CUPS installed?)`)));
+    child.on('close', (code) => {
+      if (code !== 0) return reject(new Error(`lp exited ${code}: ${(err || out).trim()}`));
+      // "request id is CP30-42 (1 file(s))" — job id when CUPS prints one
+      const m = /request id is (\S+)/.exec(out + err);
+      resolve({ jobId: m ? m[1] : null, bytes: Buffer.byteLength(data) });
+    });
+    child.stdin.end(data);
+  });
 }
 
 function sendTcp(host, port, data, timeoutMs = 5000) {
@@ -345,6 +370,7 @@ class PrinterManager {
         return { ready: false, detail: `printer at ${host}:${port} unreachable (${err.message})` };
       }
     }
+    if (!IS_WINDOWS) return this._probeReadyCups();
     // usb: `Get-Printer` is NOT trustworthy here — with the CP30 unplugged it
     // still reports PrinterStatus Normal / WorkOffline blank (verified
     // 2026-07-15). Two signals that DO tell the truth:
@@ -390,6 +416,55 @@ class PrinterManager {
           resolve({ ready: true, detail: `queue "${this.config.printerName}" ready (${jobCount} job(s) in queue)` });
         }
       );
+    });
+  }
+
+  /**
+   * Linux/CUPS readiness. Same trust model as the Windows path: CUPS ACCEPTS
+   * jobs with the printer unplugged, so "queue exists" proves nothing — we
+   * check the queue is enabled and that jobs are actually draining.
+   */
+  _probeReadyCups() {
+    const name = this.config.printerName;
+    return new Promise((resolve) => {
+      execFile('lpstat', ['-p', name], { timeout: 10000 }, (err, stdout, stderr) => {
+        const out = `${stdout || ''}${stderr || ''}`;
+        if (err || /unable to locate|invalid destination/i.test(out)) {
+          return resolve({ ready: false, detail: `CUPS queue "${name}" not found (lpstat -p)` });
+        }
+        if (/disabled/i.test(out)) {
+          return resolve({ ready: false, detail: `CUPS queue "${name}" is disabled — cupsenable it after reconnecting the printer` });
+        }
+        // Queue enabled — now the draining check. A job in the queue is normal
+        // for a moment mid-run; one still there ~15s later means nothing is
+        // consuming it (USB unplugged leaves jobs stuck in "processing"). Same
+        // threshold as the Windows path, tracked by job id across probes since
+        // lpstat's submit-time format is locale-dependent.
+        execFile('lpstat', ['-o', name], { timeout: 10000 }, (err2, stdout2) => {
+          const now = Date.now();
+          const ids = err2
+            ? []
+            : (stdout2 || '')
+                .split(/\r?\n/)
+                .map((l) => l.split(/\s+/)[0])
+                .filter(Boolean);
+          const seen = this._cupsJobsSeen || {};
+          const next = {};
+          let stuck = 0;
+          for (const id of ids) {
+            next[id] = seen[id] || now;
+            if (now - next[id] >= 15000) stuck++;
+          }
+          this._cupsJobsSeen = next;
+          if (stuck > 0) {
+            return resolve({
+              ready: false,
+              detail: `${stuck} job(s) stuck in CUPS queue "${name}" — printer not consuming (cancel -a '${name}' after reconnecting)`,
+            });
+          }
+          resolve({ ready: true, detail: `CUPS queue "${name}" ready (${ids.length} job(s) in queue)` });
+        });
+      });
     });
   }
 
@@ -463,7 +538,10 @@ class PrinterManager {
       await sendTcp(this.config.host, this.config.port, zplText);
       return { transport: 'tcp', target: `${this.config.host}:${this.config.port}` };
     }
-    const { jobId, bytes } = require('./winspool').sendRaw(this.config.printerName, zplText);
+    // 'usb' = the OS print queue: winspool RAW job on Windows, CUPS raw on Linux.
+    const { jobId, bytes } = IS_WINDOWS
+      ? require('./winspool').sendRaw(this.config.printerName, zplText)
+      : await sendRawCups(this.config.printerName, zplText);
     return { transport: 'usb', target: this.config.printerName, jobId, bytes };
   }
 
@@ -570,23 +648,22 @@ class PrinterManager {
     return res;
   }
 
-  /** List Windows print queue names (for the dashboard's USB queue picker). */
+  /** List OS print queue names (for the dashboard's USB queue picker):
+   *  Windows spooler queues, or CUPS destinations on Linux (`lpstat -e`). */
   listQueues() {
     return new Promise((resolve, reject) => {
-      execFile(
-        'powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-Command', 'Get-Printer | Select-Object -ExpandProperty Name'],
-        { timeout: 10000 },
-        (err, stdout) => {
-          if (err) return reject(new Error(`queue listing failed: ${err.message}`));
-          resolve(
-            stdout
-              .split(/\r?\n/)
-              .map((s) => s.trim())
-              .filter(Boolean)
-          );
-        }
-      );
+      const [cmd, args] = IS_WINDOWS
+        ? ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-Printer | Select-Object -ExpandProperty Name']]
+        : ['lpstat', ['-e']];
+      execFile(cmd, args, { timeout: 10000 }, (err, stdout) => {
+        if (err) return reject(new Error(`queue listing failed: ${err.message}`));
+        resolve(
+          stdout
+            .split(/\r?\n/)
+            .map((s) => s.trim())
+            .filter(Boolean)
+        );
+      });
     });
   }
 }
