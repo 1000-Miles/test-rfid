@@ -62,7 +62,11 @@ export default function App() {
   }, [route, location]);
 
   // --- voice announcements on gate movements ---
-  const [voiceOn, setVoiceOn] = useState(() => localStorage.getItem('voiceOn') === '1');
+  // Default ON. This board's home is a wall-mounted TV that nobody can reach
+  // to switch anything on, so silence has to be the deliberate choice, not the
+  // one you get by doing nothing. '0' is an explicit mute; anything else,
+  // including never having chosen, means on.
+  const [voiceOn, setVoiceOn] = useState(() => localStorage.getItem('voiceOn') !== '0');
   useEffect(() => {
     localStorage.setItem('voiceOn', voiceOn ? '1' : '0');
   }, [voiceOn]);
