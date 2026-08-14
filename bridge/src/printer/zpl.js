@@ -160,7 +160,7 @@ function buildLabel(opts = {}) {
   // ^A0 (scalable font 0) draws roughly this wide per unit of height.
   const CHAR_ASPECT = 0.55;
 
-  const margin = Math.round(H * 0.05);
+  const margin = Math.round(H * 0.03);
   const usable = Math.max(1, H - margin * 2);
 
   // Row slots, as a proportion of the label height, all scaled together by
@@ -183,17 +183,21 @@ function buildLabel(opts = {}) {
     const rows = slots.map(block);
     const textH = rows.reduce((a, b) => a + b, 0) + gap * Math.max(0, rows.length - 1);
     // EPC caption under the barcode: one line, as large as the width allows but
-    // never bigger than the rows above. Hex is uppercase and digit-heavy, so it
-    // gets the FULL nominal cell (no ADVANCE discount) — it must not overrun.
+    // never bigger than the rows above. It is width-bound, not height-bound, so
+    // it gets the label's FULL width (the rows keep a right margin to wrap in;
+    // a single unwrappable line does not need one) and only a slim advance
+    // discount — hex is uppercase and digit-heavy, so it advances much closer to
+    // the nominal cell than a lowercase-heavy row and must not overrun the edge.
+    const capWidth = Math.max(120, W - left);
     const capW = SHOW_EPC_TEXT
-      ? Math.max(5, Math.min(Math.floor(TEXT_H * CHAR_ASPECT), Math.floor((textWidth * 0.97) / Math.max(1, epcText.length))))
+      ? Math.max(5, Math.min(Math.floor(TEXT_H * CHAR_ASPECT), Math.floor((capWidth * 0.97) / Math.max(1, epcText.length * 0.88))))
       : 0;
     const capH = SHOW_EPC_TEXT ? Math.max(10, Math.round(capW / CHAR_ASPECT)) : 0;
     // The barcode takes whatever height is left rather than a fixed share, so it
     // runs as tall as the label allows instead of leaving the bottom empty. It
     // depends only on the rows present, so it stays the same across labels.
     const capCost = SHOW_EPC_TEXT ? capH + gap : 0;
-    const barH = barcode ? clampInt(usable - textH - gap - capCost, 40, Math.round(H * 0.6)) : 0;
+    const barH = barcode ? clampInt(usable - textH - gap - capCost, 40, Math.round(H * 0.7)) : 0;
     const stackH = textH + (barcode ? gap + barH : 0) + capCost;
     return { slots, block, barH, gap, stackH, capW, capH };
   };
