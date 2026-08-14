@@ -23,6 +23,8 @@ if (!driver.drainTags) {
   };
 }
 
-console.log(`[driver] using ${useSidecar ? 'sidecar (Java SDK over HTTP)' : 'dll (koffi + UHFAPI.dll)'}`);
+console.log(
+  `[driver] using ${useSidecar ? `sidecar over HTTP (${process.env.UHF_SIDECAR_URL || 'http://127.0.0.1:3010'})` : 'dll (koffi + UHFAPI.dll)'}`
+);
 
 module.exports = driver;

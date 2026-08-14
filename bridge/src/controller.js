@@ -181,14 +181,16 @@ class Controller extends EventEmitter {
       this._wantConnected = true;
       this.lastTransport = 'usb';
       // Same known-good reset as TCP connect: clear any leftover inventory and
-      // force command mode so tags flow through the poll loop.
-      await this._withLock(() => {
+      // force command mode so tags flow through the poll loop. awaits because
+      // the sidecar driver returns promises (the DLL driver is synchronous —
+      // await is a no-op there).
+      await this._withLock(async () => {
         try {
-          const stopRc = uhf.stopInventory();
-          const wmBefore = uhf.getWorkMode();
-          const wmRc = uhf.setWorkMode(0);
-          const ver = uhf.getSoftwareVersion();
-          const pwr = uhf.getPower();
+          const stopRc = await uhf.stopInventory();
+          const wmBefore = await uhf.getWorkMode();
+          const wmRc = await uhf.setWorkMode(0);
+          const ver = await uhf.getSoftwareVersion();
+          const pwr = await uhf.getPower();
           this.log(
             `Reader reset: stopGet=${stopRc}, workMode ${wmBefore}->0 (rc=${wmRc}), version=${ver}, power=${pwr}dBm`
           );

@@ -124,6 +124,27 @@ Config keys: `gpi1Byte`, `gpi2Byte`, `activeHigh`. Once confirmed, bake the valu
 
 **WebSocket** `ws://localhost:3001/ws` pushes JSON messages: `tag`, `gpi`, `trigger`, `status`, `log`, `udp` (raw datagram + parse result in HW mode).
 
+## Remote reader (bridge on one PC, reader on another)
+
+The driver layer is swappable (`UHF_DRIVER=dll | sidecar`), and the sidecar driver is the same
+API over HTTP. So a USB/COM desktop reader plugged into a **different** Windows PC than the
+bridge is served by running `sidecar-server.js` next to the reader:
+
+```bash
+# on the READER PC (needs this repo + Node; hosts UHFAPI.dll):
+cd bridge && npm run sidecar          # listens on 0.0.0.0:3010 (SIDECAR_PORT to change)
+# allow inbound 3010 in Windows Firewall on this machine
+
+# on the BRIDGE PC:
+UHF_DRIVER=sidecar UHF_SIDECAR_URL=http://<reader-pc>:3010 npm run dev
+```
+
+The bridge's REST/WS surface is unchanged — Nexus keeps pointing at the bridge. `/connect-usb`
+on the sidecar reuses `reader-connect.js`'s `autoConnect` (UsbOpen, then a COM sweep), so it
+inherits the phantom-link rejection; the sidecar's `/version` is gated on `isReaderAlive` so a
+dead reader cannot look alive to the bridge's liveness poll. The Java sidecar
+(`bridge/sidecar/`, Linux/Pi) speaks the same contract but is TCP-readers-only.
+
 ## Chainway CP30 printer — print + RFID encode
 
 The CP30 speaks **ZPL**, so encoding a chip is just `^RFW,H^FD<hex EPC>^FS` inside a normal

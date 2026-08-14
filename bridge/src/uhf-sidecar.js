@@ -2,9 +2,12 @@
 
 /**
  * Sidecar driver: same surface as uhf.js (the DLL driver), but every call is
- * an HTTP request to the Java sidecar (bridge/sidecar/UhfSidecar.java), which
- * wraps the vendor's pure-Java SDK. This is the driver that runs on Linux /
- * Raspberry Pi where the Windows DLL cannot.
+ * an HTTP request to a sidecar process that owns the reader. Two servers speak
+ * the contract:
+ *   - bridge/sidecar/UhfSidecar.java — pure-Java SDK, for Linux / Raspberry Pi
+ *     where the Windows DLL cannot load (network readers only);
+ *   - bridge/src/sidecar-server.js  — uhf.js over HTTP, for a USB/COM desktop
+ *     reader plugged into a DIFFERENT Windows PC than the bridge.
  *
  * Differences from the DLL driver:
  *   - all functions are async (callers already run them inside awaited locks)
@@ -20,6 +23,10 @@ const path = require('path');
 const SIDECAR_URL = process.env.UHF_SIDECAR_URL || 'http://127.0.0.1:3010';
 const SIDECAR_DIR = path.join(__dirname, '..', 'sidecar');
 const JAR = 'ReaderAPI20240822.jar';
+
+// A remote sidecar (reader plugged into ANOTHER machine, running
+// sidecar-server.js) cannot be spawned from here — only a local one can.
+const SIDECAR_IS_LOCAL = ['127.0.0.1', 'localhost', '::1'].includes(new URL(SIDECAR_URL).hostname);
 
 const capabilities = { hw: false, ioStatusDebug: false };
 
@@ -39,6 +46,11 @@ async function ensureSidecar() {
     return; // already up
   } catch (_) {
     /* not running — spawn it */
+  }
+  if (!SIDECAR_IS_LOCAL) {
+    throw new Error(
+      `sidecar at ${SIDECAR_URL} is not answering — start sidecar-server.js on the reader PC (and check its firewall allows this port)`
+    );
   }
   const sep = process.platform === 'win32' ? ';' : ':';
   child = spawn('java', ['-cp', `${JAR}${sep}.`, 'UhfSidecar', String(new URL(SIDECAR_URL).port || 3010)], {
@@ -72,6 +84,17 @@ async function connect(ip, port) {
   await ensureSidecar();
   const r = await call('POST', '/connect', { ip, port });
   return r.ok ? 0 : 2; // mimic SDK rc: 0 ok, 2 connect failure
+}
+
+/**
+ * Open a USB/COM desktop reader plugged into the SIDECAR's machine. Served by
+ * sidecar-server.js (Windows, DLL); the Java/Linux sidecar has no such route
+ * and answers non-ok, which surfaces as rc 2 rather than a thrown mystery.
+ */
+async function connectUsb() {
+  await ensureSidecar();
+  const r = await call('POST', '/connect-usb');
+  return r.ok ? 0 : 2;
 }
 
 async function disconnect() {
@@ -131,9 +154,11 @@ async function getPower() {
   return r.power[0].dbm;
 }
 
-async function setPower(dBm) {
+async function setPower(dBm, save = true) {
   const ants = (await getAntennas()) || [1];
-  const r = await call('POST', '/power', { dbm: dBm, ants: ants.join(',') });
+  // `save` rides along for sidecar-server.js (session-only bench bumps must
+  // not persist); the Java sidecar ignores unknown params, unchanged there.
+  const r = await call('POST', '/power', { dbm: dBm, ants: ants.join(','), save: save ? 1 : 0 });
   return r.ok ? 0 : -1;
 }
 
@@ -254,9 +279,7 @@ module.exports = {
   capabilities,
   load,
   connect,
-  connectUsb: () => {
-    throw new Error('USB readers need the DLL driver (Windows) — connect over TCP on Linux');
-  },
+  connectUsb,
   disconnect,
   isConnected: () => true, // controller tracks its own state
   isReaderAlive,
