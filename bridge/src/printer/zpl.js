@@ -74,14 +74,6 @@ const SHOW_EPC_TEXT = true;
  */
 const ELLIPSIS = '...';
 
-/**
- * Reference length for the rows that are NOT the product name — long enough for
- * a realistic worst case ("Carton 128 of 240" is 17). The type size is derived
- * from this rather than from the actual text so that two cartons of the same
- * job cannot print at different sizes, and it trades directly against how much
- * of the name survives: bigger type, fewer characters before the ellipsis.
- */
-const SHORT_ROW_REF_CHARS = 18;
 
 /**
  * Build a complete print+encode label format.
@@ -229,24 +221,26 @@ function buildLabel(opts = {}) {
     // barcode to be. This share leaves the rows large and the barcode usable
     // without the scale loop having to rescue the layout.
     const maxH = clampInt(H * 0.17 * scale, 16, 140);
-    // The type size comes from the label and from a fixed REFERENCE length, not
-    // from the text. Sizing it to the actual rows still let the label move —
-    // "Carton 12 of 240" is longer than "Carton 1 of 1", so two cartons of the
-    // same job printed at different sizes. The reference covers the longest
-    // realistic short row, and the max() keeps a genuinely longer one from being
-    // truncated: a PO reference or carton count must always print in full. Only
-    // the name is ever cut (see ELLIPSIS).
-    const shortLen = Math.max(SHORT_ROW_REF_CHARS, ...textRows.slice(1).map((t) => t.length), 1);
-    const sharedW = Math.max(
-      5,
-      Math.min(Math.max(4, Math.floor(maxH * CHAR_ASPECT)), Math.floor((textWidth * 0.95) / (shortLen * ADVANCE))),
-    );
+    // The type size comes from the LABEL ALONE — no text of any kind feeds into
+    // it. Anything else couples the two: while the size was fitted to the
+    // "short" rows, a product on two POs ("POP-2026-156, POP-2026-157") or a
+    // carton row reading "Carton 12 of 240" was enough to shrink the type and,
+    // because the barcode takes what the rows leave, stretch the barcode to
+    // match. Cartons of one job came out looking like different designs.
+    //
+    // With the size fixed, everything downstream is fixed too: row heights, the
+    // gaps, and the barcode all follow from the label size and the NUMBER of
+    // rows. Text that does not fit is cut (see ELLIPSIS) instead of resizing the
+    // label around itself.
+    const sharedW = Math.max(5, Math.floor(maxH * CHAR_ASPECT));
     const TEXT_H = Math.max(10, Math.round(sharedW / CHAR_ASPECT));
     const gap = Math.max(8, Math.round(H * 0.02 * scale));
-    // Characters that fit one line at this size; the name is cut to it.
+    // Characters that fit one line at this size. Applied to every row, not just
+    // the name — a PO or carton row is far shorter than this in practice, so it
+    // is a guard rather than something that fires.
     const fitChars = Math.max(4, Math.floor((textWidth * 0.95) / (sharedW * ADVANCE)));
-    const slots = textRows.map((t, i) => ({
-      text: i === 0 && t.length > fitChars ? t.slice(0, fitChars - ELLIPSIS.length).trimEnd() + ELLIPSIS : t,
+    const slots = textRows.map((t) => ({
+      text: t.length > fitChars ? t.slice(0, fitChars - ELLIPSIS.length).trimEnd() + ELLIPSIS : t,
       h: TEXT_H,
       w: sharedW,
       lines: 1,
