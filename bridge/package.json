@@ -9,7 +9,8 @@
     "smoke": "node test/smoke.js",
     "print": "node test/print-test.js",
     "dev": "node src/server.js",
-    "sidecar": "node src/sidecar-server.js"
+    "sidecar": "node src/sidecar-server.js",
+    "reader": "node src/server-reader.js"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
