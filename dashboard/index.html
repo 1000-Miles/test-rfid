@@ -4,12 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>RFID Gate 01 — Warehouse A</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@400;600&display=swap"
-      rel="stylesheet"
-    />
+    <!-- No external font CDNs: Google Fonts is unreachable from the China
+         warehouse and the render-blocking stylesheet hung the wallboard.
+         Montserrat is self-hosted in public/fonts; the TV headline faces
+         fall back to system fonts declared in index.css. -->
   </head>
   <body>
     <div id="root"></div>

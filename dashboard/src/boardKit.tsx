@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { DocLine, Direction } from './documents';
-import { lineUnits, pct } from './documents';
+import { pct } from './documents';
 
 /**
  * Shared vocabulary for the gate board screens — the design tokens from the
@@ -57,6 +57,10 @@ export const dueChip = (due: number) =>
     ? { label: `OVERDUE · ${dayShort(due)}`, short: 'OVERDUE', bg: C.redBg, fg: C.redDk, edge: C.redEdge }
     : { label: 'DUE TODAY', short: 'TODAY', bg: C.surface, fg: '#525252', edge: C.border };
 
+/** First three words of a product name — the tile shows a short slug, not the
+ *  full catalogue title. */
+const nameSlug = (name: string) => name.trim().split(/\s+/).slice(0, 3).join(' ');
+
 /* ------------------------------------------------------------------ tile */
 
 /**
@@ -98,14 +102,13 @@ export function Tile(props: { line: DocLine; dir: Direction; doc?: { label: stri
     // 'nearest' scrolls the box's own overflow only — never the page.
     ref.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
   }, [props.focused]);
-  const units = lineUnits(line);
   // On the 43" panel 1u ≈ 0.5 mm, so the photo is what shrinks hard in compact
   // and the type barely moves: the name and the two quantities are what anyone
   // actually reads off a tile, and dropping them below ~10u would put them
   // under a metre of legible viewing distance.
   const s = props.compact
-    ? { photo: 78, po: 10, short: 9, sku: 9, badge: 14, glyph: 28, icon: 24, name: 13, qty: 10, padX: 8, padY: 7, inset: 6, gap: 4 }
-    : { photo: 140, po: 13, short: 10, sku: 11, badge: 17, glyph: 48, icon: 44, name: 15, qty: 12, padX: 11, padY: 9, inset: 8, gap: 6 };
+    ? { photo: 78, po: 8, short: 8, sku: 8, badge: 12, glyph: 28, icon: 24, name: 10, qty: 8, padX: 8, padY: 7, inset: 6, gap: 4 }
+    : { photo: 140, po: 10, short: 9, sku: 9, badge: 14, glyph: 48, icon: 44, name: 12, qty: 10, padX: 11, padY: 9, inset: 8, gap: 6 };
 
   return (
     <div
@@ -134,43 +137,22 @@ export function Tile(props: { line: DocLine; dir: Direction; doc?: { label: stri
             {line.emoji ? <div style={{ fontSize: u(s.glyph), lineHeight: 1 }}>{line.emoji}</div> : <Icon.Box size={s.icon} />}
           </div>
         )}
-        <div style={{ position: 'absolute', left: u(s.inset), top: u(s.inset), padding: `${u(3)} ${u(8)}`, borderRadius: u(20), background: 'rgba(255,255,255,0.92)', boxShadow: '0 1px 4px rgba(0,0,0,0.18)', fontSize: u(s.sku), fontWeight: 700, letterSpacing: '0.08em', color: '#525252', fontFamily: "'Courier New', monospace", pointerEvents: 'none' }}>
-          {line.sku}
-        </div>
-        {/* The badge says CTN out loud. It is the number read from across the
-            bay, and unlabelled it was the one ambiguous figure on the tile —
-            indistinguishable at a glance from the unit count right below it,
-            which is a different number for the same line. */}
-        <div style={{ position: 'absolute', right: u(s.inset), bottom: u(s.inset), display: 'flex', alignItems: 'baseline', gap: u(4), padding: `${u(3)} ${u(9)}`, borderRadius: u(20), fontSize: u(s.badge), fontWeight: 800, fontVariantNumeric: 'tabular-nums', pointerEvents: 'none', background: done ? C.green : started ? a.text : 'rgba(255,255,255,0.94)', color: done || started ? C.white : C.muted, boxShadow: '0 2px 10px rgba(0,0,0,0.24)' }}>
-          <span style={{ fontSize: u(s.badge * 0.66), letterSpacing: '0.08em', opacity: 0.8 }}>CTN</span>
-          <span>
-            {line.received}/{line.expected}
-          </span>
-        </div>
       </div>
 
       <div style={{ padding: `${u(s.padY)} ${u(s.padX)} ${u(s.padX)} ${u(s.padX)}`, display: 'flex', flexDirection: 'column', gap: u(s.gap), flex: 1 }}>
-        <div style={{ fontSize: u(s.name), fontWeight: 600, lineHeight: 1.25, color: C.fg, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{line.name}</div>
+        <div style={{ fontSize: u(s.name), fontWeight: 600, lineHeight: 1.25, color: C.fg, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{nameSlug(line.name)}</div>
 
-        {doc && (
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: u(6), fontSize: u(s.po), minWidth: 0 }}>
-            <span style={{ fontWeight: 800, letterSpacing: '0.02em', color: C.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{doc.label}</span>
-            {/* Only the exception is worth a word. Everything on today's board
-                is due today, so a TODAY marker on every tile was a column of
-                noise; OVERDUE still earns its place. */}
-            {due && doc.due < 0 && <span style={{ fontWeight: 800, letterSpacing: '0.08em', color: due.fg, flex: '0 0 auto' }}>{due.short}</span>}
-          </div>
+        {/* Only the exception is worth a word: OVERDUE still earns its place
+            even with the PO label gone. */}
+        {due && doc && doc.due < 0 && (
+          <div style={{ fontSize: u(s.po), fontWeight: 800, letterSpacing: '0.08em', color: due.fg }}>{due.short}</div>
         )}
 
-        {/* Cartons live in the badge over the photo and nowhere else — with the
-            badge labelled there is no reason to print the same pair twice on a
-            140u card. This line is the other quantity, the one the PO is
-            actually written in. */}
-        {units && (
-          <div style={{ fontSize: u(s.qty) }}>
-            <Qty label="UNITS" received={units.received} expected={units.expected} />
-          </div>
-        )}
+        {/* Cartons moved off the photo — the badge obstructed the product
+            image, so the pair now reads as a labelled row. */}
+        <div style={{ fontSize: u(s.qty) }}>
+          <Qty label="CTN" received={line.received} expected={line.expected} />
+        </div>
 
         <div style={{ marginTop: 'auto', height: u(6), borderRadius: u(4), background: '#e9ebee', overflow: 'hidden' }}>
           <div style={{ height: '100%', borderRadius: u(4), width: `${pct(line.received, line.expected)}%`, background: done ? C.green : started ? a.fill : C.off, transition: 'width .3s ease' }} />
@@ -195,7 +177,10 @@ function Qty(props: { label: string; received: number; expected: number }) {
 /* ----------------------------------------------------------------- icons */
 
 const strokeProps = { fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
-const svg = (size: number) => ({ width: u(size), height: u(size), viewBox: '0 0 24 24', ...strokeProps });
+// Size via style, not the width/height attributes: older TV browsers don't
+// accept calc()/var() in SVG presentation attributes, and an invalid width
+// makes the SVG default to 100% — a screen-filling icon on the wallboard.
+const svg = (size: number) => ({ style: { width: u(size), height: u(size), flex: '0 0 auto' }, viewBox: '0 0 24 24', ...strokeProps });
 
 export const Icon = {
   Box: ({ size }: { size: number }) => (

@@ -53,6 +53,10 @@ body {
    Height is now the scarce axis, so the board spends it deliberately: a short
    header, both directions side by side, and a short footer. */
 .gate {
+  /* Plain fallback first: on TV browsers that can't parse min() inside a
+     custom property the board keeps 1px — exact at 1920 × 1080 — instead of
+     collapsing every dimension to an invalid value. */
+  --u: 1px;
   --u: min(0.0521vw, 0.0926vh, 1.4px);
   font-family: 'Montserrat', ui-sans-serif, system-ui, sans-serif;
 }

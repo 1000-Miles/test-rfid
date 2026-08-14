@@ -376,7 +376,7 @@ function DirectionSection(props: { dir: Direction; docs: GateDoc[]; totals: { re
     <div style={{ flex: empty ? '0 0 auto' : 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: u(10) }}>
       <div style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: u(18) }}>
         <div style={{ fontSize: u(15), fontWeight: 800, letterSpacing: '0.18em', color: a.text, flex: '0 0 auto' }}>
-          {props.dir === 'in' ? 'INBOUND · RECEIVING' : 'OUTBOUND · SHIPPING'}
+          {props.dir === 'in' ? '· RECEIVING' : '· SHIPPING'}
         </div>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: u(10), flex: '0 0 auto' }}>
           <div style={{ fontSize: u(46), fontWeight: 800, lineHeight: 1, letterSpacing: u(-2), fontVariantNumeric: 'tabular-nums' }}>{props.totals.received}</div>
