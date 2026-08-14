@@ -215,12 +215,13 @@ function buildLabel(opts = {}) {
   // glyphs shrink while the slot does not. So the shared glyph size is settled
   // FIRST and the slots are built from it.
   const plan = (scale) => {
-    // Ceiling on the type size, as a share of label height. It is a budget, not
-    // a target: set it high enough that the rows alone fill the label and the
-    // barcode is squeezed to its floor, and there is nothing left for the
-    // barcode to be. This share leaves the rows large and the barcode usable
-    // without the scale loop having to rescue the layout.
-    const maxH = clampInt(H * 0.17 * scale, 16, 140);
+    // The type size, as a share of label height — and with it, how much of the
+    // product name survives, since the two trade directly: bigger type, fewer
+    // characters before the ellipsis. 0.13 is ~4.5 mm on 54x34 mm media, which
+    // holds ~33 characters (Riza's pick, 2026-08-14; 0.17 gave 5.8 mm and only
+    // ~25). It is also a budget, not just a target — set it high enough that the
+    // rows alone fill the label and there is nothing left for the barcode.
+    const maxH = clampInt(H * 0.13 * scale, 16, 140);
     // The type size comes from the LABEL ALONE — no text of any kind feeds into
     // it. Anything else couples the two: while the size was fitted to the
     // "short" rows, a product on two POs ("POP-2026-156, POP-2026-157") or a
