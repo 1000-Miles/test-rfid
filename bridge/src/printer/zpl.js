@@ -197,11 +197,15 @@ function buildLabel(opts = {}) {
   // ^A0 (scalable font 0) draws roughly this wide per unit of height.
   const CHAR_ASPECT = 0.55;
   // Why fitting is not simply chars x width: ^A0 is a PROPORTIONAL font, so `w`
-  // sets the nominal cell but a lowercase-heavy string advances well under it —
-  // measured off a printed label, 25 characters at w=31 occupied ~606 dots, 0.78
-  // of nominal. Assuming the full cell made every row shrink more than it needed
-  // to, and made rows reserve lines they never used.
-  const ADVANCE = 0.8;
+  // sets the nominal cell while the average glyph advances well under it.
+  //
+  // Measured off printed labels: "A004227 - Test..." (17 chars at w=39) reached
+  // ~45% of a 638-dot label, and the 24-char EPC caption at w=29 reached ~55% —
+  // both ≈0.45-0.5 of nominal. 0.55 keeps a margin over that without wasting the
+  // width. (An earlier 0.8 came from a line that merely FIT its ^FB width, which
+  // bounds the advance from above rather than measuring it — that over-estimate
+  // is what cut names off at "Test..." with half the label still empty.)
+  const ADVANCE = 0.55;
 
   const margin = Math.round(H * 0.03);
   const usable = Math.max(1, H - margin * 2);
@@ -215,7 +219,12 @@ function buildLabel(opts = {}) {
   // glyphs shrink while the slot does not. So the shared glyph size is settled
   // FIRST and the slots are built from it.
   const plan = (scale) => {
-    const maxH = clampInt(H * 0.22 * scale, 16, 140);
+    // Ceiling on the type size, as a share of label height. It is a budget, not
+    // a target: set it high enough that the rows alone fill the label and the
+    // barcode is squeezed to its floor, and there is nothing left for the
+    // barcode to be. This share leaves the rows large and the barcode usable
+    // without the scale loop having to rescue the layout.
+    const maxH = clampInt(H * 0.17 * scale, 16, 140);
     // The type size comes from the label and from a fixed REFERENCE length, not
     // from the text. Sizing it to the actual rows still let the label move —
     // "Carton 12 of 240" is longer than "Carton 1 of 1", so two cartons of the
@@ -250,7 +259,7 @@ function buildLabel(opts = {}) {
     // the nominal cell than a lowercase-heavy row and must not overrun the edge.
     const capWidth = Math.max(120, W - left);
     const capW = SHOW_EPC_TEXT
-      ? Math.max(5, Math.min(Math.floor(TEXT_H * CHAR_ASPECT), Math.floor((capWidth * 0.97) / Math.max(1, epcText.length * 0.88))))
+      ? Math.max(5, Math.min(Math.floor(TEXT_H * CHAR_ASPECT), Math.floor((capWidth * 0.97) / Math.max(1, epcText.length * 0.62))))
       : 0;
     const capH = SHOW_EPC_TEXT ? Math.max(10, Math.round(capW / CHAR_ASPECT)) : 0;
     // The barcode takes whatever height is left rather than a fixed share, so it
