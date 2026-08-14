@@ -4,6 +4,7 @@ import { accent, C, dueChip, Icon, Tile, u } from './boardKit';
 import DirectionView from './DirectionView';
 import Qr from './Qr';
 import type { BridgeState } from './useBridge';
+import type { SoundState } from './useAudioGate';
 
 /**
  * Landscape warehouse gate board — 1920 × 1080 kiosk.
@@ -30,7 +31,7 @@ const IDLE_TIMEOUT_MS = 45_000;
 /** How long a just-counted product stays highlighted on the board. */
 const FOCUS_MS = 9_000;
 
-export default function GateBoard(props: { bridge: BridgeState; board: GateBoardApi; onOpenControls: () => void }) {
+export default function GateBoard(props: { bridge: BridgeState; board: GateBoardApi; sound: SoundState; onOpenControls: () => void }) {
   const { bridge, board } = props;
   const { docs, exceptions } = board.board;
 
@@ -116,6 +117,7 @@ export default function GateBoard(props: { bridge: BridgeState; board: GateBoard
       <Header
         scanning={bridge.status.reading || justRead}
         online={bridge.wsConnected && bridge.status.connected}
+        sound={props.sound}
         feed={board.feed}
         onRefresh={() => {
           touch();
@@ -168,6 +170,7 @@ export default function GateBoard(props: { bridge: BridgeState; board: GateBoard
 function Header(props: {
   scanning: boolean;
   online: boolean;
+  sound: SoundState;
   feed: FeedState;
   onRefresh: () => void;
   exceptionCount: number;
@@ -222,6 +225,8 @@ function Header(props: {
 
         <FeedChip feed={props.feed} onRefresh={props.onRefresh} />
 
+        <SoundChip state={props.sound} />
+
         {props.exceptionCount > 0 && (
           <div onClick={props.onExceptions} style={{ display: 'flex', alignItems: 'center', gap: u(12), padding: `${u(12)} ${u(24)}`, borderRadius: u(26), background: C.redBg, border: `1px solid ${C.redEdge}`, cursor: 'pointer', flex: '0 0 auto' }}>
             <Icon.Warning size={24} color={C.red} />
@@ -241,6 +246,35 @@ function Header(props: {
           <Icon.Gear size={26} />
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Why the board is silent, when it is.
+ *
+ * Only ever shown when something is wrong — a working board says nothing about
+ * its sound, because there is nothing to do about it. The two failures are very
+ * different and must not look alike: one is fixed by pressing any button, the
+ * other cannot be fixed on this device at all, and a supervisor standing in
+ * front of a mute TV has no other way to tell them apart.
+ */
+function SoundChip(props: { state: SoundState }) {
+  if (props.state === 'ready') return null;
+
+  const waiting = props.state === 'needs-gesture';
+  const look = waiting
+    ? { bg: C.amberBg, edge: C.amberEdge, fg: C.amberDk, label: 'SOUND OFF', detail: 'press any button on the remote' }
+    : { bg: C.redBg, edge: C.redEdge, fg: C.redDk, label: 'NO SOUND', detail: 'this browser cannot play audio' };
+
+  return (
+    <div
+      title={waiting ? 'Browsers block audio until the page is touched once. Any key, tap or remote button will do.' : 'This browser supports neither Web Audio nor speech synthesis — alerts are silent on this device.'}
+      style={{ display: 'flex', alignItems: 'center', gap: u(10), padding: `${u(12)} ${u(22)}`, borderRadius: u(26), background: look.bg, border: `1px solid ${look.edge}`, flex: '0 0 auto' }}
+    >
+      <div style={{ fontSize: u(18), lineHeight: 1 }}>🔇</div>
+      <div style={{ fontSize: u(15), fontWeight: 800, letterSpacing: '0.12em', color: look.fg, whiteSpace: 'nowrap' }}>{look.label}</div>
+      <div style={{ fontSize: u(15), fontWeight: 600, color: C.muted, whiteSpace: 'nowrap' }}>{look.detail}</div>
     </div>
   );
 }

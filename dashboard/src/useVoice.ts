@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { EntryRow } from './types';
+import { chime } from './sound';
 
 /**
  * Announcement text per language. Product names are NOT translated — the
@@ -54,7 +55,16 @@ function useZhVoice() {
   return voice;
 }
 
-/** Speak each new warehouse entry — English first, then Mandarin. */
+/**
+ * Announce each new warehouse movement: a tone always, the spoken lines where
+ * the browser can manage them.
+ *
+ * The tone is not a fallback that waits to see whether speech failed — it
+ * always plays, because speech failure cannot be detected (WebView's missing
+ * `speechSynthesis` is silence with no error) and because the tone is the part
+ * that carries across a warehouse and across languages. Speech, when present,
+ * adds the detail on top.
+ */
 export function useVoice(entries: EntryRow[], enabled: boolean) {
   const lastSpokenId = useRef(-1);
   const zhVoice = useZhVoice();
@@ -64,12 +74,17 @@ export function useVoice(entries: EntryRow[], enabled: boolean) {
   }, [enabled]);
 
   useEffect(() => {
-    if (!enabled || entries.length === 0 || !('speechSynthesis' in window)) return;
+    if (!enabled || entries.length === 0) return;
     const newest = entries[0];
     if (newest.id <= lastSpokenId.current) return;
     const unspoken = entries.filter((e) => e.id > lastSpokenId.current).reverse();
     lastSpokenId.current = newest.id;
+
+    const canSpeak = 'speechSynthesis' in window;
     for (const e of unspoken) {
+      chime(e.known ? 'ok' : 'alert');
+      if (!canSpeak) continue;
+
       const { en, zh } = phrases(e);
       const pitch = e.known ? 1 : 0.8;
 

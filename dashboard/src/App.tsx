@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useBridge } from './useBridge';
 import { useVoice } from './useVoice';
+import { useAudioGate } from './useAudioGate';
 import { useGateBoard } from './documents';
 import GateBoard from './GateBoard';
 import ControlDrawer from './ControlDrawer';
@@ -62,28 +63,44 @@ export default function App() {
   }, [route, location]);
 
   // --- voice announcements on gate movements ---
-  // Default ON. This board's home is a wall-mounted TV that nobody can reach
-  // to switch anything on, so silence has to be the deliberate choice, not the
-  // one you get by doing nothing. '0' is an explicit mute; anything else,
-  // including never having chosen, means on.
-  const [voiceOn, setVoiceOn] = useState(() => localStorage.getItem('voiceOn') !== '0');
-  useEffect(() => {
-    localStorage.setItem('voiceOn', voiceOn ? '1' : '0');
-  }, [voiceOn]);
+  //
+  // Default ON: this board's home is a wall-mounted TV that nobody can reach,
+  // so silence has to be a deliberate choice, not the one you get by doing
+  // nothing.
+  //
+  // Two things make that actually hold, both learned the hard way from the old
+  // `voiceOn` key:
+  //
+  //  1. Only an explicit toggle is written. The old code persisted inside an
+  //     effect keyed on the value, which runs on MOUNT — so merely opening the
+  //     board once recorded a preference the user never expressed. Every
+  //     browser that ever loaded the old build has `voiceOn: '0'` stored, which
+  //     would then override any new default we chose.
+  //  2. A new key, so those stale '0's are ignored rather than inherited. The
+  //     stored value means MUTED, so "absent" reads as on without any special
+  //     casing.
+  const [voiceOn, setVoiceOn] = useState(() => localStorage.getItem('voiceMuted') !== '1');
+  const toggleVoice = () =>
+    setVoiceOn((on) => {
+      const next = !on;
+      localStorage.setItem('voiceMuted', next ? '0' : '1');
+      return next;
+    });
   useVoice(bridge.entries, voiceOn);
+  const sound = useAudioGate(voiceOn);
 
   if (route === 'tv') return <TvBoard bridge={bridge} onExit={() => navigate(ROUTES.gate)} />;
 
   return (
     <>
-      <GateBoard bridge={bridge} board={board} onOpenControls={() => setControlsOpen(true)} />
+      <GateBoard bridge={bridge} board={board} sound={sound} onOpenControls={() => setControlsOpen(true)} />
       <ControlDrawer
         open={controlsOpen}
         onClose={() => setControlsOpen(false)}
         bridge={bridge}
         board={board}
         voiceOn={voiceOn}
-        onToggleVoice={() => setVoiceOn((v) => !v)}
+        onToggleVoice={toggleVoice}
         onOpenTv={() => navigate(ROUTES.tv)}
       />
     </>
