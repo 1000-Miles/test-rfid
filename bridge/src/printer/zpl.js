@@ -200,16 +200,16 @@ function buildLabel(opts = {}) {
   // sets the nominal cell while the average glyph advances well under it.
   //
   // Calibrated against the printed label rather than derived: at the type size
-  // this layout picks for 54x34 mm media, 28 characters fit the line (Riza
-  // 2026-08-14, off a physical label), which puts the average advance at 0.54 of
-  // nominal. That matches what the earlier labels showed independently — 17
-  // chars at w=39 reaching ~45% of a 638-dot label, the 24-char EPC caption at
-  // w=29 reaching ~55%.
+  // this layout picks for 54x34 mm media, 38 characters fit the line (Riza
+  // 2026-08-14, off a physical label at w=38), which puts the average advance at
+  // ~0.39 of nominal. The earlier 0.54 was measured before the type ceiling
+  // dropped to 0.17 of label height — same label, smaller cell, so more of them
+  // fit than the old figure predicted.
   //
   // An earlier 0.8 came from a line that merely FIT its ^FB width, which bounds
   // the advance from above rather than measuring it; that over-estimate is what
   // cut names off at "Test..." with half the label still empty.
-  const ADVANCE = 0.54;
+  const ADVANCE = 0.39;
 
   const margin = Math.round(H * 0.03);
   const usable = Math.max(1, H - margin * 2);
