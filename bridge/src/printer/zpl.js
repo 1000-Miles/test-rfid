@@ -47,12 +47,11 @@ const DEFAULT_WIDTH_DOTS = 709;
 const DEFAULT_HEIGHT_DOTS = 472;
 
 /**
- * Typical heading length — a 20-char box ID ("BSC-227-A004227-0042"), two
- * spaces, and a ~24-char product name. Used ONLY to decide how many lines the
- * heading row reserves; the reservation must not depend on the actual text or
- * two labels would space their rows differently.
+ * Typical product-name length. Used ONLY to decide how many lines the name row
+ * reserves; the reservation must not depend on the actual text or two labels
+ * would space their rows differently.
  */
-const HEADING_REF_CHARS = 46;
+const NAME_REF_CHARS = 30;
 
 /**
  * Build a complete print+encode label format.
@@ -64,8 +63,9 @@ const HEADING_REF_CHARS = 46;
  *
  * Two content layouts:
  *  - Semantic (any of boxId / productName / itemNo / poRef given — the carton
- *    label design, 2026-08-04): heading (box ID + product name), item no.,
- *    PO ref, EPC, barcode. Empty fields skip their row entirely.
+ *    label design, 2026-08-04): product name, item no., PO ref, EPC, barcode.
+ *    Empty fields skip their row entirely. `boxId` selects this layout but is
+ *    not printed (see the content section).
  *  - Legacy single `title` line + "EPC …" + barcode (test prints, old callers).
  *
  * Either way the ROWS are only declared as content here; their coordinates are
@@ -118,12 +118,13 @@ function buildLabel(opts = {}) {
   // ── Content ────────────────────────────────────────────────────────────────
   // Which text rows this label carries. Empty fields drop out entirely rather
   // than leaving a blank gap, and the layout below re-spaces whatever survives.
+  // `boxId` still selects the semantic layout and is still recorded in the print
+  // log, but it is NOT printed (Riza 2026-08-13): the carton is identified by its
+  // EPC, and dropping it lets the product name have the row to itself.
   const semantic = boxId != null || productName != null || itemNo != null || poRef != null;
   // Bare values, no "ITEM No."/"PO Number"/"EPC" prefixes (Brian 2026-08-04);
   // the legacy title layout keeps its "EPC " prefix for the test prints.
-  const heading = semantic
-    ? [clean(boxId), clean(productName)].filter(Boolean).join('  ')
-    : clean(title);
+  const heading = semantic ? clean(productName) : clean(title);
   const textRows = (semantic ? [heading, clean(itemNo), clean(poRef)] : [heading]).filter(Boolean);
   const epcText = semantic ? hex : `EPC ${hex}`;
 
@@ -147,35 +148,41 @@ function buildLabel(opts = {}) {
   // ^A0 (scalable font 0) draws roughly this wide per unit of height.
   const CHAR_ASPECT = 0.55;
 
+  const margin = Math.round(H * 0.05);
+  const usable = Math.max(1, H - margin * 2);
+
   // Row slots, as a proportion of the label height, all scaled together by
   // `scale` (see the fit loop below).
   //
-  // The three fields the warehouse actually reads — product name, assortment
-  // number, PO number — all print at ONE size (TEXT_H); the rows differ only in
-  // how many lines they reserve. The EPC, a reference string nobody reads across
-  // a warehouse, is deliberately smaller so it doesn't take height from them.
-  // `lines` is the space a slot RESERVES, not a measurement of the text: the
-  // heading gets three because it carries the box ID AND the product name, and a
-  // name long enough to need the third line should get there by wrapping rather
-  // than by shrinking its font.
+  // Every text row — product name, assortment number, PO number, EPC — prints at
+  // ONE size (TEXT_H); the rows differ only in how many lines they reserve.
+  // `lines` is the space a slot RESERVES, not a measurement of the text.
   const plan = (scale) => {
-    const TEXT_H = clampInt(H * 0.16 * scale, 16, 140);
-    // How many lines the heading RESERVES is derived from the label WIDTH and a
-    // reference heading length — never from the actual text — so it is the same
-    // on every label, while a label wide enough to take the heading in fewer
-    // lines doesn't leave blank ones between the product name and the assortment
-    // number below it.
+    // One size for every row means that size is bounded by the LONGEST string on
+    // the label — the 24-char EPC. Capping here, rather than letting fitFont
+    // shrink the EPC on its own, is what keeps all four rows genuinely identical.
+    // (The EPC is a fixed 24 hex chars, so this stays content-independent.)
+    const epcCap = Math.floor((textWidth * 0.95) / Math.max(1, epcText.length) / CHAR_ASPECT);
+    const TEXT_H = Math.min(clampInt(H * 0.18 * scale, 16, 140), Math.max(16, epcCap));
+    // How many lines the name RESERVES is derived from the label WIDTH and a
+    // reference name length — never from the actual text — so it is the same on
+    // every label, while a label wide enough to take the name in fewer lines
+    // doesn't leave blank ones between it and the assortment number below.
     const headChars = Math.max(1, Math.floor((textWidth * 0.95) / Math.max(1, Math.floor(TEXT_H * CHAR_ASPECT))));
-    const headLines = Math.max(1, Math.min(3, Math.ceil(HEADING_REF_CHARS / headChars)));
+    const headLines = Math.max(1, Math.min(3, Math.ceil(NAME_REF_CHARS / headChars)));
     const HEAD = { h: TEXT_H, lines: headLines, lead: Math.round(TEXT_H * 0.14) };
     const DETAIL = { h: TEXT_H, lines: 1, lead: 0 };
-    const epcSlot = { h: clampInt(H * 0.05 * scale, 12, 60), lines: 1, lead: 0 };
-    const barH = clampInt(H * 0.135 * scale, 30, 200);
+    const epcSlot = { h: TEXT_H, lines: 1, lead: 0 };
     const gap = Math.max(8, Math.round(H * 0.02 * scale));
     const slots = textRows.map((t, i) => ({ text: t, ...(i === 0 ? HEAD : DETAIL) }));
     const block = (s) => s.lines * s.h + (s.lines - 1) * s.lead;
-    const heights = [...slots.map(block), epcSlot.h, ...(barcode ? [barH] : [])];
-    const stackH = heights.reduce((a, b) => a + b, 0) + gap * (heights.length - 1);
+    const rows = [...slots.map(block), epcSlot.h];
+    const textH = rows.reduce((a, b) => a + b, 0) + gap * (rows.length - 1);
+    // The barcode takes whatever height is left rather than a fixed share, so it
+    // runs as tall as the label allows instead of leaving the bottom empty. It
+    // depends only on the rows present, so it stays the same across labels.
+    const barH = barcode ? clampInt(usable - textH - gap, 40, Math.round(H * 0.45)) : 0;
+    const stackH = textH + (barcode ? gap + barH : 0);
     return { slots, block, epcSlot, barH, gap, stackH };
   };
 
@@ -184,8 +191,6 @@ function buildLabel(opts = {}) {
   // the result content-independent: short media just prints the same design
   // smaller. A couple of passes converge; the per-slot floors above win after
   // that, which is the point (legibility, not a fit at any cost).
-  const margin = Math.round(H * 0.05);
-  const usable = Math.max(1, H - margin * 2);
   let scale = 1;
   let L = plan(scale);
   for (let i = 0; i < 4 && L.stackH > usable; i++) {
