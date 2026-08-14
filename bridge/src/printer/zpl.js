@@ -47,21 +47,17 @@ const DEFAULT_WIDTH_DOTS = 638;
 const DEFAULT_HEIGHT_DOTS = 402;
 
 /**
- * Whether the EPC prints as a line of text.
+ * Whether the EPC prints as a line of text, UNDER the barcode (Riza 2026-08-14).
  *
- * It does not, and the reason is that on 54x34 mm media it is the single most
- * expensive thing on the label. Every row shares one type size, and that size
- * is capped by the longest row — a 24-char EPC across a 54 mm label holds ALL
- * text to ~3.6 mm. Splitting it over two lines lifts that cap but then costs a
- * whole extra row, which left the barcode at its 40-dot floor (3.4 mm, not
- * realistically scannable) and produced an ugly mid-string break.
- *
- * Nothing is lost by dropping it: the same value is in the Code 128 directly
- * below and encoded on the RFID chip, which is how cartons are actually read.
- * Set this back to true to print it again — expect the barcode to lose roughly
- * 60% of its height and the text to shrink with it.
+ * Below rather than above, and deliberately not part of the shared type size of
+ * the rows above it. As one of those rows it was the most expensive thing on
+ * the label: every row shares one size, that size is capped by the longest row,
+ * and a 24-char EPC across 54 mm held ALL text to ~3.6 mm — while splitting it
+ * over two lines to lift the cap cost a whole row and left the barcode at its
+ * floor. As a caption it is sized on its own, so it costs only its own height
+ * and caps nothing. It is also where a barcode's human-readable line belongs.
  */
-const SHOW_EPC_TEXT = false;
+const SHOW_EPC_TEXT = true;
 
 /**
  * Build a complete print+encode label format.
@@ -142,9 +138,6 @@ function buildLabel(opts = {}) {
     ? [clean(itemNo), clean(productName)].filter(Boolean).join(' - ')
     : clean(title);
   const textRows = (semantic ? [heading, clean(poRef)] : [heading]).filter(Boolean);
-  // Off by default — see SHOW_EPC_TEXT. Flipping it back adds the row here and
-  // everything below re-spaces around it; nothing else needs changing.
-  if (SHOW_EPC_TEXT) textRows.push(epcText);
   const epcText = semantic ? hex : `EPC ${hex}`;
 
   // ── Layout ─────────────────────────────────────────────────────────────────
@@ -189,12 +182,20 @@ function buildLabel(opts = {}) {
     const block = (s) => s.lines * s.h + (s.lines - 1) * s.lead;
     const rows = slots.map(block);
     const textH = rows.reduce((a, b) => a + b, 0) + gap * Math.max(0, rows.length - 1);
+    // EPC caption under the barcode: one line, as large as the width allows but
+    // never bigger than the rows above. Hex is uppercase and digit-heavy, so it
+    // gets the FULL nominal cell (no ADVANCE discount) — it must not overrun.
+    const capW = SHOW_EPC_TEXT
+      ? Math.max(5, Math.min(Math.floor(TEXT_H * CHAR_ASPECT), Math.floor((textWidth * 0.97) / Math.max(1, epcText.length))))
+      : 0;
+    const capH = SHOW_EPC_TEXT ? Math.max(10, Math.round(capW / CHAR_ASPECT)) : 0;
     // The barcode takes whatever height is left rather than a fixed share, so it
     // runs as tall as the label allows instead of leaving the bottom empty. It
     // depends only on the rows present, so it stays the same across labels.
-    const barH = barcode ? clampInt(usable - textH - gap, 40, Math.round(H * 0.6)) : 0;
-    const stackH = textH + (barcode ? gap + barH : 0);
-    return { slots, block, barH, gap, stackH };
+    const capCost = SHOW_EPC_TEXT ? capH + gap : 0;
+    const barH = barcode ? clampInt(usable - textH - gap - capCost, 40, Math.round(H * 0.6)) : 0;
+    const stackH = textH + (barcode ? gap + barH : 0) + capCost;
+    return { slots, block, barH, gap, stackH, capW, capH };
   };
 
   // Shrink the WHOLE stack — never one row — until it fits inside the label's
@@ -266,7 +267,12 @@ function buildLabel(opts = {}) {
     z.push(`^FO${left},${fy(y)}^A0N,${m.h},${m.w}^FB${textWidth},${m.lines},${m.lead},L,0^FD${m.text}^FS`);
     y += m.block + gap;
   }
-  if (barcode) z.push(`^FO${left},${fy(y)}^BY${mod},2,${barH}^BCN,${barH},N,N,N^FD${hex}^FS`);
+  if (barcode) {
+    z.push(`^FO${left},${fy(y)}^BY${mod},2,${barH}^BCN,${barH},N,N,N^FD${hex}^FS`);
+    y += barH + gap;
+  }
+  // The EPC, reading under the barcode it encodes.
+  if (SHOW_EPC_TEXT) z.push(`^FO${left},${fy(y)}^A0N,${L.capH},${L.capW}^FD${epcText}^FS`);
   z.push(`^PQ${qty}`);
   z.push('^XZ');
   return z.join('\n') + '\n';
