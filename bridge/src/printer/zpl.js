@@ -188,20 +188,30 @@ function buildLabel(opts = {}) {
   const clampInt = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(v)));
   // ^A0 (scalable font 0) draws roughly this wide per unit of height.
   const CHAR_ASPECT = 0.55;
-  // Why fitting is not simply chars x width: ^A0 is a PROPORTIONAL font, so `w`
-  // sets the nominal cell while the average glyph advances well under it.
+  // How wide each character actually is, as a fraction of the nominal cell.
   //
-  // Calibrated against printed labels. This value has to be an OVER-estimate,
-  // never an under-estimate: ^FB hard-clips a line at its width, silently and
-  // without an ellipsis, so a value that promises more characters than fit does
-  // not merely overflow — it throws away the "..." that says the name was cut,
-  // leaving a name that looks complete but is not.
+  // ^A0 is proportional, and NOT by a single average — that was the mistake
+  // behind every wrong guess at this. A capital is far wider than a lowercase
+  // letter, so one average is too tight for "PURPLE GLOVES" and too loose for
+  // "Purple Gloves", and the fit moved with whatever the product happened to be
+  // called. Too loose is the damaging direction: ^FB clips a line silently and
+  // takes the "..." with it, so the name then looks complete when it is not.
   //
-  // 0.39 was tried and did exactly that: a line said to hold 38 characters ran
-  // out at ~27 on the media, which puts the real advance near 0.59. 0.62 carries
-  // a margin over that and lands ~25 characters with the ellipsis safely on the
-  // label. (An even earlier 0.8 erred the safe way — it merely wasted width.)
-  const ADVANCE = 0.62;
+  // Measured off a ruler label printed at this exact font (^A0N,53,29 on 54 mm
+  // media, 2026-08-14): 36 uppercase ran out at ~32, 36 lowercase fitted whole,
+  // 40 digits ran out at ~34. Those three give the weights below, which predict
+  // all three rows — and a real product name — to within a character.
+  const charUnits = (ch) => {
+    if (ch >= 'A' && ch <= 'Z') return 0.7;
+    if (ch >= '0' && ch <= '9') return 0.66;
+    if (ch >= 'a' && ch <= 'z') return 0.55;
+    return 0.35; // space, hyphen, punctuation — narrower than either case
+  };
+  const textUnits = (s) => {
+    let u = 0;
+    for (const ch of s) u += charUnits(ch);
+    return u;
+  };
 
   const margin = Math.round(H * 0.03);
   const usable = Math.max(1, H - margin * 2);
@@ -236,20 +246,21 @@ function buildLabel(opts = {}) {
     const sharedW = Math.max(5, Math.floor(maxH * CHAR_ASPECT));
     const TEXT_H = Math.max(10, Math.round(sharedW / CHAR_ASPECT));
     const gap = Math.max(8, Math.round(H * 0.02 * scale));
-    // Characters that fit one line at this size, measured against the SAME
-    // width ^FB will clip at — no extra safety factor, because ADVANCE already
-    // carries the margin and stacking a second one only wastes label. Applied to
-    // every row, not just the name: a PO row for a product ordered on several
-    // POs can outrun the line too, and being cut with an ellipsis is far better
-    // than ^FB silently dropping its tail.
-    const fitChars = Math.max(4, Math.floor(textWidth / (sharedW * ADVANCE)));
-    const slots = textRows.map((t) => ({
-      text: t.length > fitChars ? t.slice(0, fitChars - ELLIPSIS.length).trimEnd() + ELLIPSIS : t,
-      h: TEXT_H,
-      w: sharedW,
-      lines: 1,
-      lead: 0,
-    }));
+    // Cut a row to what its own characters actually occupy, against the SAME
+    // width ^FB clips at. Measuring the string beats any character count: the
+    // count that fits depends on what the characters ARE, so "PURPLE GLOVES"
+    // and "Purple Gloves" do not fit the same number of them.
+    //
+    // Applied to every row, not just the name — a PO row for a product ordered
+    // on several POs can outrun the line too, and an ellipsis beats ^FB silently
+    // dropping the tail.
+    const fitText = (t) => {
+      if (textUnits(t) * sharedW <= textWidth) return t;
+      let s = t;
+      while (s.length > 1 && textUnits(s + ELLIPSIS) * sharedW > textWidth) s = s.slice(0, -1);
+      return s.trimEnd() + ELLIPSIS;
+    };
+    const slots = textRows.map((t) => ({ text: fitText(t), h: TEXT_H, w: sharedW, lines: 1, lead: 0 }));
     const block = (s) => s.lines * s.h + (s.lines - 1) * s.lead;
     const rows = slots.map(block);
     const textH = rows.reduce((a, b) => a + b, 0) + gap * Math.max(0, rows.length - 1);
@@ -261,7 +272,7 @@ function buildLabel(opts = {}) {
     // the nominal cell than a lowercase-heavy row and must not overrun the edge.
     const capWidth = Math.max(120, W - left);
     const capW = SHOW_EPC_TEXT
-      ? Math.max(5, Math.min(Math.floor(TEXT_H * CHAR_ASPECT), Math.floor((capWidth * 0.97) / Math.max(1, epcText.length * 0.62))))
+      ? Math.max(5, Math.min(Math.floor(TEXT_H * CHAR_ASPECT), Math.floor((capWidth * 0.97) / Math.max(1, textUnits(epcText)))))
       : 0;
     const capH = SHOW_EPC_TEXT ? Math.max(10, Math.round(capW / CHAR_ASPECT)) : 0;
     // The barcode takes whatever height is left rather than a fixed share, so it
