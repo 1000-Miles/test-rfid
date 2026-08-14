@@ -199,13 +199,17 @@ function buildLabel(opts = {}) {
   // Why fitting is not simply chars x width: ^A0 is a PROPORTIONAL font, so `w`
   // sets the nominal cell while the average glyph advances well under it.
   //
-  // Measured off printed labels: "A004227 - Test..." (17 chars at w=39) reached
-  // ~45% of a 638-dot label, and the 24-char EPC caption at w=29 reached ~55% —
-  // both ≈0.45-0.5 of nominal. 0.55 keeps a margin over that without wasting the
-  // width. (An earlier 0.8 came from a line that merely FIT its ^FB width, which
-  // bounds the advance from above rather than measuring it — that over-estimate
-  // is what cut names off at "Test..." with half the label still empty.)
-  const ADVANCE = 0.55;
+  // Calibrated against the printed label rather than derived: at the type size
+  // this layout picks for 54x34 mm media, 28 characters fit the line (Riza
+  // 2026-08-14, off a physical label), which puts the average advance at 0.54 of
+  // nominal. That matches what the earlier labels showed independently — 17
+  // chars at w=39 reaching ~45% of a 638-dot label, the 24-char EPC caption at
+  // w=29 reaching ~55%.
+  //
+  // An earlier 0.8 came from a line that merely FIT its ^FB width, which bounds
+  // the advance from above rather than measuring it; that over-estimate is what
+  // cut names off at "Test..." with half the label still empty.
+  const ADVANCE = 0.54;
 
   const margin = Math.round(H * 0.03);
   const usable = Math.max(1, H - margin * 2);
