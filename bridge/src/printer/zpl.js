@@ -47,13 +47,6 @@ const DEFAULT_WIDTH_DOTS = 709;
 const DEFAULT_HEIGHT_DOTS = 472;
 
 /**
- * Typical product-name length. Used ONLY to decide how many lines the name row
- * reserves; the reservation must not depend on the actual text or two labels
- * would space their rows differently.
- */
-const NAME_REF_CHARS = 30;
-
-/**
  * Build a complete print+encode label format.
  * Coordinates are printhead dots — our CP30 is the 300 dpi model (12 dots/mm),
  * so 60×40 mm media = 709×472 dots. widthDots/heightDots are optional overrides
@@ -164,13 +157,12 @@ function buildLabel(opts = {}) {
     // (The EPC is a fixed 24 hex chars, so this stays content-independent.)
     const epcCap = Math.floor((textWidth * 0.95) / Math.max(1, epcText.length) / CHAR_ASPECT);
     const TEXT_H = Math.min(clampInt(H * 0.18 * scale, 16, 140), Math.max(16, epcCap));
-    // How many lines the name RESERVES is derived from the label WIDTH and a
-    // reference name length — never from the actual text — so it is the same on
-    // every label, while a label wide enough to take the name in fewer lines
-    // doesn't leave blank ones between it and the assortment number below.
-    const headChars = Math.max(1, Math.floor((textWidth * 0.95) / Math.max(1, Math.floor(TEXT_H * CHAR_ASPECT))));
-    const headLines = Math.max(1, Math.min(3, Math.ceil(NAME_REF_CHARS / headChars)));
-    const HEAD = { h: TEXT_H, lines: headLines, lead: Math.round(TEXT_H * 0.14) };
+    // The name gets ONE line, like every other row. Reserving more so a long
+    // name could wrap meant a short name left the spare line blank between
+    // itself and the assortment number — a gap on most labels to accommodate a
+    // few. A name too long for its line shrinks to fit (fitFont) instead, which
+    // costs size only on the labels that actually need it and never moves a row.
+    const HEAD = { h: TEXT_H, lines: 1, lead: 0 };
     const DETAIL = { h: TEXT_H, lines: 1, lead: 0 };
     const epcSlot = { h: TEXT_H, lines: 1, lead: 0 };
     const gap = Math.max(8, Math.round(H * 0.02 * scale));
