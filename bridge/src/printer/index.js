@@ -178,7 +178,8 @@ function parseHqesFault(text) {
 // Parse a ~HS ("Host Status") string-1 reply. Field 5 (0-based index 4) is the
 // number of label formats still in the receive buffer — i.e. sent-but-not-yet-
 // finished-printing. 0 means the printer has drained everything we gave it.
-// Format: <STX>aaa,b,c,dddd,eee,...  → we read eee. Returns null if unparseable.
+// Field 4 (index 3) is the printer's OWN calibrated label length in dots.
+// Format: <STX>aaa,b,c,dddd,eee,...  → we read dddd and eee. Null if unparseable.
 function parseHsBuffer(text) {
   if (!text) return null;
   const first = text.replace(/[\x02\x03]/g, '').split(/\r?\n/)[0] || '';
@@ -187,6 +188,7 @@ function parseHsBuffer(text) {
   return {
     paperOut: f[1] === '1',
     paused: f[2] === '1',
+    labelLengthDots: Number(f[3]) > 0 ? Number(f[3]) : null, // dddd — calibrated length
     formatsInBuffer: Number(f[4]) || 0, // eee — 0 = buffer drained
   };
 }
@@ -532,6 +534,37 @@ class PrinterManager {
     throw new Error(`Encode not confirmed after ${maxAttempts} attempt(s) — ${lastReason}`);
   }
 
+  /**
+   * The printer's OWN calibrated label length, in dots (~HS field 4).
+   *
+   * Label geometry has to be computed against SOME canvas, and when width/height
+   * are unset the code fell back to an assumed media size. Assume wrong and the
+   * layout is laid out on a canvas that is not the paper — a canvas shorter than
+   * the label leaves a blank band along the bottom, a longer one runs the last
+   * row off the edge. The printer already knows the real number from its own
+   * label calibration, so ask it instead of guessing.
+   *
+   * Cached for the process (including a null result) — it changes only when the
+   * media changes, which means recalibrating and restarting anyway. TCP only:
+   * a USB spooler queue is write-only, so there is nobody to answer.
+   */
+  async labelLengthDots() {
+    if (this.config.transport !== 'tcp') return null;
+    if (this._labelLen !== undefined) return this._labelLen;
+    try {
+      const reply = await sendTcpAndRead(this.config.host, this.config.port, '~HS\r\n', {
+        timeoutMs: 3000,
+        quietMs: 350,
+      });
+      const hs = parseHsBuffer(reply);
+      this._labelLen = hs?.labelLengthDots ?? null;
+      if (this._labelLen) this.log(`printer reports calibrated label length ${this._labelLen} dots`);
+    } catch {
+      this._labelLen = null; // unreachable / no answer → fall back to the assumed size
+    }
+    return this._labelLen;
+  }
+
   /** Send a ZPL string over the configured transport. */
   async send(zplText) {
     if (this.config.transport === 'tcp') {
@@ -591,6 +624,13 @@ class PrinterManager {
       epcHex = zpl.testEpc(this.config.epcPrefix, usedCounter);
     }
     const layout = sanitizeLayout({ widthDots, heightDots, topOffsetDots, leftOffsetDots });
+    // Nobody specified a label height — neither this print nor the stored config
+    // — so use the printer's own calibrated length rather than an assumed size.
+    // Best-effort: a null answer leaves the assumed size in place.
+    if (layout.heightDots == null && this.config.heightDots == null) {
+      const len = await this.labelLengthDots();
+      if (len) layout.heightDots = len;
+    }
     const text = this._buildLabel(epcHex, { title, boxId, productName, itemNo, poRef, copies, layout });
     // TCP + verify on → closed loop: print, read the printer's status back, and
     // reprint/halt on a fault BEFORE recording anything. Any other case (USB, or

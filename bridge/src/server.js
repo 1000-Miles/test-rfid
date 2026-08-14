@@ -331,7 +331,17 @@ app.get('/printer/status', async (_req, res) => {
   // transport — the spooler accepts jobs even with nothing attached, so
   // clients must gate print runs on this, not on ok:true (= bridge is up).
   const readiness = await printer.checkReady().catch((e) => ({ ready: false, detail: e.message }));
-  res.json({ ok: true, ...printer.getStatus(), printerReady: readiness.ready, printerDetail: readiness.detail });
+  // The printer's own calibrated label length, which is what label geometry is
+  // computed against when no size is configured. Surfaced so a layout that does
+  // not fill the media can be diagnosed without printing anything.
+  const labelLengthDots = await printer.labelLengthDots().catch(() => null);
+  res.json({
+    ok: true,
+    ...printer.getStatus(),
+    printerReady: readiness.ready,
+    printerDetail: readiness.detail,
+    labelLengthDots,
+  });
 });
 
 app.post('/printer/config', (req, res) => {
