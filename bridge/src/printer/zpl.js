@@ -47,15 +47,21 @@ const DEFAULT_WIDTH_DOTS = 638;
 const DEFAULT_HEIGHT_DOTS = 402;
 
 /**
- * The EPC prints as two lines rather than one. It is the longest string on the
- * label by far, and since every row shares one type size (see the layout), a
- * 24-char EPC on ONE line is what caps that size — on 54x34 mm media it holds
- * every row down to ~3.6 mm. Split in half it needs less than half the width,
- * the cap roughly doubles, and the EPC still prints at the same size as the
- * rest. The break is explicit (ZPL's \&) because a hex string has no spaces for
- * ^FB to wrap on.
+ * Whether the EPC prints as a line of text.
+ *
+ * It does not, and the reason is that on 54x34 mm media it is the single most
+ * expensive thing on the label. Every row shares one type size, and that size
+ * is capped by the longest row — a 24-char EPC across a 54 mm label holds ALL
+ * text to ~3.6 mm. Splitting it over two lines lifts that cap but then costs a
+ * whole extra row, which left the barcode at its 40-dot floor (3.4 mm, not
+ * realistically scannable) and produced an ugly mid-string break.
+ *
+ * Nothing is lost by dropping it: the same value is in the Code 128 directly
+ * below and encoded on the RFID chip, which is how cartons are actually read.
+ * Set this back to true to print it again — expect the barcode to lose roughly
+ * 60% of its height and the text to shrink with it.
  */
-const EPC_LINES = 2;
+const SHOW_EPC_TEXT = false;
 
 /**
  * Build a complete print+encode label format.
@@ -136,6 +142,9 @@ function buildLabel(opts = {}) {
     ? [clean(itemNo), clean(productName)].filter(Boolean).join(' - ')
     : clean(title);
   const textRows = (semantic ? [heading, clean(poRef)] : [heading]).filter(Boolean);
+  // Off by default — see SHOW_EPC_TEXT. Flipping it back adds the row here and
+  // everything below re-spaces around it; nothing else needs changing.
+  if (SHOW_EPC_TEXT) textRows.push(epcText);
   const epcText = semantic ? hex : `EPC ${hex}`;
 
   // ── Layout ─────────────────────────────────────────────────────────────────
@@ -168,34 +177,24 @@ function buildLabel(opts = {}) {
   // ONE size (TEXT_H); the rows differ only in how many lines they reserve.
   // `lines` is the space a slot RESERVES, not a measurement of the text.
   const plan = (scale) => {
-    // One size for every row means that size is bounded by the LONGEST line on
-    // the label — the EPC, split across EPC_LINES. Capping here, rather than
-    // letting fitFont shrink the EPC on its own, is what keeps all rows
-    // genuinely identical. (The EPC is a fixed 24 hex chars, so this stays
-    // content-independent.)
-    const epcPerLine = Math.ceil(epcText.length / EPC_LINES);
-    const epcCap = Math.floor((textWidth * 0.95) / Math.max(1, epcPerLine) / CHAR_ASPECT);
-    const TEXT_H = Math.min(clampInt(H * 0.22 * scale, 16, 140), Math.max(16, epcCap));
-    // Two lines for "<assortment> - <name>". On one line it was the longest
-    // string on the label and shrank to well under the size of the rows beneath
-    // it — the most important line ending up the smallest. Two lines cost
-    // nothing in blank space here: the assortment number and separator are ~10
-    // characters before the name even starts, so the row always fills both
-    // (which is why the old blank gap does not come back).
-    const HEAD = { h: TEXT_H, lines: 2, lead: Math.round(TEXT_H * 0.12) };
+    const TEXT_H = clampInt(H * 0.22 * scale, 16, 140);
+    // Every row is ONE line. A row reserving two so long text could wrap is what
+    // put a blank line back under the name whenever the text fit in one — and
+    // with ^A0 being PROPORTIONAL, text fits in one far more often than a
+    // character count suggests (see ADVANCE). Long text shrinks instead.
+    const HEAD = { h: TEXT_H, lines: 1, lead: 0 };
     const DETAIL = { h: TEXT_H, lines: 1, lead: 0 };
-    const epcSlot = { h: TEXT_H, lines: EPC_LINES, lead: Math.round(TEXT_H * 0.1) };
     const gap = Math.max(8, Math.round(H * 0.02 * scale));
     const slots = textRows.map((t, i) => ({ text: t, ...(i === 0 ? HEAD : DETAIL) }));
     const block = (s) => s.lines * s.h + (s.lines - 1) * s.lead;
-    const rows = [...slots.map(block), block(epcSlot)];
-    const textH = rows.reduce((a, b) => a + b, 0) + gap * (rows.length - 1);
+    const rows = slots.map(block);
+    const textH = rows.reduce((a, b) => a + b, 0) + gap * Math.max(0, rows.length - 1);
     // The barcode takes whatever height is left rather than a fixed share, so it
     // runs as tall as the label allows instead of leaving the bottom empty. It
     // depends only on the rows present, so it stays the same across labels.
-    const barH = barcode ? clampInt(usable - textH - gap, 40, Math.round(H * 0.45)) : 0;
+    const barH = barcode ? clampInt(usable - textH - gap, 40, Math.round(H * 0.6)) : 0;
     const stackH = textH + (barcode ? gap + barH : 0);
-    return { slots, block, epcSlot, barH, gap, stackH };
+    return { slots, block, barH, gap, stackH };
   };
 
   // Shrink the WHOLE stack — never one row — until it fits inside the label's
@@ -213,17 +212,28 @@ function buildLabel(opts = {}) {
   // Largest character cell that draws `text` inside `lines` lines of `slot.h`.
   // The 0.95 factor leaves slack for ^FB's word wrapping, which can break a line
   // early and so needs a little more room than a raw character count implies.
+  //
+  // ADVANCE is why this is not just chars x width: ^A0 is a PROPORTIONAL font,
+  // so `w` sets the nominal cell but a lowercase-heavy string advances well
+  // under it. Measured off a printed label, 25 characters at w=31 occupied ~606
+  // dots — 0.78 of the nominal. Assuming the full cell made every row shrink
+  // more than it needed to, and made rows reserve lines they never used.
+  const ADVANCE = 0.8;
   const fitFont = (text, slot) => {
     const maxW = Math.max(4, Math.floor(slot.h * CHAR_ASPECT));
-    const perLine = Math.max(1, Math.ceil(text.length / slot.lines));
+    const perLine = Math.max(1, Math.ceil(text.length / slot.lines)) * ADVANCE;
     const w = Math.max(5, Math.min(maxW, Math.floor((textWidth * 0.95) / perLine)));
     return { w, h: Math.max(10, Math.round(w / CHAR_ASPECT)) };
   };
 
-  const measured = L.slots.map((s) => ({ ...s, ...fitFont(s.text, s), block: L.block(s) }));
-  const epcFont = fitFont(epcText, L.epcSlot);
-  const epcW = epcFont.w;
-  const epcH = epcFont.h;
+  // Fit each row, then put EVERY row at the smallest of those sizes. Rows sized
+  // independently drift apart — the longest row shrinks while a short one below
+  // it stays large, which reads as the important line being the least important.
+  // The row SLOTS keep their own fixed heights, so this changes glyph size only
+  // and never moves a row.
+  const fitted = L.slots.map((s) => fitFont(s.text, s));
+  const shared = fitted.reduce((a, f) => (f.w < a.w ? f : a), fitted[0] ?? { w: 10, h: 18 });
+  const measured = L.slots.map((s) => ({ ...s, ...shared, block: L.block(s) }));
 
   // Barcode row (visual only; read by RFID, not laser). A Code 128's width =
   // (11·S + 13) modules; estimate S (digit pairs compress via subset C), then pick
@@ -256,17 +266,6 @@ function buildLabel(opts = {}) {
     z.push(`^FO${left},${fy(y)}^A0N,${m.h},${m.w}^FB${textWidth},${m.lines},${m.lead},L,0^FD${m.text}^FS`);
     y += m.block + gap;
   }
-  // The EPC over EPC_LINES lines. ^FB word-wraps, and a hex string is one
-  // unbroken "word", so the breaks are placed explicitly with ZPL's \& — that
-  // also keeps every line an equal, predictable length.
-  const epcChunk = Math.ceil(epcText.length / EPC_LINES);
-  const epcLines = [];
-  for (let i = 0; i < epcText.length; i += epcChunk) epcLines.push(epcText.slice(i, i + epcChunk));
-  z.push(
-    `^FO${left},${fy(y)}^A0N,${epcH},${epcW}` +
-      `^FB${textWidth},${L.epcSlot.lines},${L.epcSlot.lead},L,0^FD${epcLines.join('\\&')}^FS`,
-  );
-  y += L.block(L.epcSlot) + gap;
   if (barcode) z.push(`^FO${left},${fy(y)}^BY${mod},2,${barH}^BCN,${barH},N,N,N^FD${hex}^FS`);
   z.push(`^PQ${qty}`);
   z.push('^XZ');
