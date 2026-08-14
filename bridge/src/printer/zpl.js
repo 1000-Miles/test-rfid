@@ -172,26 +172,40 @@ function buildLabel(opts = {}) {
   const clampInt = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(v)));
   // ^A0 (scalable font 0) draws roughly this wide per unit of height.
   const CHAR_ASPECT = 0.55;
+  // Why fitting is not simply chars x width: ^A0 is a PROPORTIONAL font, so `w`
+  // sets the nominal cell but a lowercase-heavy string advances well under it —
+  // measured off a printed label, 25 characters at w=31 occupied ~606 dots, 0.78
+  // of nominal. Assuming the full cell made every row shrink more than it needed
+  // to, and made rows reserve lines they never used.
+  const ADVANCE = 0.8;
 
   const margin = Math.round(H * 0.03);
   const usable = Math.max(1, H - margin * 2);
 
-  // Row slots, as a proportion of the label height, all scaled together by
-  // `scale` (see the fit loop below).
+  // Every text row is ONE line at ONE size, and a row's SLOT is exactly as tall
+  // as the glyphs in it.
   //
-  // Every text row — product name, assortment number, PO number, EPC — prints at
-  // ONE size (TEXT_H); the rows differ only in how many lines they reserve.
-  // `lines` is the space a slot RESERVES, not a measurement of the text.
+  // Both halves of that matter. Sizing the slot from the label while letting the
+  // glyphs shrink to fit their text leaves dead space under every row — visible
+  // as gaps between the lines, and worse the longer the text, because the
+  // glyphs shrink while the slot does not. So the shared glyph size is settled
+  // FIRST and the slots are built from it.
   const plan = (scale) => {
-    const TEXT_H = clampInt(H * 0.22 * scale, 16, 140);
-    // Every row is ONE line. A row reserving two so long text could wrap is what
-    // put a blank line back under the name whenever the text fit in one — and
-    // with ^A0 being PROPORTIONAL, text fits in one far more often than a
-    // character count suggests (see ADVANCE). Long text shrinks instead.
-    const HEAD = { h: TEXT_H, lines: 1, lead: 0 };
-    const DETAIL = { h: TEXT_H, lines: 1, lead: 0 };
+    const maxH = clampInt(H * 0.22 * scale, 16, 140);
+    // The largest cell that fits EVERY row on its own line — the longest row
+    // governs, so no row is ever bigger than another. ^A0 is proportional, hence
+    // ADVANCE (see fitFont).
+    const sharedW = Math.max(
+      5,
+      textRows.reduce(
+        (acc, t) => Math.min(acc, Math.floor((textWidth * 0.95) / Math.max(1, t.length * ADVANCE))),
+        Math.max(4, Math.floor(maxH * CHAR_ASPECT)),
+      ),
+    );
+    const TEXT_H = Math.max(10, Math.round(sharedW / CHAR_ASPECT));
+    const ROW = { h: TEXT_H, w: sharedW, lines: 1, lead: 0 };
     const gap = Math.max(8, Math.round(H * 0.02 * scale));
-    const slots = textRows.map((t, i) => ({ text: t, ...(i === 0 ? HEAD : DETAIL) }));
+    const slots = textRows.map((t) => ({ text: t, ...ROW }));
     const block = (s) => s.lines * s.h + (s.lines - 1) * s.lead;
     const rows = slots.map(block);
     const textH = rows.reduce((a, b) => a + b, 0) + gap * Math.max(0, rows.length - 1);
@@ -227,31 +241,9 @@ function buildLabel(opts = {}) {
     L = plan(scale);
   }
 
-  // Largest character cell that draws `text` inside `lines` lines of `slot.h`.
-  // The 0.95 factor leaves slack for ^FB's word wrapping, which can break a line
-  // early and so needs a little more room than a raw character count implies.
-  //
-  // ADVANCE is why this is not just chars x width: ^A0 is a PROPORTIONAL font,
-  // so `w` sets the nominal cell but a lowercase-heavy string advances well
-  // under it. Measured off a printed label, 25 characters at w=31 occupied ~606
-  // dots — 0.78 of the nominal. Assuming the full cell made every row shrink
-  // more than it needed to, and made rows reserve lines they never used.
-  const ADVANCE = 0.8;
-  const fitFont = (text, slot) => {
-    const maxW = Math.max(4, Math.floor(slot.h * CHAR_ASPECT));
-    const perLine = Math.max(1, Math.ceil(text.length / slot.lines)) * ADVANCE;
-    const w = Math.max(5, Math.min(maxW, Math.floor((textWidth * 0.95) / perLine)));
-    return { w, h: Math.max(10, Math.round(w / CHAR_ASPECT)) };
-  };
-
-  // Fit each row, then put EVERY row at the smallest of those sizes. Rows sized
-  // independently drift apart — the longest row shrinks while a short one below
-  // it stays large, which reads as the important line being the least important.
-  // The row SLOTS keep their own fixed heights, so this changes glyph size only
-  // and never moves a row.
-  const fitted = L.slots.map((s) => fitFont(s.text, s));
-  const shared = fitted.reduce((a, f) => (f.w < a.w ? f : a), fitted[0] ?? { w: 10, h: 18 });
-  const measured = L.slots.map((s) => ({ ...s, ...shared, block: L.block(s) }));
+  // The slots already carry the shared glyph size (see plan), so a row's box is
+  // exactly as tall as its text — no dead space to show up as a gap.
+  const measured = L.slots.map((s) => ({ ...s, block: L.block(s) }));
 
   // Barcode row (visual only; read by RFID, not laser). A Code 128's width =
   // (11·S + 13) modules; estimate S (digit pairs compress via subset C), then pick
