@@ -45,17 +45,40 @@ const ROOT = path.join(__dirname, '..');
 const outArg = process.argv.indexOf('--out');
 const DIST = outArg !== -1 && process.argv[outArg + 1] ? path.resolve(process.argv[outArg + 1]) : path.join(ROOT, 'dist-reader');
 
-// The reader's complete require graph, verified against the sources:
-//   server-reader -> controller -> driver -> uhf | uhf-sidecar
-//                    controller -> udp-listener -> uhf
-const SRC_FILES = [
-  'server-reader.js',
-  'controller.js',
-  'driver.js',
-  'uhf.js',
-  'uhf-sidecar.js',
-  'udp-listener.js',
-];
+const ENTRY = 'server-reader.js';
+
+/**
+ * Walk the local require graph from the entry point.
+ *
+ * Derived rather than hardcoded on purpose. controller.js / driver.js / uhf.js
+ * are SHARED with the gate bridge and are actively developed, so a hand-written
+ * file list goes stale the moment someone adds a require — and it fails at
+ * runtime on a staff PC ("Cannot find module"), not at build time here. Walking
+ * the graph means the dist always ships exactly what it needs.
+ *
+ * Only relative requires are followed; bare specifiers are npm packages and are
+ * handled by the dependency install below.
+ */
+function collectSources(entry) {
+  const found = [];
+  const seen = new Set();
+  const queue = [entry];
+  while (queue.length) {
+    const file = queue.shift();
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const abs = path.join(ROOT, 'src', file);
+    if (!fs.existsSync(abs)) throw new Error(`missing source: src/${file} (required somewhere in the reader graph)`);
+    found.push(file);
+    const src = fs.readFileSync(abs, 'utf8');
+    for (const m of src.matchAll(/require\('\.\/([^']+)'\)/g)) {
+      queue.push(m[1].endsWith('.js') ? m[1] : `${m[1]}.js`);
+    }
+  }
+  return found;
+}
+
+const SRC_FILES = collectSources(ENTRY);
 
 // UHFAPI.dll + the libusb it links against. Nothing else in lib/ is needed.
 const LIB_FILES = ['UHFAPI.dll', 'libusb-1.0.dll'];
@@ -117,11 +140,9 @@ fs.mkdirSync(DIST, { recursive: true });
 
 // 1. sources
 for (const f of SRC_FILES) {
-  const from = path.join(ROOT, 'src', f);
-  if (!fs.existsSync(from)) throw new Error(`missing source: src/${f}`);
-  copy(from, path.join(DIST, 'src', f));
+  copy(path.join(ROOT, 'src', f), path.join(DIST, 'src', f));
 }
-console.log(`  src/        ${SRC_FILES.length} files`);
+console.log(`  src/        ${SRC_FILES.length} files (${SRC_FILES.join(', ')})`);
 
 // 2. vendor DLLs — must land in lib/ because uhf.js looks in __dirname/../lib
 for (const f of LIB_FILES) {
