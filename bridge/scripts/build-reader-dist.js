@@ -275,11 +275,35 @@ if ($existing) {
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
 }
 
-# Stop anything still running from the target, or the copy below fails on a
-# locked node.exe.
+# Shutdown order matters, and getting it wrong wedges the hardware.
+#
+# 1. Kill the supervisor shells FIRST. reader-bridge.cmd restarts node 5s after
+#    it exits, so shutting node down while the loop lives just respawns it.
+Get-CimInstance Win32_Process -Filter "Name='cmd.exe' or Name='wscript.exe'" |
+  Where-Object { $_.CommandLine -and $_.CommandLine -like "*$Target*" } |
+  ForEach-Object { Write-Host "  stopping supervisor PID $($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force }
+
+# 2. Ask node to close the reader link cleanly. This is not politeness: a forced
+#    kill skips UsbClose(), and the reader is then left with its USB endpoint
+#    claimed. The next UsbOpen() returns 0 while the reader answers nothing -- a
+#    phantom link that only physically replugging the cable clears. An update
+#    that leaves a warehouse PC needing someone to crawl under the desk is not
+#    an update.
+$oldPort = 3001
+$oldEnv = Join-Path $Target '.env'
+if ((Test-Path $oldEnv) -and ((Get-Content $oldEnv -Raw) -match 'PORT\\s*=\\s*(\\d+)')) { $oldPort = [int]$Matches[1] }
+try {
+  Invoke-RestMethod -Method Post -Uri "http://localhost:$oldPort/shutdown" -TimeoutSec 5 | Out-Null
+  Write-Host "  closed the reader link cleanly (port $oldPort)"
+  Start-Sleep -Seconds 2
+} catch {
+  # Nothing listening, or an older build without /shutdown. Step 3 handles it.
+}
+
+# 3. Fallback only, so the file copy below cannot fail on a locked node.exe.
 Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
   Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Target) } |
-  ForEach-Object { Write-Host "  stopping node PID $($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force }
+  ForEach-Object { Write-Host "  force-stopping node PID $($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force }
 Start-Sleep -Milliseconds 500
 
 # Copy (keep logs/ from a previous install -- they are the only history there is)
@@ -356,9 +380,24 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
   Write-Host 'no task registered'
 }
 
+# Same order as install.ps1: supervisor first, then a clean shutdown so the
+# reader's USB endpoint is released. A forced kill leaves it needing a replug.
+Get-CimInstance Win32_Process -Filter "Name='cmd.exe' or Name='wscript.exe'" |
+  Where-Object { $_.CommandLine -and $_.CommandLine -like "*$Target*" } |
+  ForEach-Object { Write-Host "stopping supervisor PID $($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force }
+
+$oldPort = 3001
+$oldEnv = Join-Path $Target '.env'
+if ((Test-Path $oldEnv) -and ((Get-Content $oldEnv -Raw) -match 'PORT\\s*=\\s*(\\d+)')) { $oldPort = [int]$Matches[1] }
+try {
+  Invoke-RestMethod -Method Post -Uri "http://localhost:$oldPort/shutdown" -TimeoutSec 5 | Out-Null
+  Write-Host 'reader link closed cleanly'
+  Start-Sleep -Seconds 2
+} catch { }
+
 Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
   Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Target) } |
-  ForEach-Object { Write-Host "stopping node PID $($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force }
+  ForEach-Object { Write-Host "force-stopping node PID $($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force }
 
 foreach ($item in 'src','lib','node_modules','node.exe','package.json','reader-bridge.cmd','start-hidden.vbs','.env') {
   Remove-Item (Join-Path $Target $item) -Recurse -Force -ErrorAction SilentlyContinue

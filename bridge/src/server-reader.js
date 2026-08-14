@@ -58,6 +58,34 @@ const PORT = Number(process.env.PORT || 3001);
 
 const controller = new Controller();
 
+// --- silence the idle liveness probe ------------------------------------------
+//
+// The R1 chirps its buzzer on every command it receives, and while connected but
+// idle the controller polls isReaderAlive() every 5 seconds — which sends TWO
+// commands (getRegion + getProtocolType). The result is a beep every 5 seconds,
+// all shift, at whoever is sitting next to it. Confirmed on the bench: the
+// beeping tracked this poll exactly, stopping the moment the reader link closed.
+//
+// That probe exists for the GATE. A UR4 sits on a TCP link that can die silently
+// while still looking connected, and the gate must notice or it stops logging
+// movements. A USB desktop reader has no equivalent failure mode: if it is
+// unplugged the next call fails immediately, and connectUsb() already proves a
+// real reader answered before reporting success.
+//
+// The trade-off, stated plainly: with no idle probe, an unplugged reader keeps
+// reporting connected:true until the next real operation fails, so the UI can
+// show "reader on" when the cable is out. That is a strictly better failure than
+// beeping at an operator for eight hours, and any actual read or write surfaces
+// it at once. Set READER_IDLE_PROBE=1 to restore polling.
+//
+// Overridden on THIS INSTANCE rather than in controller.js, which is shared with
+// the gate bridge — the gate keeps its liveness detection untouched.
+const IDLE_PROBE = process.env.READER_IDLE_PROBE === '1';
+if (!IDLE_PROBE) {
+  controller._pollAlive = async () => {};
+  controller.log('Idle liveness probe disabled — the reader beeps on every command it receives.');
+}
+
 // --- HTTP / Express -----------------------------------------------------------
 const app = express();
 app.use(express.json());
@@ -69,6 +97,14 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type');
+  // Chrome Private Network Access. Being a secure context is NOT sufficient: a
+  // page on a PUBLIC origin (Nexus on Vercel) reaching a LOOPBACK address is a
+  // private-network request, so Chrome sends a preflight carrying
+  // `Access-Control-Request-Private-Network: true` and requires this header back.
+  // Without it the request never leaves the browser and the page sees a generic
+  // network failure — indistinguishable from "the bridge is not running", which
+  // is exactly how it presented: curl worked, the Nexus Test button did not.
+  res.header('Access-Control-Allow-Private-Network', 'true');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
@@ -141,7 +177,9 @@ app.post('/inventory/stop', async (_req, res) => {
 // `defaults` (the gate's IP/port) is omitted — there is no network reader here.
 // Nexus treats it as optional; no screen reads it.
 app.get('/status', (_req, res) => {
-  res.json({ ...controller.getStatus(), role: 'reader' });
+  // idleProbe is reported so "is it still beeping at me?" is answerable without
+  // reading the log or trusting that an env var took effect.
+  res.json({ ...controller.getStatus(), role: 'reader', idleProbe: IDLE_PROBE });
 });
 
 // --- single-tag access (writing pallet tags) ----------------------------------
@@ -255,6 +293,32 @@ app.post('/tag/power', async (req, res) => {
     const rc = await uhf.setPower(dBm, false);
     return { rc, dBm: await uhf.getPower() };
   });
+});
+
+/**
+ * Graceful shutdown, for the installer to call before it replaces files.
+ *
+ * This exists because force-killing the process is genuinely destructive to the
+ * hardware state: Stop-Process -Force never runs the SIGTERM handler, so
+ * UsbClose() is skipped and the reader is left with its USB endpoint claimed.
+ * The next UsbOpen() then returns 0 while the reader answers nothing — a phantom
+ * link that only a physical replug clears. Learned the hard way: repeated
+ * force-kills during testing wedged the reader and needed the cable pulled.
+ *
+ * Responds BEFORE closing the reader so the caller gets its answer even though
+ * the process is about to exit.
+ */
+app.post('/shutdown', (_req, res) => {
+  res.json({ ok: true, stopping: true });
+  controller.log('Shutdown requested — closing the reader link before exit.');
+  setTimeout(async () => {
+    try {
+      await controller.stop(); // stops inventory, then UsbClose()
+    } catch (err) {
+      controller.log(`shutdown error: ${err.message}`, 'warn');
+    }
+    process.exit(0);
+  }, 100);
 });
 
 // Client-side error reports. Running as a background service there is no console
