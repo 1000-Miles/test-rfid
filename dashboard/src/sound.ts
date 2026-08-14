@@ -71,6 +71,27 @@ function tone(a: AudioContext, freq: number, start: number, dur: number, gain: n
  * `ok` — a normal counted carton: one short soft blip, easy to hear a hundred
  * times a shift without wearing anyone down.
  */
+/**
+ * Decode and play one audio clip (the bridge's TTS MP3s) through the same
+ * AudioContext the chimes use — so the one remote-button unlock covers speech
+ * too. Resolves when playback finishes, which is what lets the caller queue
+ * English-then-Mandarin without timers. Rejects if this browser has no Web
+ * Audio or the data does not decode.
+ */
+export async function playClip(data: ArrayBuffer): Promise<void> {
+  const a = audio();
+  if (!a) throw new Error('no Web Audio');
+  if (a.state === 'suspended') void a.resume(); // best effort; may be refused
+  const buf = await a.decodeAudioData(data);
+  await new Promise<void>((resolve) => {
+    const src = a.createBufferSource();
+    src.buffer = buf;
+    src.connect(a.destination);
+    src.onended = () => resolve();
+    src.start();
+  });
+}
+
 export function chime(kind: 'ok' | 'alert') {
   const a = audio();
   if (!a) return;

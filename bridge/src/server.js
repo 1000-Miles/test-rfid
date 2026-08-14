@@ -410,6 +410,13 @@ app.get('/printer/queues', async (_req, res) => {
   }
 });
 
+// --- Text-to-speech for the gate board -------------------------------------------
+// TV browsers (Android WebView and friends) have no speechSynthesis, so the
+// board fetches its announcement audio from here instead. Cached on disk, so
+// repeat phrases work even when the synth service is unreachable.
+const { handleTtsRequest } = require('./tts');
+app.get('/tts', (req, res) => handleTtsRequest(req, res, (text, level) => controller.log(text, level)));
+
 // --- Mock Nexus routes ----------------------------------------------------------
 // Demo/testing: simulate a tag read end-to-end (nexus check-in + WS + voice + TV)
 // without hardware. Body: { epc? } — omit epc for a random catalog tag.
