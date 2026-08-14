@@ -43,8 +43,19 @@ function testEpc(prefix = 'AA00', counter = 1) {
  * canvas, and it must be the real one. Our media is 60×40 mm on the 300 dpi
  * CP30 (12 dots/mm) = 709×472 dots.
  */
-const DEFAULT_WIDTH_DOTS = 709;
-const DEFAULT_HEIGHT_DOTS = 472;
+const DEFAULT_WIDTH_DOTS = 638;
+const DEFAULT_HEIGHT_DOTS = 402;
+
+/**
+ * The EPC prints as two lines rather than one. It is the longest string on the
+ * label by far, and since every row shares one type size (see the layout), a
+ * 24-char EPC on ONE line is what caps that size — on 54x34 mm media it holds
+ * every row down to ~3.6 mm. Split in half it needs less than half the width,
+ * the cap roughly doubles, and the EPC still prints at the same size as the
+ * rest. The break is explicit (ZPL's \&) because a hex string has no spaces for
+ * ^FB to wrap on.
+ */
+const EPC_LINES = 2;
 
 /**
  * Build a complete print+encode label format.
@@ -151,12 +162,14 @@ function buildLabel(opts = {}) {
   // ONE size (TEXT_H); the rows differ only in how many lines they reserve.
   // `lines` is the space a slot RESERVES, not a measurement of the text.
   const plan = (scale) => {
-    // One size for every row means that size is bounded by the LONGEST string on
-    // the label — the 24-char EPC. Capping here, rather than letting fitFont
-    // shrink the EPC on its own, is what keeps all four rows genuinely identical.
-    // (The EPC is a fixed 24 hex chars, so this stays content-independent.)
-    const epcCap = Math.floor((textWidth * 0.95) / Math.max(1, epcText.length) / CHAR_ASPECT);
-    const TEXT_H = Math.min(clampInt(H * 0.18 * scale, 16, 140), Math.max(16, epcCap));
+    // One size for every row means that size is bounded by the LONGEST line on
+    // the label — the EPC, split across EPC_LINES. Capping here, rather than
+    // letting fitFont shrink the EPC on its own, is what keeps all rows
+    // genuinely identical. (The EPC is a fixed 24 hex chars, so this stays
+    // content-independent.)
+    const epcPerLine = Math.ceil(epcText.length / EPC_LINES);
+    const epcCap = Math.floor((textWidth * 0.95) / Math.max(1, epcPerLine) / CHAR_ASPECT);
+    const TEXT_H = Math.min(clampInt(H * 0.22 * scale, 16, 140), Math.max(16, epcCap));
     // The name gets ONE line, like every other row. Reserving more so a long
     // name could wrap meant a short name left the spare line blank between
     // itself and the assortment number — a gap on most labels to accommodate a
@@ -164,11 +177,11 @@ function buildLabel(opts = {}) {
     // costs size only on the labels that actually need it and never moves a row.
     const HEAD = { h: TEXT_H, lines: 1, lead: 0 };
     const DETAIL = { h: TEXT_H, lines: 1, lead: 0 };
-    const epcSlot = { h: TEXT_H, lines: 1, lead: 0 };
+    const epcSlot = { h: TEXT_H, lines: EPC_LINES, lead: Math.round(TEXT_H * 0.1) };
     const gap = Math.max(8, Math.round(H * 0.02 * scale));
     const slots = textRows.map((t, i) => ({ text: t, ...(i === 0 ? HEAD : DETAIL) }));
     const block = (s) => s.lines * s.h + (s.lines - 1) * s.lead;
-    const rows = [...slots.map(block), epcSlot.h];
+    const rows = [...slots.map(block), block(epcSlot)];
     const textH = rows.reduce((a, b) => a + b, 0) + gap * (rows.length - 1);
     // The barcode takes whatever height is left rather than a fixed share, so it
     // runs as tall as the label allows instead of leaving the bottom empty. It
@@ -236,8 +249,17 @@ function buildLabel(opts = {}) {
     z.push(`^FO${left},${fy(y)}^A0N,${m.h},${m.w}^FB${textWidth},${m.lines},${m.lead},L,0^FD${m.text}^FS`);
     y += m.block + gap;
   }
-  z.push(`^FO${left},${fy(y)}^A0N,${epcH},${epcW}^FD${epcText}^FS`);
-  y += L.epcSlot.h + gap;
+  // The EPC over EPC_LINES lines. ^FB word-wraps, and a hex string is one
+  // unbroken "word", so the breaks are placed explicitly with ZPL's \& — that
+  // also keeps every line an equal, predictable length.
+  const epcChunk = Math.ceil(epcText.length / EPC_LINES);
+  const epcLines = [];
+  for (let i = 0; i < epcText.length; i += epcChunk) epcLines.push(epcText.slice(i, i + epcChunk));
+  z.push(
+    `^FO${left},${fy(y)}^A0N,${epcH},${epcW}` +
+      `^FB${textWidth},${L.epcSlot.lines},${L.epcSlot.lead},L,0^FD${epcLines.join('\\&')}^FS`,
+  );
+  y += L.block(L.epcSlot) + gap;
   if (barcode) z.push(`^FO${left},${fy(y)}^BY${mod},2,${barH}^BCN,${barH},N,N,N^FD${hex}^FS`);
   z.push(`^PQ${qty}`);
   z.push('^XZ');
