@@ -60,6 +60,30 @@ const DEFAULT_HEIGHT_DOTS = 402;
 const SHOW_EPC_TEXT = true;
 
 /**
+ * The product name is truncated to what fits its line, with an ellipsis, rather
+ * than being allowed to set the type size.
+ *
+ * It is the only row whose length is unbounded — assortment number, PO
+ * reference and carton count are all short. While the shared type size was
+ * bounded by the longest row, one long name shrank every row on the label: the
+ * same job printed 2.6mm rows under a ballooning barcode for "MMCT - Test
+ * Product 1 - Purple Sheet" and 5.2mm rows for "A003945 - reess". Truncating
+ * makes the name fit the label instead of the label fit the name, so every
+ * carton comes out identical. ASCII dots, because clean() strips the single-
+ * glyph ellipsis along with everything else the built-in font cannot draw.
+ */
+const ELLIPSIS = '...';
+
+/**
+ * Reference length for the rows that are NOT the product name — long enough for
+ * a realistic worst case ("Carton 128 of 240" is 17). The type size is derived
+ * from this rather than from the actual text so that two cartons of the same
+ * job cannot print at different sizes, and it trades directly against how much
+ * of the name survives: bigger type, fewer characters before the ellipsis.
+ */
+const SHORT_ROW_REF_CHARS = 18;
+
+/**
  * Build a complete print+encode label format.
  * Coordinates are printhead dots — our CP30 is the 300 dpi model (12 dots/mm),
  * so 60×40 mm media = 709×472 dots. widthDots/heightDots are optional overrides
@@ -192,20 +216,29 @@ function buildLabel(opts = {}) {
   // FIRST and the slots are built from it.
   const plan = (scale) => {
     const maxH = clampInt(H * 0.22 * scale, 16, 140);
-    // The largest cell that fits EVERY row on its own line — the longest row
-    // governs, so no row is ever bigger than another. ^A0 is proportional, hence
-    // ADVANCE (see fitFont).
+    // The type size comes from the label and from a fixed REFERENCE length, not
+    // from the text. Sizing it to the actual rows still let the label move —
+    // "Carton 12 of 240" is longer than "Carton 1 of 1", so two cartons of the
+    // same job printed at different sizes. The reference covers the longest
+    // realistic short row, and the max() keeps a genuinely longer one from being
+    // truncated: a PO reference or carton count must always print in full. Only
+    // the name is ever cut (see ELLIPSIS).
+    const shortLen = Math.max(SHORT_ROW_REF_CHARS, ...textRows.slice(1).map((t) => t.length), 1);
     const sharedW = Math.max(
       5,
-      textRows.reduce(
-        (acc, t) => Math.min(acc, Math.floor((textWidth * 0.95) / Math.max(1, t.length * ADVANCE))),
-        Math.max(4, Math.floor(maxH * CHAR_ASPECT)),
-      ),
+      Math.min(Math.max(4, Math.floor(maxH * CHAR_ASPECT)), Math.floor((textWidth * 0.95) / (shortLen * ADVANCE))),
     );
     const TEXT_H = Math.max(10, Math.round(sharedW / CHAR_ASPECT));
-    const ROW = { h: TEXT_H, w: sharedW, lines: 1, lead: 0 };
     const gap = Math.max(8, Math.round(H * 0.02 * scale));
-    const slots = textRows.map((t) => ({ text: t, ...ROW }));
+    // Characters that fit one line at this size; the name is cut to it.
+    const fitChars = Math.max(4, Math.floor((textWidth * 0.95) / (sharedW * ADVANCE)));
+    const slots = textRows.map((t, i) => ({
+      text: i === 0 && t.length > fitChars ? t.slice(0, fitChars - ELLIPSIS.length).trimEnd() + ELLIPSIS : t,
+      h: TEXT_H,
+      w: sharedW,
+      lines: 1,
+      lead: 0,
+    }));
     const block = (s) => s.lines * s.h + (s.lines - 1) * s.lead;
     const rows = slots.map(block);
     const textH = rows.reduce((a, b) => a + b, 0) + gap * Math.max(0, rows.length - 1);
@@ -224,7 +257,11 @@ function buildLabel(opts = {}) {
     // runs as tall as the label allows instead of leaving the bottom empty. It
     // depends only on the rows present, so it stays the same across labels.
     const capCost = SHOW_EPC_TEXT ? capH + gap : 0;
-    const barH = barcode ? clampInt(usable - textH - gap - capCost, 40, Math.round(H * 0.7)) : 0;
+    // Capped, not merely "whatever is left": uncapped, a label whose rows happen
+    // to be short handed the entire surplus to the barcode, which then dwarfed
+    // the text. Surplus beyond the cap becomes margin instead (the stack is
+    // centred), which reads as deliberate.
+    const barH = barcode ? clampInt(usable - textH - gap - capCost, 40, Math.round(H * 0.45)) : 0;
     const stackH = textH + (barcode ? gap + barH : 0) + capCost;
     return { slots, block, barH, gap, stackH, capW, capH };
   };
