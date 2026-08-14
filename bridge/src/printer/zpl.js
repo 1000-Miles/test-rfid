@@ -128,8 +128,14 @@ function buildLabel(opts = {}) {
   const semantic = boxId != null || productName != null || itemNo != null || poRef != null;
   // Bare values, no "ITEM No."/"PO Number"/"EPC" prefixes (Brian 2026-08-04);
   // the legacy title layout keeps its "EPC " prefix for the test prints.
-  const heading = semantic ? clean(productName) : clean(title);
-  const textRows = (semantic ? [heading, clean(itemNo), clean(poRef)] : [heading]).filter(Boolean);
+  // Assortment number and product name share one row ("A001837 - Bunny Socks",
+  // Riza 2026-08-14). They read as one identifier, and on 54x34mm media the row
+  // this saves is worth more than the separation: every remaining row gets
+  // taller, and so does the barcode.
+  const heading = semantic
+    ? [clean(itemNo), clean(productName)].filter(Boolean).join(' - ')
+    : clean(title);
+  const textRows = (semantic ? [heading, clean(poRef)] : [heading]).filter(Boolean);
   const epcText = semantic ? hex : `EPC ${hex}`;
 
   // ── Layout ─────────────────────────────────────────────────────────────────
@@ -170,12 +176,13 @@ function buildLabel(opts = {}) {
     const epcPerLine = Math.ceil(epcText.length / EPC_LINES);
     const epcCap = Math.floor((textWidth * 0.95) / Math.max(1, epcPerLine) / CHAR_ASPECT);
     const TEXT_H = Math.min(clampInt(H * 0.22 * scale, 16, 140), Math.max(16, epcCap));
-    // The name gets ONE line, like every other row. Reserving more so a long
-    // name could wrap meant a short name left the spare line blank between
-    // itself and the assortment number — a gap on most labels to accommodate a
-    // few. A name too long for its line shrinks to fit (fitFont) instead, which
-    // costs size only on the labels that actually need it and never moves a row.
-    const HEAD = { h: TEXT_H, lines: 1, lead: 0 };
+    // Two lines for "<assortment> - <name>". On one line it was the longest
+    // string on the label and shrank to well under the size of the rows beneath
+    // it — the most important line ending up the smallest. Two lines cost
+    // nothing in blank space here: the assortment number and separator are ~10
+    // characters before the name even starts, so the row always fills both
+    // (which is why the old blank gap does not come back).
+    const HEAD = { h: TEXT_H, lines: 2, lead: Math.round(TEXT_H * 0.12) };
     const DETAIL = { h: TEXT_H, lines: 1, lead: 0 };
     const epcSlot = { h: TEXT_H, lines: EPC_LINES, lead: Math.round(TEXT_H * 0.1) };
     const gap = Math.max(8, Math.round(H * 0.02 * scale));
