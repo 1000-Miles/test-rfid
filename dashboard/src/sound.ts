@@ -82,7 +82,11 @@ export async function playClip(data: ArrayBuffer): Promise<void> {
   const a = audio();
   if (!a) throw new Error('no Web Audio');
   if (a.state === 'suspended') void a.resume(); // best effort; may be refused
-  const buf = await a.decodeAudioData(data);
+  // Callback form, not the promise form: old WebView/Chromium builds (the TV)
+  // implement only the original callback signature.
+  const buf = await new Promise<AudioBuffer>((resolve, reject) => {
+    a.decodeAudioData(data, resolve, (e) => reject(e || new Error('decodeAudioData failed')));
+  });
   await new Promise<void>((resolve) => {
     const src = a.createBufferSource();
     src.buffer = buf;

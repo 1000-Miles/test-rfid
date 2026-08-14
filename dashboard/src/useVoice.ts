@@ -53,12 +53,36 @@ function useZhVoice() {
 
 /** Fetch one announcement MP3 from the bridge. Throws on any failure. */
 async function fetchSpeech(text: string, lang: 'en' | 'zh'): Promise<ArrayBuffer> {
-  const res = await fetch(`${BRIDGE_HTTP}/tts?text=${encodeURIComponent(text)}&lang=${lang}`, {
-    // Bounded: a hung request must not dam the queue while pallets keep coming.
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!res.ok) throw new Error(`tts ${res.status}`);
-  return res.arrayBuffer();
+  // Bounded: a hung request must not dam the queue while pallets keep coming.
+  // Manual AbortController, NOT AbortSignal.timeout(): the TV's browser is an
+  // old Chromium build where AbortSignal.timeout does not exist, and the
+  // resulting TypeError used to be swallowed as "TTS unavailable" — silence.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const res = await fetch(`${BRIDGE_HTTP}/tts?text=${encodeURIComponent(text)}&lang=${lang}`, {
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`tts ${res.status}`);
+    return await res.arrayBuffer();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Report a speech failure to the bridge's log. The wallboard TV has no
+ * devtools, so an error that only lands in its console is an error nobody
+ * ever sees — this is the only way to find out WHY the board went quiet.
+ * Fire-and-forget; diagnostics must never become their own failure.
+ */
+function reportSpeechError(stage: string, err: unknown) {
+  const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  fetch(`${BRIDGE_HTTP}/client-log`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source: 'voice', stage, message, ua: navigator.userAgent }),
+  }).catch(() => {});
 }
 
 /** Speak via the browser's own engine; resolves when the utterance ends.
@@ -119,7 +143,8 @@ export function useVoice(entries: EntryRow[], enabled: boolean) {
         .then(async () => {
           try {
             await playClip(await fetchSpeech(text, lang));
-          } catch {
+          } catch (err) {
+            reportSpeechError('bridge-tts', err);
             await speakLocal(text, lang, pitch, zhVoice.current);
           }
         })

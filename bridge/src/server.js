@@ -417,6 +417,15 @@ app.get('/printer/queues', async (_req, res) => {
 const { handleTtsRequest } = require('./tts');
 app.get('/tts', (req, res) => handleTtsRequest(req, res, (text, level) => controller.log(text, level)));
 
+// Client-side error reports from the board. The wallboard TV has no devtools,
+// so this log line is the only visibility into why IT went silent — the
+// dashboard posts here whenever speech fails on the display device.
+app.post('/client-log', (req, res) => {
+  const { source = 'client', stage = '?', message = '', ua = '' } = req.body || {};
+  controller.log(`[${source}] ${stage}: ${String(message).slice(0, 300)} (ua: ${String(ua).slice(0, 120)})`, 'warn');
+  res.json({ ok: true });
+});
+
 // --- Mock Nexus routes ----------------------------------------------------------
 // Demo/testing: simulate a tag read end-to-end (nexus check-in + WS + voice + TV)
 // without hardware. Body: { epc? } — omit epc for a random catalog tag.
