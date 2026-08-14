@@ -191,17 +191,17 @@ function buildLabel(opts = {}) {
   // Why fitting is not simply chars x width: ^A0 is a PROPORTIONAL font, so `w`
   // sets the nominal cell while the average glyph advances well under it.
   //
-  // Calibrated against the printed label rather than derived: at the type size
-  // this layout picks for 54x34 mm media, 38 characters fit the line (Riza
-  // 2026-08-14, off a physical label at w=38), which puts the average advance at
-  // ~0.39 of nominal. The earlier 0.54 was measured before the type ceiling
-  // dropped to 0.17 of label height — same label, smaller cell, so more of them
-  // fit than the old figure predicted.
+  // Calibrated against printed labels. This value has to be an OVER-estimate,
+  // never an under-estimate: ^FB hard-clips a line at its width, silently and
+  // without an ellipsis, so a value that promises more characters than fit does
+  // not merely overflow — it throws away the "..." that says the name was cut,
+  // leaving a name that looks complete but is not.
   //
-  // An earlier 0.8 came from a line that merely FIT its ^FB width, which bounds
-  // the advance from above rather than measuring it; that over-estimate is what
-  // cut names off at "Test..." with half the label still empty.
-  const ADVANCE = 0.39;
+  // 0.39 was tried and did exactly that: a line said to hold 38 characters ran
+  // out at ~27 on the media, which puts the real advance near 0.59. 0.62 carries
+  // a margin over that and lands ~25 characters with the ellipsis safely on the
+  // label. (An even earlier 0.8 erred the safe way — it merely wasted width.)
+  const ADVANCE = 0.62;
 
   const margin = Math.round(H * 0.03);
   const usable = Math.max(1, H - margin * 2);
@@ -235,10 +235,13 @@ function buildLabel(opts = {}) {
     const sharedW = Math.max(5, Math.floor(maxH * CHAR_ASPECT));
     const TEXT_H = Math.max(10, Math.round(sharedW / CHAR_ASPECT));
     const gap = Math.max(8, Math.round(H * 0.02 * scale));
-    // Characters that fit one line at this size. Applied to every row, not just
-    // the name — a PO or carton row is far shorter than this in practice, so it
-    // is a guard rather than something that fires.
-    const fitChars = Math.max(4, Math.floor((textWidth * 0.95) / (sharedW * ADVANCE)));
+    // Characters that fit one line at this size, measured against the SAME
+    // width ^FB will clip at — no extra safety factor, because ADVANCE already
+    // carries the margin and stacking a second one only wastes label. Applied to
+    // every row, not just the name: a PO row for a product ordered on several
+    // POs can outrun the line too, and being cut with an ellipsis is far better
+    // than ^FB silently dropping its tail.
+    const fitChars = Math.max(4, Math.floor(textWidth / (sharedW * ADVANCE)));
     const slots = textRows.map((t) => ({
       text: t.length > fitChars ? t.slice(0, fitChars - ELLIPSIS.length).trimEnd() + ELLIPSIS : t,
       h: TEXT_H,
