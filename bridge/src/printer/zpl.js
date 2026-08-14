@@ -87,6 +87,10 @@ function buildLabel(opts = {}) {
     productName = null,
     itemNo = null,
     poRef = null,
+    // Which carton this is, and how many the product has in total. Rendered as
+    // "Carton 1 of 30"; with no total, just "Carton 1".
+    cartonNo = null,
+    cartonTotal = null,
     barcode = true,
     widthDots = null,
     heightDots = null,
@@ -127,7 +131,16 @@ function buildLabel(opts = {}) {
   // `boxId` still selects the semantic layout and is still recorded in the print
   // log, but it is NOT printed (Riza 2026-08-13): the carton is identified by its
   // EPC, and dropping it lets the product name have the row to itself.
-  const semantic = boxId != null || productName != null || itemNo != null || poRef != null;
+  const semantic =
+    boxId != null || productName != null || itemNo != null || poRef != null || cartonNo != null;
+  // "Carton 3 of 30" — the count is dropped when unknown rather than printing a
+  // half-sentence, and a non-numeric or zero carton number drops the row.
+  const cartonN = Math.round(Number(cartonNo));
+  const cartonT = Math.round(Number(cartonTotal));
+  const cartonText =
+    Number.isFinite(cartonN) && cartonN > 0
+      ? `Carton ${cartonN}${Number.isFinite(cartonT) && cartonT > 0 ? ` of ${cartonT}` : ''}`
+      : '';
   // Bare values, no "ITEM No."/"PO Number"/"EPC" prefixes (Brian 2026-08-04);
   // the legacy title layout keeps its "EPC " prefix for the test prints.
   // Assortment number and product name share one row ("A001837 - Bunny Socks",
@@ -137,7 +150,7 @@ function buildLabel(opts = {}) {
   const heading = semantic
     ? [clean(itemNo), clean(productName)].filter(Boolean).join(' - ')
     : clean(title);
-  const textRows = (semantic ? [heading, clean(poRef)] : [heading]).filter(Boolean);
+  const textRows = (semantic ? [heading, clean(poRef), cartonText] : [heading]).filter(Boolean);
   const epcText = semantic ? hex : `EPC ${hex}`;
 
   // ── Layout ─────────────────────────────────────────────────────────────────

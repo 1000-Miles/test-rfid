@@ -579,12 +579,12 @@ class PrinterManager {
   }
 
   /** Build the label ZPL without sending (does not consume the EPC counter). */
-  preview({ epc, title, boxId, productName, itemNo, poRef, copies } = {}) {
+  preview({ epc, title, boxId, productName, itemNo, poRef, cartonNo, cartonTotal, copies } = {}) {
     const hex = epc ? zpl.validateEpcHex(epc) : zpl.testEpc(this.config.epcPrefix, this.counter + 1);
-    return { epc: hex, zpl: this._buildLabel(hex, { title, boxId, productName, itemNo, poRef, copies }) };
+    return { epc: hex, zpl: this._buildLabel(hex, { title, boxId, productName, itemNo, poRef, cartonNo, cartonTotal, copies }) };
   }
 
-  _buildLabel(epcHex, { title, boxId, productName, itemNo, poRef, copies, layout = {} } = {}) {
+  _buildLabel(epcHex, { title, boxId, productName, itemNo, poRef, cartonNo, cartonTotal, copies, layout = {} } = {}) {
     // layout = sanitized per-print overrides; anything absent falls back to the
     // stored config, so config-only callers print exactly as before. content
     // (boxId/productName/itemNo/poRef) selects the carton-label layout in
@@ -597,6 +597,8 @@ class PrinterManager {
       productName,
       itemNo,
       poRef,
+      cartonNo,
+      cartonTotal,
       copies,
       barcode: cfg.barcode,
       widthDots: cfg.widthDots,
@@ -610,7 +612,7 @@ class PrinterManager {
   /** Print one label and encode its EPC. Auto-generates the next test EPC if none
    * given. `jobId`/`boxId` are metadata recorded in the durable print log so
    * Nexus can reconcile which cartons actually printed after any interruption. */
-  async printLabel({ epc, title, productName, itemNo, poRef, copies, jobId, boxId, widthDots, heightDots, topOffsetDots, leftOffsetDots } = {}) {
+  async printLabel({ epc, title, productName, itemNo, poRef, cartonNo, cartonTotal, copies, jobId, boxId, widthDots, heightDots, topOffsetDots, leftOffsetDots } = {}) {
     // Refuse before touching the counter or the durable log: a queued-but-not-
     // printed label must never be recorded as printed.
     const readiness = await this.checkReady().catch((e) => ({ ready: false, detail: e.message }));
@@ -631,7 +633,7 @@ class PrinterManager {
       const len = await this.labelLengthDots();
       if (len) layout.heightDots = len;
     }
-    const text = this._buildLabel(epcHex, { title, boxId, productName, itemNo, poRef, copies, layout });
+    const text = this._buildLabel(epcHex, { title, boxId, productName, itemNo, poRef, cartonNo, cartonTotal, copies, layout });
     // TCP + verify on → closed loop: print, read the printer's status back, and
     // reprint/halt on a fault BEFORE recording anything. Any other case (USB, or
     // verify off) keeps the original one-way behaviour. A thrown error here means
