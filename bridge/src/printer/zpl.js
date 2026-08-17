@@ -43,15 +43,37 @@ function testEpc(prefix = 'AA00', counter = 1) {
  * canvas, and it must be the real one. Our media is 60×40 mm on the 300 dpi
  * CP30 (12 dots/mm) = 709×472 dots.
  */
-const DEFAULT_WIDTH_DOTS = 709;
-const DEFAULT_HEIGHT_DOTS = 472;
+const DEFAULT_WIDTH_DOTS = 638;
+const DEFAULT_HEIGHT_DOTS = 402;
 
 /**
- * Typical product-name length. Used ONLY to decide how many lines the name row
- * reserves; the reservation must not depend on the actual text or two labels
- * would space their rows differently.
+ * Whether the EPC prints as a line of text, UNDER the barcode (Riza 2026-08-14).
+ *
+ * Below rather than above, and deliberately not part of the shared type size of
+ * the rows above it. As one of those rows it was the most expensive thing on
+ * the label: every row shares one size, that size is capped by the longest row,
+ * and a 24-char EPC across 54 mm held ALL text to ~3.6 mm — while splitting it
+ * over two lines to lift the cap cost a whole row and left the barcode at its
+ * floor. As a caption it is sized on its own, so it costs only its own height
+ * and caps nothing. It is also where a barcode's human-readable line belongs.
  */
-const NAME_REF_CHARS = 30;
+const SHOW_EPC_TEXT = true;
+
+/**
+ * The product name is truncated to what fits its line, with an ellipsis, rather
+ * than being allowed to set the type size.
+ *
+ * It is the only row whose length is unbounded — assortment number, PO
+ * reference and carton count are all short. While the shared type size was
+ * bounded by the longest row, one long name shrank every row on the label: the
+ * same job printed 2.6mm rows under a ballooning barcode for "MMCT - Test
+ * Product 1 - Purple Sheet" and 5.2mm rows for "A003945 - reess". Truncating
+ * makes the name fit the label instead of the label fit the name, so every
+ * carton comes out identical. ASCII dots, because clean() strips the single-
+ * glyph ellipsis along with everything else the built-in font cannot draw.
+ */
+const ELLIPSIS = '...';
+
 
 /**
  * Build a complete print+encode label format.
@@ -81,6 +103,10 @@ function buildLabel(opts = {}) {
     productName = null,
     itemNo = null,
     poRef = null,
+    // Which carton this is, and how many the product has in total. Rendered as
+    // "Carton 1 of 30"; with no total, just "Carton 1".
+    cartonNo = null,
+    cartonTotal = null,
     barcode = true,
     widthDots = null,
     heightDots = null,
@@ -121,11 +147,26 @@ function buildLabel(opts = {}) {
   // `boxId` still selects the semantic layout and is still recorded in the print
   // log, but it is NOT printed (Riza 2026-08-13): the carton is identified by its
   // EPC, and dropping it lets the product name have the row to itself.
-  const semantic = boxId != null || productName != null || itemNo != null || poRef != null;
+  const semantic =
+    boxId != null || productName != null || itemNo != null || poRef != null || cartonNo != null;
+  // "Carton 3 of 30" — the count is dropped when unknown rather than printing a
+  // half-sentence, and a non-numeric or zero carton number drops the row.
+  const cartonN = Math.round(Number(cartonNo));
+  const cartonT = Math.round(Number(cartonTotal));
+  const cartonText =
+    Number.isFinite(cartonN) && cartonN > 0
+      ? `Carton ${cartonN}${Number.isFinite(cartonT) && cartonT > 0 ? ` of ${cartonT}` : ''}`
+      : '';
   // Bare values, no "ITEM No."/"PO Number"/"EPC" prefixes (Brian 2026-08-04);
   // the legacy title layout keeps its "EPC " prefix for the test prints.
-  const heading = semantic ? clean(productName) : clean(title);
-  const textRows = (semantic ? [heading, clean(itemNo), clean(poRef)] : [heading]).filter(Boolean);
+  // Assortment number and product name share one row ("A001837 - Bunny Socks",
+  // Riza 2026-08-14). They read as one identifier, and on 54x34mm media the row
+  // this saves is worth more than the separation: every remaining row gets
+  // taller, and so does the barcode.
+  const heading = semantic
+    ? [clean(itemNo), clean(productName)].filter(Boolean).join(' - ')
+    : clean(title);
+  const textRows = (semantic ? [heading, clean(poRef), cartonText] : [heading]).filter(Boolean);
   const epcText = semantic ? hex : `EPC ${hex}`;
 
   // ── Layout ─────────────────────────────────────────────────────────────────
@@ -147,43 +188,104 @@ function buildLabel(opts = {}) {
   const clampInt = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(v)));
   // ^A0 (scalable font 0) draws roughly this wide per unit of height.
   const CHAR_ASPECT = 0.55;
+  // How wide each character actually is, as a fraction of the nominal cell.
+  //
+  // ^A0 is proportional, and NOT by a single average — that was the mistake
+  // behind every wrong guess at this. A capital is far wider than a lowercase
+  // letter, so one average is too tight for "PURPLE GLOVES" and too loose for
+  // "Purple Gloves", and the fit moved with whatever the product happened to be
+  // called. Too loose is the damaging direction: ^FB clips a line silently and
+  // takes the "..." with it, so the name then looks complete when it is not.
+  //
+  // Measured off a ruler label printed at this exact font (^A0N,53,29 on 54 mm
+  // media, 2026-08-14): 36 uppercase ran out at ~32, 36 lowercase fitted whole,
+  // 40 digits ran out at ~34. Those three give the weights below, which predict
+  // all three rows — and a real product name — to within a character.
+  const charUnits = (ch) => {
+    if (ch >= 'A' && ch <= 'Z') return 0.7;
+    if (ch >= '0' && ch <= '9') return 0.66;
+    if (ch >= 'a' && ch <= 'z') return 0.55;
+    return 0.35; // space, hyphen, punctuation — narrower than either case
+  };
+  const textUnits = (s) => {
+    let u = 0;
+    for (const ch of s) u += charUnits(ch);
+    return u;
+  };
 
-  const margin = Math.round(H * 0.05);
+  const margin = Math.round(H * 0.03);
   const usable = Math.max(1, H - margin * 2);
 
-  // Row slots, as a proportion of the label height, all scaled together by
-  // `scale` (see the fit loop below).
+  // Every text row is ONE line at ONE size, and a row's SLOT is exactly as tall
+  // as the glyphs in it.
   //
-  // Every text row — product name, assortment number, PO number, EPC — prints at
-  // ONE size (TEXT_H); the rows differ only in how many lines they reserve.
-  // `lines` is the space a slot RESERVES, not a measurement of the text.
+  // Both halves of that matter. Sizing the slot from the label while letting the
+  // glyphs shrink to fit their text leaves dead space under every row — visible
+  // as gaps between the lines, and worse the longer the text, because the
+  // glyphs shrink while the slot does not. So the shared glyph size is settled
+  // FIRST and the slots are built from it.
   const plan = (scale) => {
-    // One size for every row means that size is bounded by the LONGEST string on
-    // the label — the 24-char EPC. Capping here, rather than letting fitFont
-    // shrink the EPC on its own, is what keeps all four rows genuinely identical.
-    // (The EPC is a fixed 24 hex chars, so this stays content-independent.)
-    const epcCap = Math.floor((textWidth * 0.95) / Math.max(1, epcText.length) / CHAR_ASPECT);
-    const TEXT_H = Math.min(clampInt(H * 0.18 * scale, 16, 140), Math.max(16, epcCap));
-    // How many lines the name RESERVES is derived from the label WIDTH and a
-    // reference name length — never from the actual text — so it is the same on
-    // every label, while a label wide enough to take the name in fewer lines
-    // doesn't leave blank ones between it and the assortment number below.
-    const headChars = Math.max(1, Math.floor((textWidth * 0.95) / Math.max(1, Math.floor(TEXT_H * CHAR_ASPECT))));
-    const headLines = Math.max(1, Math.min(3, Math.ceil(NAME_REF_CHARS / headChars)));
-    const HEAD = { h: TEXT_H, lines: headLines, lead: Math.round(TEXT_H * 0.14) };
-    const DETAIL = { h: TEXT_H, lines: 1, lead: 0 };
-    const epcSlot = { h: TEXT_H, lines: 1, lead: 0 };
+    // The type size, as a share of label height — and with it, how much of the
+    // product name survives, since the two trade directly: bigger type, fewer
+    // characters before the ellipsis. 0.13 is ~4.5 mm on 54x34 mm media, which
+    // holds ~33 characters (Riza's pick, 2026-08-14; 0.17 gave 5.8 mm and only
+    // ~25). It is also a budget, not just a target — set it high enough that the
+    // rows alone fill the label and there is nothing left for the barcode.
+    const maxH = clampInt(H * 0.13 * scale, 16, 140);
+    // The type size comes from the LABEL ALONE — no text of any kind feeds into
+    // it. Anything else couples the two: while the size was fitted to the
+    // "short" rows, a product on two POs ("POP-2026-156, POP-2026-157") or a
+    // carton row reading "Carton 12 of 240" was enough to shrink the type and,
+    // because the barcode takes what the rows leave, stretch the barcode to
+    // match. Cartons of one job came out looking like different designs.
+    //
+    // With the size fixed, everything downstream is fixed too: row heights, the
+    // gaps, and the barcode all follow from the label size and the NUMBER of
+    // rows. Text that does not fit is cut (see ELLIPSIS) instead of resizing the
+    // label around itself.
+    const sharedW = Math.max(5, Math.floor(maxH * CHAR_ASPECT));
+    const TEXT_H = Math.max(10, Math.round(sharedW / CHAR_ASPECT));
     const gap = Math.max(8, Math.round(H * 0.02 * scale));
-    const slots = textRows.map((t, i) => ({ text: t, ...(i === 0 ? HEAD : DETAIL) }));
+    // Cut a row to what its own characters actually occupy, against the SAME
+    // width ^FB clips at. Measuring the string beats any character count: the
+    // count that fits depends on what the characters ARE, so "PURPLE GLOVES"
+    // and "Purple Gloves" do not fit the same number of them.
+    //
+    // Applied to every row, not just the name — a PO row for a product ordered
+    // on several POs can outrun the line too, and an ellipsis beats ^FB silently
+    // dropping the tail.
+    const fitText = (t) => {
+      if (textUnits(t) * sharedW <= textWidth) return t;
+      let s = t;
+      while (s.length > 1 && textUnits(s + ELLIPSIS) * sharedW > textWidth) s = s.slice(0, -1);
+      return s.trimEnd() + ELLIPSIS;
+    };
+    const slots = textRows.map((t) => ({ text: fitText(t), h: TEXT_H, w: sharedW, lines: 1, lead: 0 }));
     const block = (s) => s.lines * s.h + (s.lines - 1) * s.lead;
-    const rows = [...slots.map(block), epcSlot.h];
-    const textH = rows.reduce((a, b) => a + b, 0) + gap * (rows.length - 1);
+    const rows = slots.map(block);
+    const textH = rows.reduce((a, b) => a + b, 0) + gap * Math.max(0, rows.length - 1);
+    // EPC caption under the barcode: one line, as large as the width allows but
+    // never bigger than the rows above. It is width-bound, not height-bound, so
+    // it gets the label's FULL width (the rows keep a right margin to wrap in;
+    // a single unwrappable line does not need one) and only a slim advance
+    // discount — hex is uppercase and digit-heavy, so it advances much closer to
+    // the nominal cell than a lowercase-heavy row and must not overrun the edge.
+    const capWidth = Math.max(120, W - left);
+    const capW = SHOW_EPC_TEXT
+      ? Math.max(5, Math.min(Math.floor(TEXT_H * CHAR_ASPECT), Math.floor((capWidth * 0.97) / Math.max(1, textUnits(epcText)))))
+      : 0;
+    const capH = SHOW_EPC_TEXT ? Math.max(10, Math.round(capW / CHAR_ASPECT)) : 0;
     // The barcode takes whatever height is left rather than a fixed share, so it
     // runs as tall as the label allows instead of leaving the bottom empty. It
     // depends only on the rows present, so it stays the same across labels.
-    const barH = barcode ? clampInt(usable - textH - gap, 40, Math.round(H * 0.45)) : 0;
-    const stackH = textH + (barcode ? gap + barH : 0);
-    return { slots, block, epcSlot, barH, gap, stackH };
+    const capCost = SHOW_EPC_TEXT ? capH + gap : 0;
+    // Capped, not merely "whatever is left": uncapped, a label whose rows happen
+    // to be short handed the entire surplus to the barcode, which then dwarfed
+    // the text. Surplus beyond the cap becomes margin instead (the stack is
+    // centred), which reads as deliberate.
+    const barH = barcode ? clampInt(usable - textH - gap - capCost, 40, Math.round(H * 0.45)) : 0;
+    const stackH = textH + (barcode ? gap + barH : 0) + capCost;
+    return { slots, block, barH, gap, stackH, capW, capH };
   };
 
   // Shrink the WHOLE stack — never one row — until it fits inside the label's
@@ -198,20 +300,9 @@ function buildLabel(opts = {}) {
     L = plan(scale);
   }
 
-  // Largest character cell that draws `text` inside `lines` lines of `slot.h`.
-  // The 0.95 factor leaves slack for ^FB's word wrapping, which can break a line
-  // early and so needs a little more room than a raw character count implies.
-  const fitFont = (text, slot) => {
-    const maxW = Math.max(4, Math.floor(slot.h * CHAR_ASPECT));
-    const perLine = Math.max(1, Math.ceil(text.length / slot.lines));
-    const w = Math.max(5, Math.min(maxW, Math.floor((textWidth * 0.95) / perLine)));
-    return { w, h: Math.max(10, Math.round(w / CHAR_ASPECT)) };
-  };
-
-  const measured = L.slots.map((s) => ({ ...s, ...fitFont(s.text, s), block: L.block(s) }));
-  const epcFont = fitFont(epcText, L.epcSlot);
-  const epcW = epcFont.w;
-  const epcH = epcFont.h;
+  // The slots already carry the shared glyph size (see plan), so a row's box is
+  // exactly as tall as its text — no dead space to show up as a gap.
+  const measured = L.slots.map((s) => ({ ...s, block: L.block(s) }));
 
   // Barcode row (visual only; read by RFID, not laser). A Code 128's width =
   // (11·S + 13) modules; estimate S (digit pairs compress via subset C), then pick
@@ -244,9 +335,12 @@ function buildLabel(opts = {}) {
     z.push(`^FO${left},${fy(y)}^A0N,${m.h},${m.w}^FB${textWidth},${m.lines},${m.lead},L,0^FD${m.text}^FS`);
     y += m.block + gap;
   }
-  z.push(`^FO${left},${fy(y)}^A0N,${epcH},${epcW}^FD${epcText}^FS`);
-  y += L.epcSlot.h + gap;
-  if (barcode) z.push(`^FO${left},${fy(y)}^BY${mod},2,${barH}^BCN,${barH},N,N,N^FD${hex}^FS`);
+  if (barcode) {
+    z.push(`^FO${left},${fy(y)}^BY${mod},2,${barH}^BCN,${barH},N,N,N^FD${hex}^FS`);
+    y += barH + gap;
+  }
+  // The EPC, reading under the barcode it encodes.
+  if (SHOW_EPC_TEXT) z.push(`^FO${left},${fy(y)}^A0N,${L.capH},${L.capW}^FD${epcText}^FS`);
   z.push(`^PQ${qty}`);
   z.push('^XZ');
   return z.join('\n') + '\n';
