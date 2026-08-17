@@ -167,6 +167,9 @@ const { BoardFeed } = require('./board');
 const board = new BoardFeed({
   baseUrl: process.env.NEXUS_BASE_URL || deriveNexusBase(process.env.NEXUS_URL || ''),
   token: process.env.OPERATIONS_HANDHELD_TOKEN || '',
+  // Must stay under the kiosk's DOC_POLL_MS (5s) — the bridge cached for 20s
+  // precisely because the kiosk used to poll every 60s; the two move together.
+  maxAgeMs: Number(process.env.BOARD_CACHE_MS || 4000),
   log: (text, level) => controller.log(`[board] ${text}`, level),
 });
 
@@ -729,10 +732,32 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 
 wss.on('connection', (ws) => {
   controller.log(`WS client connected (${wss.clients.size} total).`);
+  ws.isAlive = true;
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
   // send a snapshot immediately
   ws.send(JSON.stringify({ type: 'status', ...controller.getStatus(), timestamp: new Date().toISOString() }));
   ws.on('close', () => controller.log(`WS client disconnected (${wss.clients.size} total).`));
 });
+
+// Heartbeat: a protocol ping to reap half-open sockets, PLUS an application
+// level {type:'ping'}. The second is required because browsers answer protocol
+// pings in the network layer and never tell page JavaScript — without it the
+// client-side silence watchdog would see a healthy socket as dead.
+const HEARTBEAT_MS = 5000;
+setInterval(() => {
+  const ping = JSON.stringify({ type: 'ping', timestamp: new Date().toISOString() });
+  for (const ws of wss.clients) {
+    if (ws.isAlive === false) {
+      ws.terminate();
+      continue;
+    }
+    ws.isAlive = false;
+    ws.ping();
+    if (ws.readyState === 1) ws.send(ping);
+  }
+}, HEARTBEAT_MS).unref();
 
 function broadcast(msg) {
   const data = JSON.stringify(msg);
@@ -775,8 +800,14 @@ server.listen(PORT, () => {
   board.start(); // warm the document cache so the first kiosk paint is instant
 
   // Refresh the catalog from the live tag registry (falls back to the cached
-  // data/catalog.json already loaded by the constructor).
+  // data/catalog.json already loaded by the constructor) — then keep refreshing
+  // periodically. A boot-only load meant cartons received after startup looked
+  // un-received and every legitimate dispatch would alarm.
   nexus.loadCatalogRemote();
+  const catalogRefreshMs = Number(process.env.NEXUS_CATALOG_REFRESH_MS ?? 120_000);
+  if (catalogRefreshMs > 0) {
+    setInterval(() => void nexus.loadCatalogRemote(), catalogRefreshMs).unref();
+  }
   try {
     controller.start();
   } catch (err) {

@@ -70,6 +70,14 @@ export interface NexusItem {
   name: string;
   pallet: string | null;
   category: string | null;
+  /** 'carton' | 'pallet' — set by the bridge catalog; absent on older bridges. */
+  kind?: 'carton' | 'pallet';
+}
+
+/** Application-level keepalive from the bridge (see server.js heartbeat). */
+export interface PingMsg {
+  type: 'ping';
+  timestamp: string;
 }
 
 export interface EntryMsg {
@@ -85,9 +93,11 @@ export interface EntryMsg {
   antennas: number[];
   reads: number;
   timestamp: string;
+  /** Exit-only objection from the bridge: 'not-received' | 'already-shipped' | null. */
+  outbound?: string | null;
 }
 
-export type WsMsg = TagMsg | GpiMsg | TriggerMsg | StatusMsg | LogMsg | UdpMsg | EntryMsg;
+export type WsMsg = TagMsg | GpiMsg | TriggerMsg | StatusMsg | LogMsg | UdpMsg | EntryMsg | PingMsg;
 
 export interface EntryRow extends Omit<EntryMsg, 'type'> {
   id: number;

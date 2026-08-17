@@ -1,7 +1,35 @@
 import { useEffect, useRef } from 'react';
-import type { EntryRow } from './types';
+import type { EntryRow, GpiState } from './types';
 import { BRIDGE_HTTP } from './api';
 import { chime, playClip } from './sound';
+
+/** One spoken line: a product's carton total, a pallet, or an unknown-item warning. */
+export interface VoiceLine {
+  exit: boolean;
+  known: boolean;
+  /** true = a pallet, announced by name with no carton count. */
+  pallet: boolean;
+  name: string;
+  count: number;
+}
+
+/**
+ * Group a buffered passage into announcement lines — one line per product,
+ * not one per carton. Pallets are never counted in cartons: each announces
+ * by name. Unknown items collapse into one warning per direction.
+ */
+export function tally(buffer: EntryRow[]): VoiceLine[] {
+  const lines = new Map<string, VoiceLine>();
+  for (const e of buffer) {
+    const exit = e.kind === 'exit';
+    const pallet = e.item?.kind === 'pallet';
+    const key = !e.known ? `unknown:${exit}` : pallet ? `pallet:${exit}:${e.item.name}:${e.epc}` : `sku:${exit}:${e.item.name}`;
+    const line = lines.get(key);
+    if (line) line.count += 1;
+    else lines.set(key, { exit, known: e.known, pallet, name: e.known ? e.item.name : '', count: 1 });
+  }
+  return [...lines.values()];
+}
 
 /**
  * Announcement text per language. Product names are NOT translated — the
@@ -9,17 +37,25 @@ import { chime, playClip } from './sound';
  * with, so the Mandarin voice reads the name verbatim after the Chinese
  * prefix ("已到达：Bunny Socks").
  */
-function phrases(e: EntryRow) {
-  const exit = e.kind === 'exit';
-  if (!e.known) {
+export function phrases(line: VoiceLine) {
+  const { exit } = line;
+  if (!line.known) {
+    const many = line.count > 1;
     return {
-      en: `Warning: unknown item ${exit ? 'left' : 'entered'} the warehouse`,
-      zh: `警告：未知物品${exit ? '离开' : '进入'}仓库`,
+      en: `Warning: ${many ? `${line.count} unknown items` : 'unknown item'} ${exit ? 'left' : 'entered'} the warehouse`,
+      zh: `警告：${many ? `${line.count}件未知物品` : '未知物品'}${exit ? '离开' : '进入'}仓库`,
     };
   }
+  if (line.pallet) {
+    return {
+      en: exit ? `Checked out: ${line.name}` : `Arrived: ${line.name}`,
+      zh: exit ? `已出库：${line.name}` : `已到达：${line.name}`,
+    };
+  }
+  const cartons = `${line.count} ${line.count === 1 ? 'carton' : 'cartons'} of ${line.name}`;
   return {
-    en: exit ? `Checked out: ${e.item.name}` : `Arrived: ${e.item.name}`,
-    zh: exit ? `已出库：${e.item.name}` : `已到达：${e.item.name}`,
+    en: exit ? `Checked out: ${cartons}` : `Arrived: ${cartons}`,
+    zh: exit ? `已出库：${line.count}箱 ${line.name}` : `已到达：${line.count}箱 ${line.name}`,
   };
 }
 
@@ -102,15 +138,22 @@ function speakLocal(text: string, lang: 'en' | 'zh', pitch: number, zhVoice: Spe
   });
 }
 
+/** How long both beams must stay clear before the buffered passage is spoken.
+ * A pallet breaks and re-makes the beams between cartons; firing on the first
+ * clear edge would fragment one run into several readouts. */
+const SETTLE_MS = 800;
+
+/** Hard flush even if the beams never read clear — a reader with no GPIO or a
+ * wiring fault must not silently disable all speech. */
+const FALLBACK_FLUSH_MS = 12_000;
+
 /**
- * Announce each new warehouse movement: a tone always, the spoken lines where
- * the browser can manage them.
+ * Announce warehouse movements: a chime per movement (immediate confirmation a
+ * tag was caught), then ONE spoken line per product once the passage is over —
+ * both beams clear for SETTLE_MS, or FALLBACK_FLUSH_MS after the first
+ * buffered movement, whichever comes first.
  *
- * The tone is not a fallback that waits to see whether speech failed — it
- * always plays, because the tone is the part that carries across a warehouse
- * and across languages. Speech, when present, adds the detail on top.
- *
- * Speech itself has two paths, tried in order per line:
+ * Speech has two paths, tried in order per line:
  *   1. Bridge TTS (GET /tts): synthesised on the bridge PC, played as an MP3
  *      through Web Audio. Works on the wallboard TV, whose browser (Edge for
  *      Android / WebView) has no speech engine of its own.
@@ -122,21 +165,44 @@ function speakLocal(text: string, lang: 'en' | 'zh', pitch: number, zhVoice: Spe
  * each other — the browser's own speech queue used to provide that ordering,
  * but fetched MP3s have no such queue, so it lives here now.
  */
-export function useVoice(entries: EntryRow[], enabled: boolean) {
-  const lastSpokenId = useRef(-1);
+export function useVoice(entries: EntryRow[], enabled: boolean, gpi: GpiState) {
+  const lastSeenId = useRef(-1);
   const zhVoice = useZhVoice();
   const queue = useRef<Promise<void>>(Promise.resolve());
+
+  // The passage buffer. Refs, not state — the flusher polls them.
+  const buffer = useRef<EntryRow[]>([]);
+  const firstBufferedAt = useRef(0);
+  const lastActivityAt = useRef(0); // last movement OR beam-broken sighting
+  const gpiRef = useRef(gpi);
+  gpiRef.current = gpi;
 
   useEffect(() => {
     if (!enabled) window.speechSynthesis?.cancel();
   }, [enabled]);
 
+  // A broken beam means the passage is still in progress — hold the flush.
+  useEffect(() => {
+    if (gpi.gpi1 === true || gpi.gpi2 === true) lastActivityAt.current = Date.now();
+  }, [gpi]);
+
+  // Chime per movement, buffer the rest for the grouped readout.
   useEffect(() => {
     if (!enabled || entries.length === 0) return;
     const newest = entries[0];
-    if (newest.id <= lastSpokenId.current) return;
-    const unspoken = entries.filter((e) => e.id > lastSpokenId.current).reverse();
-    lastSpokenId.current = newest.id;
+    if (newest.id <= lastSeenId.current) return;
+    const fresh = entries.filter((e) => e.id > lastSeenId.current).reverse();
+    lastSeenId.current = newest.id;
+
+    for (const e of fresh) chime(e.known ? 'ok' : 'alert');
+    if (buffer.current.length === 0) firstBufferedAt.current = Date.now();
+    buffer.current.push(...fresh);
+    lastActivityAt.current = Date.now();
+  }, [entries, enabled]);
+
+  // The flusher: speak the buffered passage once the doorway is quiet.
+  useEffect(() => {
+    if (!enabled) return;
 
     const say = (text: string, lang: 'en' | 'zh', pitch: number) => {
       queue.current = queue.current
@@ -152,12 +218,24 @@ export function useVoice(entries: EntryRow[], enabled: boolean) {
         .catch(() => {});
     };
 
-    for (const e of unspoken) {
-      chime(e.known ? 'ok' : 'alert');
-      const { en, zh } = phrases(e);
-      const pitch = e.known ? 1 : 0.8;
-      say(en, 'en', pitch);
-      say(zh, 'zh', pitch);
-    }
-  }, [entries, enabled]);
+    const t = setInterval(() => {
+      if (buffer.current.length === 0) return;
+      const now = Date.now();
+      const g = gpiRef.current;
+      const bothClear = g.gpi1 !== true && g.gpi2 !== true; // null (no GPIO) reads as clear
+      const settled = bothClear && now - lastActivityAt.current >= SETTLE_MS;
+      const overdue = now - firstBufferedAt.current >= FALLBACK_FLUSH_MS;
+      if (!settled && !overdue) return;
+
+      const lines = tally(buffer.current);
+      buffer.current = [];
+      for (const line of lines) {
+        const { en, zh } = phrases(line);
+        const pitch = line.known ? 1 : 0.8;
+        say(en, 'en', pitch);
+        say(zh, 'zh', pitch);
+      }
+    }, 200);
+    return () => clearInterval(t);
+  }, [enabled]);
 }

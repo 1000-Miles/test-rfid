@@ -30,9 +30,9 @@ class BoardFeed {
     this.token = opts.token || '';
     this.timeoutMs = opts.timeoutMs ?? 10_000;
     // Cache older than this triggers a background refresh on the next request.
-    // Well under the kiosk's own 60s poll, so the board is never served
-    // anything older than roughly one poll cycle.
-    this.maxAgeMs = opts.maxAgeMs ?? 20_000;
+    // Kept under the kiosk's own 5s poll (BOARD_CACHE_MS overrides), so the
+    // board is never served anything older than roughly one poll cycle.
+    this.maxAgeMs = opts.maxAgeMs ?? 4_000;
     this.log = opts.log || (() => {});
     this.lastFetchAt = null;
     this.lastError = null;

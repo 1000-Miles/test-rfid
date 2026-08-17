@@ -67,6 +67,10 @@ class PassageDetector extends EventEmitter {
     this.catalogUrl = opts.catalogUrl || ''; // Supabase project URL for the tag registry
     this.catalogKey = opts.catalogKey || ''; // Supabase key (service role or anon)
     this.catalogSource = 'file'; // 'file' | 'supabase' — where the current catalog came from
+    // Carton-state freshness gate: past this age the outbound check stops
+    // judging rather than accusing cartons received since the last refresh.
+    this.stateMaxAgeMs = opts.stateMaxAgeMs ?? 30 * 60_000;
+    this.catalogLoadedAt = 0; // ms epoch of the last successful remote load
     this.catalog = {};
     this.inventory = new Map(); // epc -> record
     this.events = []; // newest first, capped
@@ -97,37 +101,88 @@ class PassageDetector extends EventEmitter {
     return this.catalog;
   }
 
+  /** Authenticated GET against the Supabase REST API. Throws on any failure. */
+  async _sbGet(pathAndQuery) {
+    const res = await fetch(`${this.catalogUrl.replace(/\/$/, '')}/rest/v1/${pathAndQuery}`, {
+      headers: { apikey: this.catalogKey, Authorization: `Bearer ${this.catalogKey}` },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
   /**
-   * Load the catalog from Supabase `operations_label_tag` — the registry of
-   * every printed tag. On success the result also overwrites
-   * data/catalog.json so the next offline boot still knows the tags.
-   * Returns the catalog, or null when remote loading is not configured /
-   * failed (existing catalog is kept in that case).
+   * Load the catalog from Supabase — cartons AND pallets, which live in two
+   * different registries:
+   *
+   *   cartons  <- operations_label_tag  (tag column: epc)
+   *   pallets  <- warehouse_pallet      (tag column: rfid_tag)
+   *
+   * Both are merged into one catalog, each entry tagged `kind`. Carton state
+   * from warehouse_carton is folded in (`state`, `receivedAt`, `carton`) so
+   * the outbound check can flag exits. A pallet or carton-state fetch failure
+   * is non-fatal — cartons are the volume case and must not be lost with it.
+   *
+   * On success the result also overwrites data/catalog.json so the next
+   * offline boot still knows the tags. Returns the catalog, or null when
+   * remote loading is not configured / failed (existing catalog is kept).
    */
   async loadCatalogRemote() {
     if (!this.catalogUrl || !this.catalogKey) return null;
-    const url =
-      `${this.catalogUrl.replace(/\/$/, '')}/rest/v1/operations_label_tag` +
-      `?select=epc,box_id,product_code,product_name,status&order=created_at.desc&limit=10000`;
     try {
-      const res = await fetch(url, {
-        headers: { apikey: this.catalogKey, Authorization: `Bearer ${this.catalogKey}` },
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const rows = await res.json();
+      const rows = await this._sbGet(
+        `operations_label_tag?select=epc,box_id,product_code,product_name,status&order=created_at.desc&limit=10000`
+      );
       const map = {};
       for (const row of rows) {
         if (!row.epc) continue;
         map[String(row.epc).toUpperCase()] = {
+          kind: 'carton',
           sku: row.product_code || row.box_id || 'UNKNOWN-SKU',
           name: row.product_name || 'Unnamed item',
           pallet: row.box_id || null,
           category: row.status || null,
         };
       }
+
+      // Pallets — filtered server-side to tagged, non-deleted rows. Non-fatal:
+      // a missing table or column must not take the carton catalog down.
+      let palletCount = 0;
+      try {
+        const pallets = await this._sbGet(`warehouse_pallet?select=rfid_tag,name&rfid_tag=not.is.null&deleted_at=is.null&limit=10000`);
+        for (const row of pallets) {
+          if (!row.rfid_tag) continue;
+          map[String(row.rfid_tag).toUpperCase()] = {
+            kind: 'pallet',
+            sku: row.name || 'PALLET',
+            name: row.name || 'Pallet',
+            pallet: null,
+            category: 'pallet',
+          };
+          palletCount++;
+        }
+      } catch (err) {
+        this.emit('log', `pallet catalog load failed (${err.message}) — carton catalog still active`);
+      }
+
+      // Carton warehouse state, for the outbound check. Also non-fatal.
+      try {
+        const cartons = await this._sbGet(`warehouse_carton?select=epc,status,received_at,carton_no&deleted_at=is.null&limit=10000`);
+        for (const row of cartons) {
+          if (!row.epc) continue;
+          const entry = map[String(row.epc).toUpperCase()];
+          if (!entry) continue;
+          entry.state = row.status ?? null;
+          entry.receivedAt = row.received_at ?? null;
+          entry.carton = row.carton_no ?? null;
+        }
+      } catch (err) {
+        this.emit('log', `carton state load failed (${err.message}) — outbound check will stay silent`);
+      }
+
       this.catalog = map;
       this.catalogSource = 'supabase';
-      this.emit('log', `catalog loaded from Supabase: ${rows.length} tags`);
+      this.catalogLoadedAt = Date.now();
+      this.emit('log', `catalog loaded from Supabase: ${rows.length} cartons + ${palletCount} pallets = ${Object.keys(map).length} entries`);
       try {
         fs.writeFileSync(CATALOG_PATH, JSON.stringify(map, null, 2) + '\n', 'utf8');
       } catch (err) {
@@ -138,6 +193,24 @@ class PassageDetector extends EventEmitter {
       this.emit('log', `Supabase catalog load failed (${err.message}) — keeping ${Object.keys(this.catalog).length} cached entries`);
       return null;
     }
+  }
+
+  /**
+   * Should this exit raise an objection? Returns 'not-received',
+   * 'already-shipped', or null (no objection).
+   *
+   * Deliberately NOT a whitelist: an unrecognised status reads as "no
+   * objection", so adding a state in Nexus can't start alarming on every
+   * passage. Freshness-gated on stateMaxAgeMs — past that the gate stops
+   * judging rather than accusing cartons received since the last refresh.
+   */
+  _outboundCheck(entry) {
+    if (!entry || entry.kind !== 'carton') return null;
+    if (!this.catalogLoadedAt || Date.now() - this.catalogLoadedAt > this.stateMaxAgeMs) return null;
+    const state = typeof entry.state === 'string' ? entry.state.toLowerCase() : entry.state;
+    if (state === 'shipped') return 'already-shipped';
+    if (state == null) return 'not-received';
+    return null;
   }
 
   /**
@@ -265,6 +338,8 @@ class PassageDetector extends EventEmitter {
       antennas: [...new Set(p.reads.map((r) => r.ant).filter((a) => a != null))],
       reads: p.reads.length,
       timestamp,
+      // Exit-only objection: 'not-received' | 'already-shipped' | null.
+      outbound: direction === 'out' ? this._outboundCheck(known ? this.catalog[epc] : null) : null,
     };
     this.events.unshift(event);
     if (this.events.length > this.maxEvents) this.events.length = this.maxEvents;

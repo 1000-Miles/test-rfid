@@ -43,6 +43,10 @@ export function useBridge(): BridgeState {
   const idRef = useRef(0);
   const seenRef = useRef<Set<string>>(new Set());
   const recentReadTimes = useRef<number[]>([]);
+  // Raw tag reads buffered between flushes — the wallboard displays none of
+  // them individually, so rendering per read is pure waste on the TV.
+  const pendingRows = useRef<TagRow[]>([]);
+  const pendingReadCount = useRef(0);
 
   const clear = useCallback(() => {
     setRows([]);
@@ -53,6 +57,24 @@ export function useBridge(): BridgeState {
     setReadsPerSec(0);
     seenRef.current = new Set();
     recentReadTimes.current = [];
+    pendingRows.current = [];
+    pendingReadCount.current = 0;
+  }, []);
+
+  // Flush buffered tag reads every 250ms — caps the board at 4 renders/sec
+  // from raw reads regardless of reader speed. Movements are NOT buffered.
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (pendingReadCount.current === 0) return;
+      const fresh = pendingRows.current;
+      const count = pendingReadCount.current;
+      pendingRows.current = [];
+      pendingReadCount.current = 0;
+      if (fresh.length) setRows((prev) => [...fresh, ...prev].slice(0, MAX_ROWS));
+      setTotalReads((n) => n + count);
+      setUniqueEpcs(seenRef.current.size);
+    }, 250);
+    return () => clearInterval(t);
   }, []);
 
   // reads/sec: count reads within the last 1000ms, refreshed twice a second
@@ -69,8 +91,14 @@ export function useBridge(): BridgeState {
     let ws: WebSocket | null = null;
     let closed = false;
     let retry: ReturnType<typeof setTimeout> | null = null;
+    // Silence watchdog. onclose never fires on a half-open connection, and the
+    // bridge sends an application-level {type:'ping'} every 5s — so 15s with no
+    // message of any kind means the socket is dead. Reconnect goes through
+    // close() so there is only ever ONE reconnect path.
+    let lastMsgAt = Date.now();
 
     const connect = () => {
+      lastMsgAt = Date.now();
       ws = new WebSocket(BRIDGE_WS);
       ws.onopen = () => setWsConnected(true);
       ws.onclose = () => {
@@ -79,6 +107,7 @@ export function useBridge(): BridgeState {
       };
       ws.onerror = () => ws?.close();
       ws.onmessage = (ev) => {
+        lastMsgAt = Date.now();
         let msg: WsMsg;
         try {
           msg = JSON.parse(ev.data);
@@ -94,13 +123,11 @@ export function useBridge(): BridgeState {
               rssi: msg.rssi,
               timestamp: msg.timestamp,
             };
-            setRows((prev) => [row, ...prev].slice(0, MAX_ROWS));
-            setTotalReads((n) => n + 1);
+            // Buffered — flushed by the 250ms interval, not rendered per read.
+            pendingRows.current.unshift(row);
+            pendingReadCount.current += 1;
             recentReadTimes.current.push(Date.now());
-            if (!seenRef.current.has(msg.epc)) {
-              seenRef.current.add(msg.epc);
-              setUniqueEpcs(seenRef.current.size);
-            }
+            seenRef.current.add(msg.epc);
             break;
           }
           case 'udp': {
@@ -136,9 +163,16 @@ export function useBridge(): BridgeState {
             setEntries((prev) => [row, ...prev].slice(0, 100));
             break;
           }
-          case 'gpi':
-            setGpi({ gpi1: msg.gpi1, gpi2: msg.gpi2, raw: msg.raw });
+          case 'gpi': {
+            // The bridge reports every beam poll (~5/s), changed or not.
+            // Returning the same reference when nothing changed lets React
+            // bail out of the re-render entirely.
+            const { gpi1, gpi2, raw } = msg;
+            setGpi((prev) => (prev.gpi1 === gpi1 && prev.gpi2 === gpi2 && prev.raw === raw ? prev : { gpi1, gpi2, raw }));
             break;
+          }
+          case 'ping':
+            break; // keepalive — lastMsgAt already updated above
           case 'trigger':
             setLastTriggerAt(Date.now());
             break;
@@ -161,8 +195,14 @@ export function useBridge(): BridgeState {
     };
 
     connect();
+    const watchdog = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN && Date.now() - lastMsgAt > 15_000) {
+        ws.close(); // onclose schedules the reconnect
+      }
+    }, 5_000);
     return () => {
       closed = true;
+      clearInterval(watchdog);
       if (retry) clearTimeout(retry);
       ws?.close();
     };

@@ -217,11 +217,13 @@ export const activeDocs = (docs: GateDoc[], dir: Direction) =>
 /* --------------------------------------------------------------- storage */
 
 /**
- * How often the kiosk re-pulls documents. 60s is well inside the time it takes
- * anyone to walk a new batch to the door, and it is two cheap reads against
- * Nexus per minute per screen.
+ * How often the kiosk re-pulls documents. 5s keeps the board within one
+ * breath of Nexus's own numbers. Moves together with the bridge's
+ * BOARD_CACHE_MS (4s) — a longer bridge cache would just re-serve the same
+ * payload. Cost: ~12 requests/min per screen; BOARD_CACHE_MS is the knob if
+ * screens are added.
  */
-const DOC_POLL_MS = 60_000;
+const DOC_POLL_MS = 5_000;
 
 // v2: `counted` is now direction-scoped and the overlay moved from a
 // docId-keyed credit map to a retiring `pending` list. v1 state is incompatible
@@ -430,6 +432,13 @@ export function useGateBoard(entries: EntryRow[]): GateBoardApi {
   const current = useRef(board);
   // Guards against overlapping fetches when the bridge is slower than the poll.
   const inFlight = useRef(false);
+  // Cold-start hold: a movement arriving before the first document fetch
+  // returns has no card to credit and would be filed as an exception forever.
+  // Only engaged when the board is GENUINELY empty — a reload restores docs
+  // from localStorage, and that path keeps its instant credit.
+  const holding = useRef(board.docs.length === 0 && board.pool.length === 0);
+  const held = useRef<EntryRow[]>([]);
+  const HELD_CAP = 200;
   const commit = useCallback((next: BoardState) => {
     current.current = next;
     setBoard(next);
@@ -437,27 +446,56 @@ export function useGateBoard(entries: EntryRow[]): GateBoardApi {
 
   useEffect(() => saveBoard(board), [board]);
 
+  const applyEntries = useCallback(
+    (rows: EntryRow[]) => {
+      if (rows.length === 0) return;
+      // entries arrive newest-first; replay them in the order they happened
+      let next = current.current;
+      const outcomes: CountOutcome[] = [];
+      for (const entry of [...rows].reverse()) {
+        const result = applyMovement(next, entry);
+        next = result.state;
+        outcomes.push(result.outcome);
+      }
+      commit(next);
+
+      for (const outcome of outcomes) {
+        if (outcome.kind === 'counted') setLastCounted({ docId: outcome.docId, sku: outcome.sku, name: outcome.name, dir: outcome.dir, seq: ++seq.current });
+        else if (outcome.kind === 'unknown') setFlashTag(outcome.tag);
+        else setDupMsg(outcome.message);
+      }
+    },
+    [commit]
+  );
+
+  /** Let held movements through — the cards exist now (or never will). */
+  const releaseHold = useCallback(() => {
+    if (!holding.current) return;
+    holding.current = false;
+    const rows = held.current;
+    held.current = [];
+    applyEntries(rows);
+  }, [applyEntries]);
+
   useEffect(() => {
     const fresh = entries.filter((e) => e.id > appliedTo.current);
     if (fresh.length === 0) return;
     appliedTo.current = Math.max(...fresh.map((e) => e.id));
 
-    // entries arrive newest-first; replay them in the order they happened
-    let next = current.current;
-    const outcomes: CountOutcome[] = [];
-    for (const entry of [...fresh].reverse()) {
-      const result = applyMovement(next, entry);
-      next = result.state;
-      outcomes.push(result.outcome);
+    if (holding.current) {
+      // Newest-first, like `entries` — applyEntries reverses on release.
+      held.current = [...fresh, ...held.current].slice(0, HELD_CAP);
+      return;
     }
-    commit(next);
+    applyEntries(fresh);
+  }, [entries, applyEntries]);
 
-    for (const outcome of outcomes) {
-      if (outcome.kind === 'counted') setLastCounted({ docId: outcome.docId, sku: outcome.sku, name: outcome.name, dir: outcome.dir, seq: ++seq.current });
-      else if (outcome.kind === 'unknown') setFlashTag(outcome.tag);
-      else setDupMsg(outcome.message);
-    }
-  }, [entries, commit]);
+  // Backstop: a first fetch that neither resolves nor rejects must not hold
+  // movements hostage forever.
+  useEffect(() => {
+    const t = setTimeout(releaseHold, 10_000);
+    return () => clearTimeout(t);
+  }, [releaseHold]);
 
   useEffect(() => {
     if (!flashTag) return;
@@ -516,9 +554,12 @@ export function useGateBoard(entries: EntryRow[]): GateBoardApi {
         setFeed({ status: 'error', fetchedAt: null, error: err instanceof Error ? err.message : 'load failed' });
       } finally {
         inFlight.current = false;
+        // In `finally`, so a FAILED fetch still lets held movements through to
+        // the same exception path as before. Nothing is silently dropped.
+        releaseHold();
       }
     },
-    [commit]
+    [commit, releaseHold]
   );
 
   // A document created in Nexus mid-shift has to reach a kiosk nobody is
