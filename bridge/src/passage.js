@@ -36,11 +36,25 @@
  *     swallowed.
  *
  * Other behaviour:
- *   - Catalog lookup: loaded from Supabase `operations_label_tag` (the real
- *     printed-tag registry: EPC -> product_code/product_name/box_id) when
- *     `catalogUrl`+`catalogKey` are set; each successful load is cached to
- *     data/catalog.json so offline boots still know the tags. Unknown EPCs
- *     are auto-registered as unknown items (still tracked).
+ *   - Catalog lookup: loaded from Supabase when `catalogUrl`+`catalogKey` are
+ *     set, from THREE registries because cartons and pallets are tracked
+ *     separately and carton STATE is tracked separately again —
+ *     `operations_label_tag` (printed carton tags: EPC ->
+ *     product_code/product_name/box_id), `warehouse_pallet` (pallet tags,
+ *     under `rfid_tag` -> code/status), and `warehouse_carton` (whether the
+ *     carton behind a tag is actually in the building: state/receivedAt).
+ *     Entries carry `kind: 'carton'|'pallet'` so downstream can tell them
+ *     apart. Each successful load is cached to data/catalog.json so offline
+ *     boots still know the tags. Unknown EPCs are auto-registered as unknown
+ *     items (still tracked).
+ *   - Outbound sanity check: an exit whose carton Nexus says was never
+ *     received, or has already shipped, is stamped `unexpected: <reason>`.
+ *     Such an exit is still reported and still journaled — it physically
+ *     happened — but it is not presented as a dispatch: it does not move the
+ *     local exit tally, the board files it as an exception instead of
+ *     crediting a shipment line, and the voice warns instead of confirming.
+ *     See _outboundCheck for why the check is a blacklist and why it goes
+ *     quiet rather than guessing when the state data is stale.
  *   - In-memory live view: epc -> { item, status: 'INSIDE'|'OUTSIDE', ... }.
  *     This is a LOCAL DISPLAY CONVENIENCE for the dashboard/TV board only — it
  *     resets on restart and is not a record of anything. Nexus owns warehouse
@@ -48,7 +62,8 @@
  *
  * Emits 'movement' events:
  *   { type: 'entry'|'exit', direction: 'in'|'out', method: 'ir',
- *     epc, known, item, location, timestamp, antennas: number[] }.
+ *     epc, known, item, location, timestamp, antennas: number[],
+ *     unexpected: null | 'not-received' | 'already-shipped' }.
  */
 
 const fs = require('fs');
@@ -67,6 +82,12 @@ class PassageDetector extends EventEmitter {
     this.catalogUrl = opts.catalogUrl || ''; // Supabase project URL for the tag registry
     this.catalogKey = opts.catalogKey || ''; // Supabase key (service role or anon)
     this.catalogSource = 'file'; // 'file' | 'supabase' — where the current catalog came from
+    // Carton warehouse state is only trusted while it is FRESH — see
+    // _outboundCheck. Stale state produces false alarms on cartons received
+    // since the last refresh, so past this age the gate stops judging and goes
+    // back to reporting the passage without a verdict.
+    this.stateMaxAgeMs = opts.stateMaxAgeMs ?? 30 * 60_000;
+    this._cartonStateAt = null; // ms epoch of the last successful warehouse_carton read
     this.catalog = {};
     this.inventory = new Map(); // epc -> record
     this.events = []; // newest first, capped
@@ -106,28 +127,106 @@ class PassageDetector extends EventEmitter {
    */
   async loadCatalogRemote() {
     if (!this.catalogUrl || !this.catalogKey) return null;
-    const url =
-      `${this.catalogUrl.replace(/\/$/, '')}/rest/v1/operations_label_tag` +
-      `?select=epc,box_id,product_code,product_name,status&order=created_at.desc&limit=10000`;
+    const base = this.catalogUrl.replace(/\/$/, '');
+    const headers = { apikey: this.catalogKey, Authorization: `Bearer ${this.catalogKey}` };
     try {
-      const res = await fetch(url, {
-        headers: { apikey: this.catalogKey, Authorization: `Bearer ${this.catalogKey}` },
-      });
+      const map = {};
+
+      // Cartons — the printed-label registry, keyed by `epc`.
+      const cartonUrl =
+        `${base}/rest/v1/operations_label_tag` +
+        `?select=epc,box_id,product_code,product_name,status&order=created_at.desc&limit=10000`;
+      const res = await fetch(cartonUrl, { headers });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const rows = await res.json();
-      const map = {};
       for (const row of rows) {
         if (!row.epc) continue;
         map[String(row.epc).toUpperCase()] = {
+          kind: 'carton',
           sku: row.product_code || row.box_id || 'UNKNOWN-SKU',
           name: row.product_name || 'Unnamed item',
           pallet: row.box_id || null,
           category: row.status || null,
         };
       }
+
+      // Pallets are a SEPARATE registry: warehouse_pallet, and the tag column is
+      // `rfid_tag`, not `epc`. Nothing links the two tables, so a second fetch is
+      // the only way a BA01 tag resolves — without it every pallet crossing the
+      // gate reads as "Unregistered item" even though Nexus knows it perfectly
+      // well. Soft-deleted rows and untagged pallets are filtered server-side.
+      //
+      // Failure here is deliberately non-fatal: cartons are the volume case and
+      // must not be lost because the pallet table was briefly unavailable.
+      let pallets = 0;
+      try {
+        const palletUrl = `${base}/rest/v1/warehouse_pallet?select=code,rfid_tag,status&rfid_tag=not.is.null&deleted_at=is.null`;
+        const pres = await fetch(palletUrl, { headers });
+        if (!pres.ok) throw new Error(`HTTP ${pres.status}`);
+        for (const row of await pres.json()) {
+          const tag = String(row.rfid_tag || '').toUpperCase();
+          if (!tag) continue;
+          // A pallet has no SKU. `code` stands in for both the display name and
+          // the pallet field so the board has something meaningful to print.
+          const code = row.code || 'Unnamed pallet';
+          map[tag] = { kind: 'pallet', sku: code, name: code, pallet: code, category: row.status || null };
+          pallets += 1;
+        }
+      } catch (err) {
+        this.emit('log', `pallet registry load failed (${err.message}) — pallet tags will read as unregistered`);
+      }
+
+      // Carton WAREHOUSE state, from a THIRD registry: warehouse_carton. The
+      // label registry above only says a tag was printed; this one says whether
+      // the carton it names is actually in the building, and it is the only
+      // answer to "was this ever received?" that does not depend on this
+      // process having been running at the time.
+      //
+      // A row is created when a carton is RECEIVED, so the absence of a row is
+      // itself the signal: printed but never taken in. That is why this loop
+      // annotates rather than registers — a tag with no row keeps its label
+      // entry and gains no state, which _outboundCheck reads as not-received.
+      //
+      // Ordered created_at ASCENDING on purpose. rfid_tag is NOT unique here:
+      // the same physical tag is re-used on a later carton, so a tag can own
+      // several rows. Soft-deleted rows are filtered server-side, which today
+      // happens to leave one live row per tag — but nothing in the schema
+      // guarantees that, and if two ever survive, ascending order means the
+      // last write wins and the newest row is the tag's current life. Any other
+      // order could resurrect a carton that has already left.
+      const withState = new Set(); // distinct tags, not rows — a tag can own several
+      try {
+        const stateUrl =
+          `${base}/rest/v1/warehouse_carton` +
+          `?select=code,rfid_tag,status,received_at,created_at&rfid_tag=not.is.null&deleted_at=is.null` +
+          `&order=created_at.asc&limit=20000`;
+        const sres = await fetch(stateUrl, { headers });
+        if (!sres.ok) throw new Error(`HTTP ${sres.status}`);
+        for (const row of await sres.json()) {
+          const tag = String(row.rfid_tag || '').toUpperCase();
+          const entry = map[tag];
+          // Pallet tags share the namespace and have their own lifecycle; only
+          // carton entries carry carton state.
+          if (!entry || entry.kind !== 'carton') continue;
+          entry.state = row.status || null;
+          entry.receivedAt = row.received_at || null;
+          entry.carton = row.code || null;
+          withState.add(tag);
+        }
+        this._cartonStateAt = Date.now();
+      } catch (err) {
+        // Non-fatal, same stance as the pallet registry: without state the gate
+        // reports passages exactly as it did before, just without a verdict.
+        this._cartonStateAt = null;
+        this.emit('log', `carton state load failed (${err.message}) — outbound passages will not be checked`);
+      }
+
       this.catalog = map;
       this.catalogSource = 'supabase';
-      this.emit('log', `catalog loaded from Supabase: ${rows.length} tags`);
+      this.emit(
+        'log',
+        `catalog loaded from Supabase: ${rows.length} carton tags (${withState.size} with a warehouse record), ${pallets} pallet tags`
+      );
       try {
         fs.writeFileSync(CATALOG_PATH, JSON.stringify(map, null, 2) + '\n', 'utf8');
       } catch (err) {
@@ -138,6 +237,33 @@ class PassageDetector extends EventEmitter {
       this.emit('log', `Supabase catalog load failed (${err.message}) — keeping ${Object.keys(this.catalog).length} cached entries`);
       return null;
     }
+  }
+
+  /**
+   * Is this carton entitled to leave?
+   *
+   * Returns a reason code when an OUTBOUND passage contradicts what Nexus knows
+   * about the carton, or null when the passage is unremarkable — including when
+   * the gate simply cannot tell, which is not the same as "fine" but must be
+   * treated as such: refusing to report a passage the gate is unsure about
+   * would lose a movement that physically happened.
+   *
+   *   'not-received'    a printed tag with no warehouse_carton row — the carton
+   *                     was never taken in, so it cannot be going out
+   *   'already-shipped' the tag's current carton is already shipped; whatever
+   *                     just left, it is not that carton leaving again
+   *
+   * Deliberately NOT a whitelist of good states: the status enum lives in Nexus
+   * and can grow, and an unrecognised state must read as "no objection" rather
+   * than alarming on every passage the day a new state is added.
+   */
+  _outboundCheck(item) {
+    if (!item || item.kind !== 'carton') return null; // pallets have their own lifecycle
+    if (!this._cartonStateAt) return null; // state never loaded — nothing to check against
+    if (Date.now() - this._cartonStateAt > this.stateMaxAgeMs) return null; // too stale to accuse
+    if (!item.receivedAt && !item.state) return 'not-received';
+    if (item.state === 'shipped') return 'already-shipped';
+    return null;
   }
 
   /**
@@ -240,6 +366,16 @@ class PassageDetector extends EventEmitter {
       ? this.catalog[epc]
       : { sku: `UNKNOWN-${String(++this._unknownSeq).padStart(3, '0')}`, name: 'Unregistered item', pallet: null, category: null };
 
+    // An outbound passage that Nexus's own records contradict. The passage is
+    // still reported — it physically happened and the record of it is the whole
+    // point — but it is stamped so nothing downstream mistakes it for a clean
+    // dispatch: the board files it as an exception instead of crediting a
+    // shipment line, and the voice warns instead of confirming.
+    const unexpected = direction === 'out' && known ? this._outboundCheck(item) : null;
+    if (unexpected) {
+      this.emit('log', `UNEXPECTED OUT: ${epc} (${item.sku}) — ${unexpected}; reported but not counted as shipped`);
+    }
+
     const timestamp = new Date(now).toISOString();
     let rec = rec0;
     if (!rec) {
@@ -248,8 +384,11 @@ class PassageDetector extends EventEmitter {
     }
     rec.status = direction === 'in' ? 'INSIDE' : 'OUTSIDE';
     rec.lastSeen = timestamp;
+    // A contested exit is not a dispatch, so it does not move the local tally
+    // the TV board counts. Status still goes OUTSIDE: whatever the paperwork
+    // says, the thing is no longer in the building.
     if (direction === 'in') rec.entries += 1;
-    else rec.exits = (rec.exits || 0) + 1;
+    else if (!unexpected) rec.exits = (rec.exits || 0) + 1;
 
     const strongest = p.reads.reduce((a, b) => ((b.rssi ?? -999) > (a.rssi ?? -999) ? b : a));
     const event = {
@@ -264,6 +403,11 @@ class PassageDetector extends EventEmitter {
       antenna: strongest.ant,
       antennas: [...new Set(p.reads.map((r) => r.ant).filter((a) => a != null))],
       reads: p.reads.length,
+      // null on every ordinary passage; a reason code when this exit
+      // contradicts Nexus's record of the carton. Nexus's ingest is free to
+      // ignore it (it owns the decision), but the field means the gate no
+      // longer reports a contested exit as though it were a clean one.
+      unexpected,
       timestamp,
     };
     this.events.unshift(event);

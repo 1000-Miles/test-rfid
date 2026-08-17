@@ -66,11 +66,29 @@ export interface UdpMsg {
 }
 
 export interface NexusItem {
+  /** Which registry resolved this tag. Absent on unknown tags and on catalog
+   *  entries cached before the pallet lookup existed. */
+  kind?: 'carton' | 'pallet';
   sku: string;
   name: string;
   pallet: string | null;
   category: string | null;
+  /**
+   * Carton state from `warehouse_carton` — whether the carton behind this tag is
+   * actually in the building. Absent on pallets, on unknown tags, and on any
+   * carton with no warehouse row at all (printed but never received).
+   */
+  state?: string | null;
+  receivedAt?: string | null;
+  /** The warehouse carton code this tag currently belongs to. Tags are reused. */
+  carton?: string | null;
 }
+
+/**
+ * Why an outbound passage contradicts Nexus's record of the carton. Decided by
+ * the bridge (passage.js `_outboundCheck`), null on every ordinary passage.
+ */
+export type OutboundFault = 'not-received' | 'already-shipped';
 
 export interface EntryMsg {
   type: 'entry' | 'exit';
@@ -84,10 +102,22 @@ export interface EntryMsg {
   antenna: number | null;
   antennas: number[];
   reads: number;
+  /**
+   * Set only on a contested exit. The movement is real and was reported anyway;
+   * this says it must not be treated as a dispatch. Optional because a bridge
+   * older than this field simply omits it.
+   */
+  unexpected?: OutboundFault | null;
   timestamp: string;
 }
 
-export type WsMsg = TagMsg | GpiMsg | TriggerMsg | StatusMsg | LogMsg | UdpMsg | EntryMsg;
+/** Server heartbeat. Carries nothing — its arrival IS the payload. */
+export interface PingMsg {
+  type: 'ping';
+  timestamp: string;
+}
+
+export type WsMsg = TagMsg | GpiMsg | TriggerMsg | StatusMsg | LogMsg | UdpMsg | EntryMsg | PingMsg;
 
 export interface EntryRow extends Omit<EntryMsg, 'type'> {
   id: number;

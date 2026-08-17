@@ -25,7 +25,7 @@
  * ─────────────────────────────────────────────────────────────────────────
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { EntryRow } from './types';
+import type { EntryRow, OutboundFault } from './types';
 import { BRIDGE_HTTP } from './api';
 
 export type Direction = 'in' | 'out';
@@ -217,11 +217,33 @@ export const activeDocs = (docs: GateDoc[], dir: Direction) =>
 /* --------------------------------------------------------------- storage */
 
 /**
- * How often the kiosk re-pulls documents. 60s is well inside the time it takes
- * anyone to walk a new batch to the door, and it is two cheap reads against
- * Nexus per minute per screen.
+ * How often the kiosk re-pulls documents.
+ *
+ * This is also the board's recovery time for anything the LOCAL count does not
+ * credit — most obviously a repeat scan, which is suppressed here as a
+ * duplicate but still counted by Nexus (see applyMovement). At 60s that
+ * divergence read as "the board is broken, then fixes itself a minute later";
+ * at 5s it closes almost immediately.
+ *
+ * The bridge caches board responses (BoardFeed.maxAgeMs) and MUST be kept below
+ * this interval, or the extra polls just re-serve the same cached payload and
+ * buy nothing. The two values are a pair — change one, change the other.
  */
-const DOC_POLL_MS = 60_000;
+const DOC_POLL_MS = 5_000;
+
+/**
+ * Longest a movement is held waiting for the first document fetch.
+ *
+ * The hold exists for one narrow case — see the cold-start branch in
+ * useGateBoard — but it must never become a way to lose movements outright. If
+ * the fetch hangs rather than failing, this releases what is held and lets it
+ * fall through to the normal (exception) path, which is exactly what would have
+ * happened without the hold.
+ */
+const COLD_START_HOLD_MAX_MS = 10_000;
+
+/** Ceiling on held movements, so a stalled fetch can't grow the buffer forever. */
+const MAX_DEFERRED = 200;
 
 // v2: `counted` is now direction-scoped and the overlay moved from a
 // docId-keyed credit map to a retiring `pending` list. v1 state is incompatible
@@ -323,7 +345,15 @@ export type CountOutcome =
   | { kind: 'counted'; docId: string; dir: Direction; sku: string; name: string }
   | { kind: 'duplicate'; message: string }
   | { kind: 'complete'; message: string }
-  | { kind: 'unknown'; tag: string };
+  | { kind: 'unknown'; tag: string }
+  /** A contested exit: reported, filed as an exception, credited to nothing. */
+  | { kind: 'fault'; tag: string; fault: OutboundFault; message: string };
+
+/** What the board writes in the exceptions list for each outbound fault. */
+const FAULT_NOTE: Record<OutboundFault, string> = {
+  'not-received': 'Left the warehouse but was never received in',
+  'already-shipped': 'Left the warehouse but is already marked shipped',
+};
 
 /**
  * Credit one gate movement to the best-matching open document line.
@@ -337,6 +367,29 @@ export function applyMovement(state: BoardState, entry: EntryRow): { state: Boar
   // as a duplicate.
   const countedKey = `${dir}:${epc}`;
 
+  const file = (tag: string, note: string): BoardState => ({
+    ...state,
+    exceptions: [{ id: Date.now() + Math.floor(Math.random() * 1000), tag, note, at: hhmm() }, ...state.exceptions].slice(0, 100),
+  });
+
+  // CONTESTED EXIT, checked before anything else.
+  //
+  // The bridge has already compared this carton against Nexus's own records and
+  // found that it never came in, or that it has already shipped. No document
+  // may be credited for it whatever else is true — in particular not because
+  // some open shipment happens to list the same SKU, which is all the matching
+  // below can actually establish.
+  //
+  // It is also deliberately checked ahead of the duplicate guard: `counted`
+  // exists to stop double-crediting, and letting it swallow a fault would mean
+  // the second time a shipped carton walked out the door, nobody heard about it.
+  const fault = dir === 'out' ? entry.unexpected : null;
+  if (fault) {
+    const sku = resolveSku(entry);
+    const tag = sku ? `${epc} · ${sku}` : epc;
+    return { state: file(tag, FAULT_NOTE[fault]), outcome: { kind: 'fault', tag, fault, message: FAULT_NOTE[fault] } };
+  }
+
   if (state.counted.includes(countedKey)) {
     const sku = resolveSku(entry);
     const what = dir === 'in' ? 'received' : 'shipped';
@@ -345,8 +398,7 @@ export function applyMovement(state: BoardState, entry: EntryRow): { state: Boar
 
   const sku = resolveSku(entry);
   if (!sku) {
-    const exception: GateException = { id: Date.now() + Math.floor(Math.random() * 1000), tag: epc, note: 'No matching PO or shipment on today’s board', at: hhmm() };
-    return { state: { ...state, exceptions: [exception, ...state.exceptions].slice(0, 100) }, outcome: { kind: 'unknown', tag: epc } };
+    return { state: file(epc, 'No matching PO or shipment on today’s board'), outcome: { kind: 'unknown', tag: epc } };
   }
 
   // Overdue documents get filled first, then due-today, in board order.
@@ -358,8 +410,11 @@ export function applyMovement(state: BoardState, entry: EntryRow): { state: Boar
     if (onBoard) {
       return { state: { ...state, counted: [...state.counted, countedKey] }, outcome: { kind: 'complete', message: `${sku} · every open line already complete` } };
     }
-    const exception: GateException = { id: Date.now() + Math.floor(Math.random() * 1000), tag: `${epc} · ${sku}`, note: `${sku} is not expected ${dir === 'in' ? 'inbound' : 'outbound'} today`, at: hhmm() };
-    return { state: { ...state, exceptions: [exception, ...state.exceptions].slice(0, 100) }, outcome: { kind: 'unknown', tag: `${epc} · ${sku}` } };
+    const tag = `${epc} · ${sku}`;
+    return {
+      state: file(tag, `${sku} is not expected ${dir === 'in' ? 'inbound' : 'outbound'} today`),
+      outcome: { kind: 'unknown', tag },
+    };
   }
 
   let creditedName = sku;
@@ -430,6 +485,10 @@ export function useGateBoard(entries: EntryRow[]): GateBoardApi {
   const current = useRef(board);
   // Guards against overlapping fetches when the bridge is slower than the poll.
   const inFlight = useRef(false);
+  // Movements that crossed the gate before the first document fetch answered,
+  // plus whether that fetch has finished (either way).
+  const deferred = useRef<EntryRow[]>([]);
+  const firstLoadSettled = useRef(false);
   const commit = useCallback((next: BoardState) => {
     current.current = next;
     setBoard(next);
@@ -437,27 +496,77 @@ export function useGateBoard(entries: EntryRow[]): GateBoardApi {
 
   useEffect(() => saveBoard(board), [board]);
 
+  /** Surface what a batch of movements did — the toast, the flash, the follow. */
+  const announce = useCallback((outcomes: CountOutcome[]) => {
+    for (const outcome of outcomes) {
+      if (outcome.kind === 'counted') setLastCounted({ docId: outcome.docId, sku: outcome.sku, name: outcome.name, dir: outcome.dir, seq: ++seq.current });
+      // A fault takes the same banner as an unrecognised tag, not the toast: it
+      // is the loud path, and a contested exit is exactly as urgent as a tag
+      // nobody can identify.
+      else if (outcome.kind === 'unknown' || outcome.kind === 'fault') setFlashTag(outcome.tag);
+      else setDupMsg(outcome.message);
+    }
+  }, []);
+
+  /** Fold a batch of movements into the board, in the order they happened. */
+  const fold = useCallback(
+    (ordered: EntryRow[]) => {
+      if (!ordered.length) return;
+      let next = current.current;
+      const outcomes: CountOutcome[] = [];
+      for (const entry of ordered) {
+        const result = applyMovement(next, entry);
+        next = result.state;
+        outcomes.push(result.outcome);
+      }
+      commit(next);
+      announce(outcomes);
+    },
+    [commit, announce]
+  );
+
+  /** Release anything held during the cold start. Safe to call more than once. */
+  const releaseDeferred = useCallback(() => {
+    const held = deferred.current;
+    deferred.current = [];
+    fold(held);
+  }, [fold]);
+
   useEffect(() => {
     const fresh = entries.filter((e) => e.id > appliedTo.current);
     if (fresh.length === 0) return;
     appliedTo.current = Math.max(...fresh.map((e) => e.id));
-
     // entries arrive newest-first; replay them in the order they happened
-    let next = current.current;
-    const outcomes: CountOutcome[] = [];
-    for (const entry of [...fresh].reverse()) {
-      const result = applyMovement(next, entry);
-      next = result.state;
-      outcomes.push(result.outcome);
-    }
-    commit(next);
+    const ordered = [...fresh].reverse();
 
-    for (const outcome of outcomes) {
-      if (outcome.kind === 'counted') setLastCounted({ docId: outcome.docId, sku: outcome.sku, name: outcome.name, dir: outcome.dir, seq: ++seq.current });
-      else if (outcome.kind === 'unknown') setFlashTag(outcome.tag);
-      else setDupMsg(outcome.message);
+    // COLD START. With no documents yet there is no line to credit, so a
+    // movement here would be filed as "not expected today" and stay that way —
+    // applyMovement has no memory, and this entry id is never revisited. Hold it
+    // until the cards exist instead.
+    //
+    // Only when the board is genuinely empty: a reload restores docs from
+    // localStorage, and delaying those movements would add latency to the
+    // common path to fix a case that cannot occur there.
+    if (!firstLoadSettled.current && current.current.docs.length === 0) {
+      deferred.current.push(...ordered);
+      if (deferred.current.length > MAX_DEFERRED) deferred.current = deferred.current.slice(-MAX_DEFERRED);
+      return;
     }
-  }, [entries, commit]);
+
+    fold(ordered);
+  }, [entries, fold]);
+
+  // Backstop: release on a timer if the first fetch neither resolves nor
+  // rejects. Holding forever would turn a hung request into lost movements,
+  // which is worse than the misfiling this whole mechanism exists to prevent.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (firstLoadSettled.current) return;
+      firstLoadSettled.current = true;
+      releaseDeferred();
+    }, COLD_START_HOLD_MAX_MS);
+    return () => clearTimeout(t);
+  }, [releaseDeferred]);
 
   useEffect(() => {
     if (!flashTag) return;
@@ -516,9 +625,17 @@ export function useGateBoard(entries: EntryRow[]): GateBoardApi {
         setFeed({ status: 'error', fetchedAt: null, error: err instanceof Error ? err.message : 'load failed' });
       } finally {
         inFlight.current = false;
+        // Whatever the outcome, the cold start is over: on success the cards are
+        // now in place and the held movements land on them; on failure they take
+        // the same exception path they would have taken anyway. Held movements
+        // are never silently dropped.
+        if (!firstLoadSettled.current) {
+          firstLoadSettled.current = true;
+          releaseDeferred();
+        }
       }
     },
-    [commit]
+    [commit, releaseDeferred]
   );
 
   // A document created in Nexus mid-shift has to reach a kiosk nobody is

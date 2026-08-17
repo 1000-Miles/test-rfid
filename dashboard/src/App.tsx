@@ -86,7 +86,7 @@ export default function App() {
       localStorage.setItem('voiceMuted', next ? '0' : '1');
       return next;
     });
-  useVoice(bridge.entries, voiceOn);
+  useVoice(bridge.entries, voiceOn, bridge.gpi);
   const sound = useAudioGate(voiceOn);
 
   if (route === 'tv') return <TvBoard bridge={bridge} onExit={() => navigate(ROUTES.gate)} />;

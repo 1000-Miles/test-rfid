@@ -1,25 +1,117 @@
 import { useEffect, useRef } from 'react';
-import type { EntryRow } from './types';
+import type { EntryRow, GpiState, OutboundFault } from './types';
 import { BRIDGE_HTTP } from './api';
 import { chime, playClip } from './sound';
+
+/**
+ * How long both beams must stay clear before the tally is read out. A pallet
+ * passing the gate breaks and re-makes the beams several times as the gaps
+ * between cartons go through, so announcing on the first clear edge would cut
+ * the run into fragments and read each one separately.
+ */
+const GATE_CLEAR_SETTLE_MS = 800;
+
+/**
+ * Speak anyway after this long, even if the gate never reports clear.
+ *
+ * Without it the board goes permanently mute on two real configurations: a
+ * desktop reader with no GPIO (gpi is null forever), and a gate whose beams
+ * are stuck reading broken — a wiring fault that would otherwise be silent,
+ * because "nothing announced" looks identical to "nothing passed".
+ */
+const FLUSH_FALLBACK_MS = 12000;
+
+/** One line of the announcement: a product, and how many of it went through. */
+interface Tally {
+  kind: 'entry' | 'exit';
+  known: boolean;
+  isPallet: boolean;
+  name: string;
+  count: number;
+  /** Set when the bridge found this exit contradicted Nexus's own records. */
+  fault: OutboundFault | null;
+}
+
+/**
+ * Collapse a passage into one line per product.
+ *
+ * Cartons of the same product are summed rather than listed, which is the
+ * whole point: twenty cartons off one pallet is "twenty cartons of X", not
+ * twenty separate announcements the board is still working through long after
+ * the forklift has gone.
+ *
+ * Grouping keeps first-seen order so the readout matches the order things
+ * actually crossed, and splits on direction — a load being unloaded while
+ * another is dispatched must not merge into one count.
+ */
+function tally(entries: EntryRow[]): Tally[] {
+  const out: Tally[] = [];
+  const index = new Map<string, Tally>();
+  for (const e of entries) {
+    const isPallet = e.item?.kind === 'pallet';
+    const name = e.known ? e.item.name : '';
+    // Contested exits group SEPARATELY from clean ones, by fault. Folding them
+    // together would average a warning into a confirmation: three cartons out,
+    // one of which should not have left, must not be read as "three cartons
+    // checked out".
+    const fault = (e.kind === 'exit' && e.unexpected) || null;
+    const key = `${e.kind}|${fault ?? '-'}|${e.known ? (isPallet ? 'p' : 'c') + ':' + name : 'unknown'}`;
+    const hit = index.get(key);
+    if (hit) {
+      hit.count += 1;
+      continue;
+    }
+    const row: Tally = { kind: e.kind, known: e.known, isPallet, name, count: 1, fault };
+    index.set(key, row);
+    out.push(row);
+  }
+  return out;
+}
 
 /**
  * Announcement text per language. Product names are NOT translated — the
  * catalog stores them in English and there is nothing here to translate them
  * with, so the Mandarin voice reads the name verbatim after the Chinese
- * prefix ("已到达：Bunny Socks").
+ * prefix ("已到达：Bunny Socks 12 箱").
  */
-function phrases(e: EntryRow) {
-  const exit = e.kind === 'exit';
-  if (!e.known) {
+function phrases(t: Tally) {
+  const exit = t.kind === 'exit';
+  if (!t.known) {
     return {
-      en: `Warning: unknown item ${exit ? 'left' : 'entered'} the warehouse`,
-      zh: `警告：未知物品${exit ? '离开' : '进入'}仓库`,
+      en: `Warning: ${t.count} unknown ${t.count === 1 ? 'item' : 'items'} ${exit ? 'left' : 'entered'} the warehouse`,
+      zh: `警告：${t.count} 件未知物品${exit ? '离开' : '进入'}仓库`,
+    };
+  }
+  // A contested exit is announced as what it is. Saying "checked out" here was
+  // the part that made the whole thing look like it had gone through: the board
+  // was already refusing to credit these cartons, but the only thing anyone at
+  // the door could hear was a confirmation.
+  if (t.fault) {
+    const cartons = `${t.count} ${t.count === 1 ? 'carton' : 'cartons'} of ${t.name}`;
+    if (t.fault === 'already-shipped') {
+      return {
+        en: `Warning: ${cartons} left the warehouse but is already shipped`,
+        zh: `警告：${t.name} ${t.count} 箱离库，但已标记为已出货`,
+      };
+    }
+    return {
+      en: `Warning: ${cartons} left the warehouse but was never received in`,
+      zh: `警告：${t.name} ${t.count} 箱离库，但从未入库`,
+    };
+  }
+  const enVerb = exit ? 'Checked out' : 'Arrived';
+  const zhVerb = exit ? '已出库' : '已到达';
+  if (t.isPallet) {
+    // A pallet is one physical thing with a name, not a quantity of stock, so
+    // it is never counted in cartons.
+    return {
+      en: t.count === 1 ? `${enVerb}: ${t.name}` : `${enVerb}: ${t.count} pallets, ${t.name}`,
+      zh: t.count === 1 ? `${zhVerb}：${t.name}` : `${zhVerb}：${t.name} ${t.count} 板`,
     };
   }
   return {
-    en: exit ? `Checked out: ${e.item.name}` : `Arrived: ${e.item.name}`,
-    zh: exit ? `已出库：${e.item.name}` : `已到达：${e.item.name}`,
+    en: `${enVerb}: ${t.count} ${t.count === 1 ? 'carton' : 'cartons'} of ${t.name}`,
+    zh: `${zhVerb}：${t.name} ${t.count} 箱`,
   };
 }
 
@@ -103,12 +195,21 @@ function speakLocal(text: string, lang: 'en' | 'zh', pitch: number, zhVoice: Spe
 }
 
 /**
- * Announce each new warehouse movement: a tone always, the spoken lines where
- * the browser can manage them.
+ * Announce warehouse movements: a tone per movement, and once the gate is
+ * clear, a spoken total per product.
+ *
+ * Movements are NOT read out one by one. They buffer while the beams are
+ * broken and are announced as a tally the moment both beams go clear — the
+ * point at which nothing is in the doorway and the passage is therefore
+ * finished. A pallet of twenty cartons becomes one line, "twenty cartons of
+ * X", instead of twenty announcements the board is still reciting minutes
+ * later. See GATE_CLEAR_SETTLE_MS and FLUSH_FALLBACK_MS for the timing, and
+ * tally() for the grouping.
  *
  * The tone is not a fallback that waits to see whether speech failed — it
- * always plays, because the tone is the part that carries across a warehouse
- * and across languages. Speech, when present, adds the detail on top.
+ * always plays, per movement, because the tone is the part that carries across
+ * a warehouse and across languages, and it is the operator's only immediate
+ * confirmation that a tag was caught. Speech adds the totals afterwards.
  *
  * Speech itself has two paths, tried in order per line:
  *   1. Bridge TTS (GET /tts): synthesised on the bridge PC, played as an MP3
@@ -122,21 +223,31 @@ function speakLocal(text: string, lang: 'en' | 'zh', pitch: number, zhVoice: Spe
  * each other — the browser's own speech queue used to provide that ordering,
  * but fetched MP3s have no such queue, so it lives here now.
  */
-export function useVoice(entries: EntryRow[], enabled: boolean) {
-  const lastSpokenId = useRef(-1);
+export function useVoice(entries: EntryRow[], enabled: boolean, gpi: GpiState) {
+  const lastSeenId = useRef(-1);
   const zhVoice = useZhVoice();
   const queue = useRef<Promise<void>>(Promise.resolve());
+  /** Movements seen but not yet announced — flushed when the gate goes clear. */
+  const pending = useRef<EntryRow[]>([]);
+  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fallbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
-    if (!enabled) window.speechSynthesis?.cancel();
-  }, [enabled]);
+  const clearTimers = () => {
+    if (settleTimer.current) clearTimeout(settleTimer.current);
+    if (fallbackTimer.current) clearTimeout(fallbackTimer.current);
+    settleTimer.current = null;
+    fallbackTimer.current = null;
+  };
 
-  useEffect(() => {
-    if (!enabled || entries.length === 0) return;
-    const newest = entries[0];
-    if (newest.id <= lastSpokenId.current) return;
-    const unspoken = entries.filter((e) => e.id > lastSpokenId.current).reverse();
-    lastSpokenId.current = newest.id;
+  // Speak the buffered passage as one tally, then start a fresh one. Held in a
+  // ref so the timers and the beam watcher all call the same live copy rather
+  // than a version captured on some earlier render.
+  const flush = useRef<() => void>(() => {});
+  flush.current = () => {
+    clearTimers();
+    const batch = pending.current;
+    pending.current = [];
+    if (!batch.length) return;
 
     const say = (text: string, lang: 'en' | 'zh', pitch: number) => {
       queue.current = queue.current
@@ -152,12 +263,60 @@ export function useVoice(entries: EntryRow[], enabled: boolean) {
         .catch(() => {});
     };
 
-    for (const e of unspoken) {
-      chime(e.known ? 'ok' : 'alert');
-      const { en, zh } = phrases(e);
-      const pitch = e.known ? 1 : 0.8;
+    for (const t of tally(batch)) {
+      const { en, zh } = phrases(t);
+      const pitch = t.known && !t.fault ? 1 : 0.8;
       say(en, 'en', pitch);
       say(zh, 'zh', pitch);
     }
+  };
+
+  useEffect(() => {
+    if (enabled) return;
+    // Switching voice off drops whatever was waiting: on the next switch-on it
+    // would be stale, and reading out a passage from an hour ago is worse than
+    // saying nothing.
+    window.speechSynthesis?.cancel();
+    clearTimers();
+    pending.current = [];
+  }, [enabled]);
+
+  useEffect(() => clearTimers, []);
+
+  // Collect. The chime still fires per movement — it is the live feedback that
+  // a tag was actually caught, and waiting for the gate to clear before making
+  // any sound at all would leave the operator with nothing to go on.
+  useEffect(() => {
+    if (!enabled || entries.length === 0) return;
+    const newest = entries[0];
+    if (newest.id <= lastSeenId.current) return;
+    const fresh = entries.filter((e) => e.id > lastSeenId.current).reverse();
+    lastSeenId.current = newest.id;
+
+    // The tone is the operator's immediate feedback, so a contested exit gets
+    // the alert tone at the moment it happens rather than only in the readout
+    // that follows the passage.
+    for (const e of fresh) chime(e.known && !e.unexpected ? 'ok' : 'alert');
+    pending.current.push(...fresh);
+
+    // Re-arm on every movement: the fallback measures silence at the gate, not
+    // time since the run started, so a long unload is never cut in half.
+    if (fallbackTimer.current) clearTimeout(fallbackTimer.current);
+    fallbackTimer.current = setTimeout(() => flush.current(), FLUSH_FALLBACK_MS);
   }, [entries, enabled]);
+
+  // Announce. Both beams unbroken means nothing is in the doorway — that is the
+  // moment the passage is over and the totals are final.
+  useEffect(() => {
+    if (!enabled || pending.current.length === 0) return;
+    const clear = gpi.gpi1 === false && gpi.gpi2 === false;
+    if (!clear) {
+      // Something is back in the beams — this passage is still running.
+      if (settleTimer.current) clearTimeout(settleTimer.current);
+      settleTimer.current = null;
+      return;
+    }
+    if (settleTimer.current) return; // already counting down on this clear edge
+    settleTimer.current = setTimeout(() => flush.current(), GATE_CLEAR_SETTLE_MS);
+  }, [gpi, entries, enabled]);
 }

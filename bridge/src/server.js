@@ -167,6 +167,10 @@ const { BoardFeed } = require('./board');
 const board = new BoardFeed({
   baseUrl: process.env.NEXUS_BASE_URL || deriveNexusBase(process.env.NEXUS_URL || ''),
   token: process.env.OPERATIONS_HANDHELD_TOKEN || '',
+  // Kept below the kiosk poll so the faster polling actually returns fresher
+  // data. Env-tunable so a site with many screens can back the Nexus read rate
+  // off without a code change.
+  maxAgeMs: Number(process.env.BOARD_CACHE_MS || 4_000),
   log: (text, level) => controller.log(`[board] ${text}`, level),
 });
 
@@ -737,12 +741,52 @@ async function reportClockOffset() {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
+/**
+ * Heartbeat interval. Two jobs, and they are not the same job:
+ *
+ *   1. A protocol-level ping reaps sockets this process still thinks are open.
+ *   2. An application-level {type:'ping'} gives the BROWSER something it can
+ *      actually observe. A browser auto-answers protocol pings in the network
+ *      layer and never tells page JavaScript, so a page has no way to notice a
+ *      dead link from those alone.
+ *
+ * (2) is what stops a wallboard going silently stale. A WiFi drop, an access
+ * point roam, or a TV waking from sleep can leave the connection half-open:
+ * nothing arrives, but no close event ever fires, so the page waits forever for
+ * movements that will never come and only a manual reload fixes it. With a
+ * steady beat, silence is unambiguous — see the watchdog in useBridge.ts.
+ */
+const WS_HEARTBEAT_MS = 5000;
+
 wss.on('connection', (ws) => {
   controller.log(`WS client connected (${wss.clients.size} total).`);
   // send a snapshot immediately
   ws.send(JSON.stringify({ type: 'status', ...controller.getStatus(), timestamp: new Date().toISOString() }));
+  ws.isAlive = true;
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
   ws.on('close', () => controller.log(`WS client disconnected (${wss.clients.size} total).`));
 });
+
+const wsHeartbeat = setInterval(() => {
+  for (const client of wss.clients) {
+    // Missed the whole previous round trip — the socket is gone even if the OS
+    // has not worked that out yet. Dropping it here keeps `clients` honest.
+    if (client.isAlive === false) {
+      client.terminate();
+      continue;
+    }
+    client.isAlive = false;
+    try {
+      client.ping();
+    } catch (_) {
+      /* already tearing down */
+    }
+  }
+  broadcast({ type: 'ping', timestamp: new Date().toISOString() });
+}, WS_HEARTBEAT_MS);
+wsHeartbeat.unref?.(); // never hold the process open on this alone
 
 function broadcast(msg) {
   const data = JSON.stringify(msg);
@@ -787,6 +831,24 @@ server.listen(PORT, () => {
   // Refresh the catalog from the live tag registry (falls back to the cached
   // data/catalog.json already loaded by the constructor).
   nexus.loadCatalogRemote();
+
+  // ...and keep refreshing it. This used to be a boot-only load, which was fine
+  // while the catalog was just EPC -> product name: a tag printed after boot
+  // read as unregistered until someone restarted the bridge, and that was the
+  // whole cost.
+  //
+  // It is no longer the whole cost. The catalog now also carries carton
+  // WAREHOUSE state, and the gate refuses to present an exit as a dispatch when
+  // that state says the carton was never received. On a boot-only load that
+  // state is frozen at boot, so every carton received during the shift would
+  // look un-received and every legitimate dispatch would alarm. The refresh is
+  // what keeps the check honest — and _outboundCheck stops judging entirely
+  // once the state is older than stateMaxAgeMs, so a failing refresh degrades
+  // to silence rather than to false accusations.
+  const CATALOG_REFRESH_MS = Number(process.env.NEXUS_CATALOG_REFRESH_MS || 120_000);
+  if (CATALOG_REFRESH_MS > 0) {
+    setInterval(() => void nexus.loadCatalogRemote(), CATALOG_REFRESH_MS).unref();
+  }
   try {
     controller.start();
   } catch (err) {
