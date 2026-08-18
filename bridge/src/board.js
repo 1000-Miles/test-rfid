@@ -32,9 +32,8 @@ class BoardFeed {
     // Cache older than this triggers a background refresh on the next request.
     // Must stay UNDER the kiosk's poll interval (DOC_POLL_MS in documents.ts,
     // currently 5s) — at or above it, every other poll is served the same
-    // payload and the faster polling achieves nothing. Raising this is the knob
-    // to reach for if the Nexus read load ever becomes a problem; raise the
-    // kiosk interval with it.
+    // payload and the faster polling achieves nothing. BOARD_CACHE_MS overrides;
+    // raise it and the kiosk interval together if Nexus read load ever bites.
     this.maxAgeMs = opts.maxAgeMs ?? 4_000;
     this.log = opts.log || (() => {});
     this.lastFetchAt = null;
