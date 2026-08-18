@@ -264,6 +264,29 @@ export function useVoice(entries: EntryRow[], enabled: boolean, gpi: GpiState) {
     };
 
     for (const t of tally(batch)) {
+      // Unregistered tags are not announced, in either direction. Every pallet
+      // wrapper, returnable crate and staff badge that drifts through the
+      // doorway is an unknown tag, so speaking them turned the alarm voice into
+      // background noise — and a voice that cries wolf all day is worse than
+      // silence, because the genuine warnings (a contested exit) stop landing.
+      //
+      // They are NOT ignored: the alert chime still fires below, and the board
+      // still shows the UNKNOWN TAG banner and logs the exception. This
+      // suppresses the speech only. Delete this guard to bring it back —
+      // phrases() still has the wording.
+      if (!t.known) continue;
+
+      // Same reasoning for "left but was never received in". A carton only has
+      // a warehouse record once someone received it in, so anything that left
+      // without ever being booked in trips this — which on a site still filling
+      // in its inbound history is most of them. It stays a board exception and
+      // an alert chime; it just no longer says so out loud.
+      //
+      // 'already-shipped' is deliberately still spoken: that one means Nexus
+      // thinks the carton is gone already, which is a genuine contradiction
+      // rather than a gap in the records.
+      if (t.fault === 'not-received') continue;
+
       const { en, zh } = phrases(t);
       const pitch = t.known && !t.fault ? 1 : 0.8;
       say(en, 'en', pitch);

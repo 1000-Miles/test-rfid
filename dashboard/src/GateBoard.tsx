@@ -329,7 +329,7 @@ type BoardItem = { line: DocLine; doc: GateDoc };
  * rather than something you work out by scanning every tile's badge.
  */
 const BUCKETS = [
-  { key: 'todo', label: { in: 'TO RECEIVE', out: 'TO LOAD' }, empty: { in: 'Nothing left to receive', out: 'Nothing left to load' } },
+  { key: 'todo', label: { in: 'GOODS EXPECTED TO RECEIVE', out: 'TO LOAD' }, empty: { in: 'Nothing left to receive', out: 'Nothing left to load' } },
   { key: 'part', label: { in: 'PARTIALLY RECEIVED', out: 'PARTIALLY LOADED' }, empty: { in: 'Nothing part-counted', out: 'Nothing part-counted' } },
   { key: 'done', label: { in: 'FULLY RECEIVED', out: 'FULLY LOADED' }, empty: { in: 'Nothing complete yet', out: 'Nothing complete yet' } },
 ] as const;
@@ -376,7 +376,7 @@ function DirectionSection(props: { dir: Direction; docs: GateDoc[]; totals: { re
     <div style={{ flex: empty ? '0 0 auto' : 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: u(10) }}>
       <div style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: u(18) }}>
         <div style={{ fontSize: u(15), fontWeight: 800, letterSpacing: '0.18em', color: a.text, flex: '0 0 auto' }}>
-          {props.dir === 'in' ? '· RECEIVING' : '· SHIPPING'}
+          {props.dir === 'in' ? '· EXPECTED ARRIVAL' : '· SHIPPING'}
         </div>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: u(10), flex: '0 0 auto' }}>
           <div style={{ fontSize: u(46), fontWeight: 800, lineHeight: 1, letterSpacing: u(-2), fontVariantNumeric: 'tabular-nums' }}>{props.totals.received}</div>
