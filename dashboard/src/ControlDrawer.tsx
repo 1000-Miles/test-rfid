@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import { activeDocs, demoEpcsFor, type Direction, type GateBoardApi } from './documents';
 import type { BridgeState } from './useBridge';
-import type { EntryRow, GpiState, LastPrint, Mode, PrinterConfig, TagRow, UdpFrameRow, UdpState } from './types';
+import type { EntryRow, GpiState, LastPrint, Mode, NexusConfig, PrinterConfig, TagRow, UdpFrameRow, UdpState } from './types';
 
 /**
  * Engineering console — everything the gate board doesn't show.
@@ -10,6 +10,10 @@ import type { EntryRow, GpiState, LastPrint, Mode, PrinterConfig, TagRow, UdpFra
  * Reader connection, read mode, portal timing, printer, raw reads and UDP
  * frames used to be the whole dashboard; on the kiosk they live one tap away
  * behind the header gear so the board stays a board.
+ *
+ * Two tabs: "Console" is all of the above; "No-IR trial" drives the
+ * toggle-mode experiment (antennas facing each other, direction inferred from
+ * state instead of observed by the beams) without touching the IR setup.
  */
 export default function ControlDrawer(props: {
   open: boolean;
@@ -23,6 +27,7 @@ export default function ControlDrawer(props: {
   const { bridge, board } = props;
   const { status } = bridge;
 
+  const [tab, setTab] = useState<'console' | 'noir'>('console');
   const [ip, setIp] = useState('192.168.254.202');
   const [port, setPort] = useState(8888);
   const [irDuration, setIrDuration] = useState(500);
@@ -97,46 +102,370 @@ export default function ControlDrawer(props: {
         </header>
 
         <div className="px-5 py-5 flex flex-col gap-5">
-          <GateSimulator board={board} />
-
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-            <ConnectPanel
-              ip={ip}
-              port={port}
-              connected={status.connected}
-              busy={busy}
-              onIp={setIp}
-              onPort={setPort}
-              onConnect={() => run(() => api.connect(ip, port))}
-              onDisconnect={() => run(() => api.disconnect())}
-              powerControl={<PowerControl connected={status.connected} />}
-            />
-            <ModePanel mode={status.mode} irDuration={irDuration} busy={busy} onIrDuration={setIrDuration} onSetMode={setMode} />
+          <div className="flex rounded-lg bg-black/40 border border-white/10 p-1">
+            <ModeButton active={tab === 'console'} onClick={() => setTab('console')} disabled={false}>
+              Console
+            </ModeButton>
+            <ModeButton active={tab === 'noir'} onClick={() => setTab('noir')} disabled={false}>
+              No-IR trial
+            </ModeButton>
           </div>
 
-          <GpiPanel gpi={bridge.gpi} mode={status.mode} />
+          {tab === 'noir' ? (
+            <NoIrPanel bridge={bridge} />
+          ) : (
+            <>
+              <GateSimulator board={board} />
 
-          <ReadControls
-            connected={status.connected}
-            reading={status.reading}
-            mode={status.mode}
-            busy={busy}
-            onStart={() => run(() => api.start())}
-            onStop={() => run(() => api.stop())}
-          />
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                <ConnectPanel
+                  ip={ip}
+                  port={port}
+                  connected={status.connected}
+                  busy={busy}
+                  onIp={setIp}
+                  onPort={setPort}
+                  onConnect={() => run(() => api.connect(ip, port))}
+                  onDisconnect={() => run(() => api.disconnect())}
+                  powerControl={<PowerControl connected={status.connected} />}
+                />
+                <ModePanel mode={status.mode} irDuration={irDuration} busy={busy} onIrDuration={setIrDuration} onSetMode={setMode} />
+              </div>
 
-          <Stats total={bridge.totalReads} unique={bridge.uniqueEpcs} rps={bridge.readsPerSec} />
+              <GpiPanel gpi={bridge.gpi} mode={status.mode} />
 
-          <PrintPanel rows={bridge.rows} readerConnected={status.connected} reading={status.reading} />
+              <ReadControls
+                connected={status.connected}
+                reading={status.reading}
+                mode={status.mode}
+                busy={busy}
+                onStart={() => run(() => api.start())}
+                onStop={() => run(() => api.stop())}
+              />
 
-          <MovementsPanel entries={bridge.entries} />
+              <Stats total={bridge.totalReads} unique={bridge.uniqueEpcs} rps={bridge.readsPerSec} />
 
-          {showUdp && <UdpPanel udp={status.udp} frames={bridge.udpFrames} />}
+              <PrintPanel rows={bridge.rows} readerConnected={status.connected} reading={status.reading} />
 
-          <TagTable rows={bridge.rows} onClear={bridge.clear} />
+              <MovementsPanel entries={bridge.entries} />
+
+              {showUdp && <UdpPanel udp={status.udp} frames={bridge.udpFrames} />}
+
+              <TagTable rows={bridge.rows} onClear={bridge.clear} />
+            </>
+          )}
         </div>
       </aside>
     </div>
+  );
+}
+
+/* -------------------------------------------------------- No-IR trial tab */
+
+/** Human phrasing for the bridge's direction-inference reason codes. */
+const BASIS_LABEL: Record<string, string> = {
+  'local-flip': 'flip of last gate verdict',
+  'state-never-received': 'Nexus: never received → IN',
+  'state-in-building': 'Nexus: in building → OUT',
+  'state-shipped-return': 'Nexus: already shipped → IN (return?)',
+  'default-first-seen': 'nothing known → first pass IN',
+};
+
+function NumField(props: { label: string; value: number; min: number; step: number; onChange: (v: number) => void; hint: string }) {
+  return (
+    <label className="text-xs block">
+      <span className="text-slate-400">{props.label}</span>
+      <input
+        type="number"
+        value={props.value}
+        min={props.min}
+        step={props.step}
+        onChange={(e) => props.onChange(Number(e.target.value))}
+        title={props.hint}
+        className="mt-0.5 w-full rounded-md bg-black/40 border border-white/10 px-2 py-1.5 font-mono text-sm"
+      />
+    </label>
+  );
+}
+
+/**
+ * Drives the no-IR ("toggle") trial: the IR beams stay wired and the IR code
+ * path stays intact — this only flips the DETECTOR between observed direction
+ * (beams) and inferred direction (first pass = received, next pass = ship,
+ * anchored to Nexus carton state).
+ */
+function NoIrPanel(props: { bridge: BridgeState }) {
+  const { bridge } = props;
+  const { status } = bridge;
+
+  const [cfg, setCfg] = useState<NexusConfig | null>(null);
+  const [absenceSec, setAbsenceSec] = useState(30);
+  const [rearmSec, setRearmSec] = useState(60);
+  const [minRssiText, setMinRssiText] = useState(''); // blank = floor off
+  const [minReads, setMinReads] = useState(2);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState('');
+
+  const refresh = () =>
+    api
+      .nexusSummary()
+      .then((s) => {
+        setCfg(s);
+        setAbsenceSec(Math.round((s.absenceMs ?? 30000) / 1000));
+        setRearmSec(Math.round((s.toggleDedupMs ?? 60000) / 1000));
+        setMinRssiText(s.minRssi != null ? String(s.minRssi) : '');
+        setMinReads(s.toggleMinReads ?? 2);
+      })
+      .catch(() => {});
+  useEffect(() => {
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const enabled = cfg?.detectMode === 'toggle';
+  // Toggle mode needs the reader reading CONTINUOUSLY — no beams to trigger bursts.
+  const misconfigured = enabled && (!status.connected || !status.reading || status.mode === 'hw');
+
+  const run = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    setError('');
+    try {
+      await fn();
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const enable = () =>
+    run(async () => {
+      await api.setNexusConfig({ detectMode: 'toggle' });
+      if (status.connected) {
+        await api.setMode({ mode: 'manual' }).catch(() => {});
+        await api.start().catch(() => {}); // 409 when already reading is fine
+      }
+    });
+
+  const disable = () =>
+    run(async () => {
+      await api.setNexusConfig({ detectMode: 'ir' });
+      // Back to the beam-triggered setup; fails harmlessly on a reader without GPIO.
+      if (status.connected) await api.setMode({ mode: 'ir' }).catch(() => {});
+    });
+
+  const applyTuning = () =>
+    run(async () => {
+      const rssi = minRssiText.trim();
+      await api.setNexusConfig({
+        absenceMs: Math.max(0, absenceSec) * 1000,
+        toggleDedupMs: Math.max(0, rearmSec) * 1000,
+        minRssi: rssi === '' ? null : Number(rssi),
+        toggleMinReads: Math.max(1, minReads),
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    });
+
+  const simulateUnknown = () => {
+    const hex = () => Math.floor(Math.random() * 65536).toString(16).toUpperCase().padStart(4, '0');
+    api.mockVisit({ epc: `E280${hex()}${hex()}${hex()}${hex()}${hex()}` }).catch(() => {});
+  };
+
+  const decisions = bridge.entries.filter((e) => e.method === 'toggle');
+
+  return (
+    <>
+      <Card title="No-IR trial — direction inferred, not observed">
+        <div className="flex items-center gap-3 mb-3">
+          <span
+            className={`text-xs px-2.5 py-1 rounded-full border font-semibold ${
+              enabled
+                ? 'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/40'
+                : 'bg-white/5 text-slate-400 border-white/10'
+            }`}
+          >
+            {enabled ? 'NO-IR MODE ACTIVE' : 'IR mode (beams) active'}
+          </span>
+          {enabled && !misconfigured && (
+            <span className="text-xs text-emerald-400">reader is reading continuously — visits will be detected</span>
+          )}
+        </div>
+
+        {misconfigured && (
+          <div className="mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+            ⚠ No-IR mode is on but the reader is {!status.connected ? 'not connected' : status.mode === 'hw' ? 'in HW trigger mode' : 'not reading'} — nothing
+            will be detected. It must read continuously: connect it, then Enable again (it sets Manual mode + Start).
+          </div>
+        )}
+
+        <div className="flex gap-2">
+          {!enabled ? (
+            <button onClick={enable} disabled={busy} className="flex-1 rounded-md bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-50 px-4 py-3 font-semibold">
+              Enable no-IR trial
+            </button>
+          ) : (
+            <button onClick={disable} disabled={busy} className="flex-1 rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-4 py-3 font-semibold">
+              Back to IR (beams)
+            </button>
+          )}
+        </div>
+        {error && <p className="text-sm text-rose-400 mt-2 break-all">{error}</p>}
+
+        <p className="text-xs text-slate-500 mt-3">
+          Logic under trial: a box's first pass = <span className="text-emerald-400">received (IN)</span>; seen again after leaving the field ={' '}
+          <span className="text-sky-400">shipping out (OUT)</span>. Direction is anchored to Nexus carton state (and this bridge's own last verdict), so a
+          desync shows up as a wrong "why" below instead of silently inverting forever. The IR wiring and code stay untouched — this switch is reversible any
+          time.
+        </p>
+      </Card>
+
+      <Card title="No-IR tuning">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+          <NumField
+            label="Absence (s)"
+            value={absenceSec}
+            min={0}
+            step={5}
+            onChange={setAbsenceSec}
+            hint="A new visit opens only after the tag was unseen this long — the no-IR substitute for 'beams cleared'. Keep above the 10-20s RF tail."
+          />
+          <NumField
+            label="Re-arm (s)"
+            value={rearmSec}
+            min={0}
+            step={10}
+            onChange={setRearmSec}
+            hint="Same tag can't fire again for this long after an event. Raise a lot for production; low values make lingering pallets flip in/out."
+          />
+          <label className="text-xs block">
+            <span className="text-slate-400">RSSI floor (dBm)</span>
+            <input
+              value={minRssiText}
+              onChange={(e) => setMinRssiText(e.target.value)}
+              placeholder="off"
+              title="Reads weaker than this are ignored entirely — logically shrinks the read zone. Blank = off. Try -60 and tune."
+              className="mt-0.5 w-full rounded-md bg-black/40 border border-white/10 px-2 py-1.5 font-mono text-sm placeholder:text-slate-600"
+            />
+          </label>
+          <NumField
+            label="Min reads / visit"
+            value={minReads}
+            min={1}
+            step={1}
+            onChange={setMinReads}
+            hint="Visits with fewer reads are dropped as noise — one multipath ghost read must not flip warehouse state."
+          />
+        </div>
+        <div className="flex items-center gap-3 mt-2">
+          <button onClick={applyTuning} disabled={busy} className="flex-1 rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-3 py-1.5 text-sm">
+            Apply tuning
+          </button>
+          {saved && <span className="text-xs text-emerald-400">saved ✓</span>}
+        </div>
+        <p className="text-[11px] text-slate-500 mt-1.5">
+          Read power (Console tab → Connection) matters more than any of these: the whole trial stands or falls on the read zone covering the doorway and
+          nothing else.
+        </p>
+      </Card>
+
+      <Card title="Simulate (no hardware)">
+        <div className="grid grid-cols-2 gap-2">
+          <SimButton onClick={() => api.mockVisit({}).catch(() => {})} tone="cyan">
+            Visit — known tag
+          </SimButton>
+          <SimButton onClick={simulateUnknown} tone="rose">
+            Visit — unknown tag
+          </SimButton>
+        </div>
+        <p className="text-xs text-slate-500 mt-3">
+          Fires a burst of direction-less reads at <span className="font-mono">/debug/mock-visit</span> — exactly what the antennas produce with no beams.
+          While IR mode is active these are strays (by design) and nothing moves. Fire the same known tag twice, {'>'}re-arm+absence apart, to see IN then OUT.
+        </p>
+      </Card>
+
+      <section className="rounded-xl border border-fuchsia-500/30 bg-[#111827] overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 bg-fuchsia-500/10">
+          <h2 className="text-sm font-medium text-fuchsia-200">
+            No-IR decisions <span className="text-slate-500">(direction + why it was inferred)</span>
+          </h2>
+          <div className="text-sm text-fuchsia-300 font-semibold tabular-nums">{decisions.length}</div>
+        </div>
+        <div className="overflow-x-auto max-h-[40vh] overflow-y-auto">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-[#0d1220] text-slate-400">
+              <tr>
+                <th className="text-left font-medium px-4 py-2 w-28">Time</th>
+                <th className="text-left font-medium px-4 py-2 w-28">SKU</th>
+                <th className="text-left font-medium px-4 py-2 w-56">EPC</th>
+                <th className="text-left font-medium px-4 py-2 w-20">Dir</th>
+                <th className="text-left font-medium px-4 py-2">Why</th>
+                <th className="text-left font-medium px-4 py-2 w-36">Flag</th>
+              </tr>
+            </thead>
+            <tbody>
+              {decisions.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
+                    No inferred movements yet — enable the trial and pass a tagged box through, or use Simulate above.
+                  </td>
+                </tr>
+              ) : (
+                decisions.map((e) => (
+                  <tr key={e.id} className="border-t border-white/5 hover:bg-white/5">
+                    <td className="px-4 py-1.5 font-mono text-xs text-slate-400">{new Date(e.timestamp).toLocaleTimeString(undefined, { hour12: false })}</td>
+                    <td className={`px-4 py-1.5 font-mono text-xs ${e.known ? 'text-indigo-300' : 'text-amber-400'}`}>{e.item.sku}</td>
+                    <td className="px-4 py-1.5 font-mono text-xs text-slate-500 break-all">{e.epc}</td>
+                    <td className="px-4 py-1.5">
+                      {e.direction === 'in' ? (
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">IN</span>
+                      ) : (
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30">OUT</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-1.5 text-xs text-slate-300">{e.basis ? BASIS_LABEL[e.basis] ?? e.basis : '—'}</td>
+                    <td className="px-4 py-1.5 text-xs">
+                      {e.unexpected ? <span className="text-rose-400">⚠ {e.unexpected}</span> : <span className="text-slate-600">—</span>}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <Card title="What to watch during the trial (the known edge cases)">
+        <ul className="text-sm text-slate-300 flex flex-col gap-2 list-disc pl-5">
+          <li>
+            <span className="text-slate-100 font-medium">Read-zone test first.</span> Park a tagged carton 1–3 m from the gate, off to the side, for 10
+            minutes. If decisions appear for it, the field is too big — lower read power or set the RSSI floor before trusting anything else.
+          </li>
+          <li>
+            <span className="text-slate-100 font-medium">Quick in-and-back-out is swallowed.</span> Within the re-arm window the second pass is deliberately
+            ignored. If forklifts genuinely enter and leave within {'<'}1 minute, that pass is lost — decide whether that is acceptable before lowering re-arm.
+          </li>
+          <li>
+            <span className="text-slate-100 font-medium">The 10–20 s read tail is normal.</span> Tags keep reading after a pallet passes; the absence window
+            exists to absorb it. Never set absence below ~25 s.
+          </li>
+          <li>
+            <span className="text-slate-100 font-medium">A wrong flip self-perpetuates.</span> One bad decision inverts the next one for that box. The "why"
+            column is how you catch it; fix by correcting the carton in Nexus (state wins after the local memory ages out or the bridge restarts).
+          </li>
+          <li>
+            <span className="text-slate-100 font-medium">Boxes with reprinted labels flip per-label.</span> A box carrying several live EPCs can read IN under
+            one label and OUT under another. Retire old labels before relying on this mode.
+          </li>
+          <li>
+            <span className="text-slate-100 font-medium">OUT is judged, not trusted.</span> An inferred OUT for a carton Nexus says was never received (or
+            already shipped) is flagged in the Flag column and not counted as a dispatch — same protection as IR mode.
+          </li>
+        </ul>
+      </Card>
+    </>
   );
 }
 

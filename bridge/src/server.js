@@ -134,6 +134,14 @@ const nexus = new PassageDetector({
   dedupMs: Number(process.env.NEXUS_DEDUP_MS || 5000),
   quietMs: Number(process.env.NEXUS_QUIET_MS || 700),
   maxWindowMs: Number(process.env.NEXUS_MAX_WINDOW_MS || 4000),
+  // NO-IR trial ("toggle") defaults — see passage.js. Also switchable live via
+  // POST /nexus/config { detectMode: 'toggle' | 'ir' } (the engineering
+  // console's No-IR trial tab drives that).
+  detectMode: process.env.NEXUS_DETECT_MODE === 'toggle' ? 'toggle' : 'ir',
+  toggleDedupMs: Number(process.env.NEXUS_TOGGLE_DEDUP_MS || 60_000),
+  absenceMs: Number(process.env.NEXUS_ABSENCE_MS || 30_000),
+  minRssi: process.env.NEXUS_MIN_RSSI ? Number(process.env.NEXUS_MIN_RSSI) : null,
+  toggleMinReads: Number(process.env.NEXUS_TOGGLE_MIN_READS || 2),
   location: process.env.NEXUS_LOCATION || 'WH-ENTRANCE-1',
   // Tag registry: catalog is loaded from operations_label_tag in this
   // Supabase project (and cached to data/catalog.json for offline boots).
@@ -182,6 +190,20 @@ function deriveNexusBase(movementUrl) {
     return '';
   }
 }
+
+// Toggle (no-IR) mode has no beams to trigger bursts: it depends on the
+// inventory running CONTINUOUSLY, and a reader power blip would otherwise
+// leave the gate silently blind — the auto-reconnect resets the reader but
+// only HW mode re-arms itself. Scoped to the reconnect path on purpose: a
+// human pressing Stop, and the tag-access/printer flows that pause reading
+// briefly, must not be fought.
+controller.on('reconnected', () => {
+  if (nexus.detectMode !== 'toggle' || controller.mode !== 'manual' || controller.reading) return;
+  controller
+    .startReading()
+    .then(() => controller.log('toggle mode: continuous reading resumed after reconnect'))
+    .catch((err) => controller.log(`toggle mode: read resume after reconnect FAILED: ${err.message}`, 'error'));
+});
 
 nexus.on('log', (text) => controller.log(`[passage] ${text}`));
 nexus.on('movement', (event) => {
@@ -482,6 +504,26 @@ app.post('/debug/mock-passage', async (req, res) => {
   res.json({ ok: true, epc, direction: dir });
 });
 
+// Demo: simulate a NO-IR visit — a short burst of direction-less reads,
+// exactly what the detector sees in toggle mode with the antennas facing each
+// other and no beams. In IR mode the same reads are strays (by design), so
+// this only produces a movement while detectMode is 'toggle'.
+// Body: { epc?, rssi?, reads? }.
+app.post('/debug/mock-visit', (req, res) => {
+  const catalogEpcs = Object.keys(nexus.catalog);
+  const epc = String(
+    req.body?.epc || (catalogEpcs.length ? catalogEpcs[Math.floor(Math.random() * catalogEpcs.length)] : 'AA00000000000000000000FF')
+  ).toUpperCase();
+  const rssi = Number(req.body?.rssi) || -58;
+  const count = Math.max(1, Math.min(10, Number(req.body?.reads) || 3));
+  const fire = () =>
+    controller.emit('message', {
+      type: 'tag', epc, antenna: 1, rssi, tid: null, direction: null, passageId: null, source: 'mock', timestamp: new Date().toISOString(),
+    });
+  for (let i = 0; i < count; i++) setTimeout(fire, i * 150);
+  res.json({ ok: true, epc, reads: count, detectMode: nexus.detectMode });
+});
+
 // Read power: GET current, POST { dBm } to set (1..30, persisted).
 app.get('/power', async (_req, res) => {
   try {
@@ -709,7 +751,10 @@ app.post('/movement/replay', (req, res) => {
 
 app.post('/nexus/config', (req, res) => {
   const summary = nexus.setConfig(req.body || {});
-  controller.log(`[nexus] config: dedup=${summary.dedupMs}ms quiet=${summary.quietMs}ms maxWindow=${summary.maxWindowMs}ms`);
+  controller.log(
+    `[nexus] config: detect=${summary.detectMode} dedup=${summary.dedupMs}ms quiet=${summary.quietMs}ms maxWindow=${summary.maxWindowMs}ms` +
+      ` | no-IR: rearm=${summary.toggleDedupMs}ms absence=${summary.absenceMs}ms minRssi=${summary.minRssi ?? 'off'} minReads=${summary.toggleMinReads}`
+  );
   res.json({ ok: true, ...summary });
 });
 

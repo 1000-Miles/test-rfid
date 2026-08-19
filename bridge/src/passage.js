@@ -14,6 +14,30 @@
  * Two IR beams guard the warehouse entrance; when a pallet/box passes, the
  * reader bursts and every EPC seen produces a movement event.
  *
+ * TWO detection modes, switchable at runtime (`detectMode`), IR machinery
+ * fully intact in both:
+ *
+ *   'ir' (default) — direction observed by the beams, exactly as documented
+ *   below. Reads without a direction are strays.
+ *
+ *   'toggle' (NO-IR trial) — no beams; the antennas face each other across the
+ *   doorway and the reader reads continuously. Every read burst ("visit") IS a
+ *   passage, and direction is INFERRED, not observed: first pass = received
+ *   (IN), next pass = shipping out (OUT). The inference is anchored to state
+ *   rather than a blind per-EPC flip — see _inferToggleDirection — because a
+ *   blind flip desyncs silently and then inverts every later event. Extra
+ *   guards, all of which exist because there is no passage boundary anymore:
+ *     - absenceMs: a new visit opens only after the tag has been UNSEEN this
+ *       long ("it left the field" replaces "the beams cleared") — otherwise a
+ *       pallet parked in the read zone flips in/out forever
+ *     - toggleDedupMs: re-arm time after an event, much longer than the IR
+ *       dedupMs; must stay above the RF discovery tail (reads trail a real
+ *       passage by 10-20s)
+ *     - minRssi: optional logical read-zone shrink — weaker reads are ignored
+ *       entirely (not even presence), as if the tag were out of range
+ *     - toggleMinReads: a visit with fewer reads is dropped as noise; one
+ *       multipath ghost read must not flip warehouse state
+ *
  * Direction (two IR beams, decided by the bridge controller):
  *   - GPI1 beam broken first = IN, GPI2 beam broken first = OUT. The
  *     controller stamps that passage direction onto every tag message it
@@ -61,8 +85,9 @@
  *     state (warehouse_carton / warehouse_pallet); never reconcile against this.
  *
  * Emits 'movement' events:
- *   { type: 'entry'|'exit', direction: 'in'|'out', method: 'ir',
+ *   { type: 'entry'|'exit', direction: 'in'|'out', method: 'ir'|'toggle',
  *     epc, known, item, location, timestamp, antennas: number[],
+ *     basis: null | string (toggle only: WHY this direction was inferred),
  *     unexpected: null | 'not-received' | 'already-shipped' }.
  */
 
@@ -78,6 +103,13 @@ class PassageDetector extends EventEmitter {
     this.dedupMs = opts.dedupMs ?? 5000;
     this.quietMs = opts.quietMs ?? 700;
     this.maxWindowMs = opts.maxWindowMs ?? 4000;
+    // --- NO-IR trial mode ("toggle") — see the module docblock ---------------
+    this.detectMode = opts.detectMode === 'toggle' ? 'toggle' : 'ir';
+    this.toggleDedupMs = opts.toggleDedupMs ?? 60_000;
+    this.absenceMs = opts.absenceMs ?? 30_000;
+    this.minRssi = Number.isFinite(opts.minRssi) ? opts.minRssi : null;
+    this.toggleMinReads = opts.toggleMinReads ?? 2;
+    this._lastReadAt = new Map(); // epc -> ms epoch of last accepted read (feeds the absence gate)
     this.location = opts.location ?? 'WH-ENTRANCE-1';
     this.catalogUrl = opts.catalogUrl || ''; // Supabase project URL for the tag registry
     this.catalogKey = opts.catalogKey || ''; // Supabase key (service role or anon)
@@ -104,6 +136,15 @@ class PassageDetector extends EventEmitter {
     if (Number.isFinite(cfg.dedupMs) && cfg.dedupMs >= 0) this.dedupMs = cfg.dedupMs;
     if (Number.isFinite(cfg.quietMs) && cfg.quietMs >= 100) this.quietMs = cfg.quietMs;
     if (Number.isFinite(cfg.maxWindowMs) && cfg.maxWindowMs >= this.quietMs) this.maxWindowMs = cfg.maxWindowMs;
+    if (cfg.detectMode === 'ir' || cfg.detectMode === 'toggle') {
+      if (cfg.detectMode !== this.detectMode) this.emit('log', `detect mode -> ${cfg.detectMode.toUpperCase()}`);
+      this.detectMode = cfg.detectMode;
+    }
+    if (Number.isFinite(cfg.toggleDedupMs) && cfg.toggleDedupMs >= 0) this.toggleDedupMs = cfg.toggleDedupMs;
+    if (Number.isFinite(cfg.absenceMs) && cfg.absenceMs >= 0) this.absenceMs = cfg.absenceMs;
+    if (cfg.minRssi === null) this.minRssi = null;
+    else if (Number.isFinite(cfg.minRssi)) this.minRssi = cfg.minRssi;
+    if (Number.isFinite(cfg.toggleMinReads) && cfg.toggleMinReads >= 1) this.toggleMinReads = Math.floor(cfg.toggleMinReads);
     return this.summary();
   }
 
@@ -267,6 +308,45 @@ class PassageDetector extends EventEmitter {
   }
 
   /**
+   * NO-IR direction inference — used only when detectMode is 'toggle'.
+   *
+   * The rule being trialled is "first pass = received, next pass = shipping
+   * out". A blind per-EPC flip implements that but desyncs silently (bridge
+   * restart, one missed read) and then inverts every later event, so the flip
+   * is anchored to the best state available, in order of freshness:
+   *
+   *   1. local-flip     this bridge's own last verdict for the EPC. Beats the
+   *                     catalog because the 2-min catalog refresh lags the
+   *                     events this process itself just fired — without this,
+   *                     a carton received a moment ago still reads
+   *                     "never received" and double-receives.
+   *   2. state-*        Nexus carton state from the catalog, only while fresh
+   *                     (same stateMaxAgeMs stance as _outboundCheck):
+   *                     no warehouse row = never received -> IN;
+   *                     'shipped' = it left, a read now is a return -> IN;
+   *                     anything else = it is in the building -> OUT.
+   *   3. default        nothing known (unknown EPC, pallet, stale state) —
+   *                     the rule's opening move: IN.
+   *
+   * `basis` travels on the event so the trial tab can show WHY each direction
+   * was chosen.
+   */
+  _inferToggleDirection(rec, item, known) {
+    if (rec && (rec.status === 'INSIDE' || rec.status === 'OUTSIDE')) {
+      return rec.status === 'INSIDE'
+        ? { direction: 'out', basis: 'local-flip' }
+        : { direction: 'in', basis: 'local-flip' };
+    }
+    const stateFresh = this._cartonStateAt && Date.now() - this._cartonStateAt <= this.stateMaxAgeMs;
+    if (known && item && item.kind === 'carton' && stateFresh) {
+      if (!item.state && !item.receivedAt) return { direction: 'in', basis: 'state-never-received' };
+      if (item.state === 'shipped') return { direction: 'in', basis: 'state-shipped-return' };
+      return { direction: 'out', basis: 'state-in-building' };
+    }
+    return { direction: 'in', basis: 'default-first-seen' };
+  }
+
+  /**
    * A tag was read at the portal. Buffers reads per EPC for the decision
    * window, then _decide() fires the movement event. Returns null always
    * (decisions are async).
@@ -275,11 +355,23 @@ class PassageDetector extends EventEmitter {
     const epc = tag.epc;
     if (!epc) return null;
     const now = Date.now();
+    const toggle = this.detectMode === 'toggle';
 
+    // NO-IR mode RSSI floor: logically shrinks the read zone. A read weaker
+    // than the floor is treated as "not at the portal" — ignored entirely, and
+    // deliberately NOT counted as presence, so a tag hovering at the edge of
+    // the field still reads as absent and fires cleanly when it finally
+    // crosses close to the antennas.
+    if (toggle && this.minRssi != null && tag.rssi != null && tag.rssi < this.minRssi) return null;
+
+    // Dedup / re-arm. Toggle mode uses its own, much longer window: with no
+    // passage boundary this is what stops the RF discovery tail (reads trail a
+    // passage by 10-20s) from reading as a second passage.
     const last = this._lastEventAt.get(epc) || 0;
-    if (now - last < this.dedupMs) {
+    if (now - last < (toggle ? this.toggleDedupMs : this.dedupMs)) {
       const rec = this.inventory.get(epc);
       if (rec) rec.lastSeen = new Date(now).toISOString();
+      if (toggle) this._lastReadAt.set(epc, now); // still presence — keeps the absence gate honest
       return null;
     }
 
@@ -306,9 +398,33 @@ class PassageDetector extends EventEmitter {
       return this._fire(epc, [...(buffered?.reads ?? []), read], now);
     }
 
+    // NO-IR absence gate: a new visit opens only after the tag has been GONE
+    // for absenceMs — "it left the field" is the no-IR substitute for "the
+    // beams cleared". Without it, a pallet parked inside the read zone would
+    // open a fresh visit the moment the re-arm window expires and flip in/out
+    // forever. The cost is deliberate: a tag that never leaves the field never
+    // fires again — that is a read-zone (power/RSSI floor) problem to fix
+    // physically, not something software can direction-guess its way out of.
+    // Sits AFTER the fast path so an IR-stamped read (observed ground truth)
+    // is never swallowed by a mere lingering heuristic.
+    if (toggle && !this._pending.has(epc)) {
+      const seenAt = this._lastReadAt.get(epc) || 0;
+      this._lastReadAt.set(epc, now);
+      if (seenAt && now - seenAt < this.absenceMs) {
+        const rec = this.inventory.get(epc);
+        if (rec) rec.lastSeen = new Date(now).toISOString();
+        return null; // lingering in the field, not a new passage
+      }
+    } else if (toggle) {
+      this._lastReadAt.set(epc, now);
+    }
+
     // SLOW PATH — no direction yet. Buffer and wait: a directioned read may
     // still arrive (the passage can open mid-window), and if none does this
     // is a stray that must be ignored rather than counted.
+    // In toggle mode the buffer means something different: it IS the visit —
+    // the quiet/max window groups one physical pass into one decision, and
+    // _fire infers the direction instead of discarding the reads.
     let p = this._pending.get(epc);
     if (!p) {
       p = { reads: [], quiet: null, max: setTimeout(() => this._decide(epc), this.maxWindowMs) };
@@ -337,34 +453,54 @@ class PassageDetector extends EventEmitter {
     const p = { reads };
 
     const rec0 = this.inventory.get(epc);
-    // DIRECTION REQUIRED: the controller stamps the IR passage direction
-    // (GPI1 first = in, GPI2 first = out) on tags read during a burst. Reads
-    // without one (manual mode, ambiguous trigger, reflections) are stray —
-    // no event, no status change.
     const firstDir = p.reads.find((x) => x.dir === 'in' || x.dir === 'out');
-    if (!firstDir) {
+    // IR mode, DIRECTION REQUIRED: the controller stamps the IR passage
+    // direction (GPI1 first = in, GPI2 first = out) on tags read during a
+    // burst. Reads without one (manual mode, ambiguous trigger, reflections)
+    // are stray — no event, no status change.
+    if (!firstDir && this.detectMode !== 'toggle') {
       this.emit('log', `stray read ignored: ${epc} has no IR direction (${p.reads.length} reads), status stays ${rec0 ? rec0.status : 'untracked'}`);
       // short cooldown only (min(dedupMs, 1s)) — a real passage moments later must still count
       this._lastEventAt.set(epc, now - Math.max(0, this.dedupMs - 1000));
       return null;
     }
+    // Toggle mode noise floor: one multipath ghost read must not flip
+    // warehouse state — a real pass between facing antennas produces plenty.
+    if (!firstDir && p.reads.length < this.toggleMinReads) {
+      this.emit('log', `no-IR visit dropped: ${epc} only ${p.reads.length} read(s) (< ${this.toggleMinReads}) — noise, not a passage`);
+      return null;
+    }
     // Passage-scoped dedup: a tag fires at most ONE event per physical
     // passage (beams broken -> clear), no matter how long it lingers in the
     // doorway. A new passage gets a new id and counts again immediately.
-    if (firstDir.pid != null && this._lastEventPassage.get(epc) === firstDir.pid) {
+    if (firstDir && firstDir.pid != null && this._lastEventPassage.get(epc) === firstDir.pid) {
       this.emit('log', `duplicate suppressed: ${epc} already fired for passage #${firstDir.pid}`);
       this._lastEventAt.set(epc, now - Math.max(0, this.dedupMs - 1000));
       return null;
     }
     this._lastEventAt.set(epc, now);
-    if (firstDir.pid != null) this._lastEventPassage.set(epc, firstDir.pid);
-    const direction = firstDir.dir;
-    const method = 'ir';
+    if (firstDir && firstDir.pid != null) this._lastEventPassage.set(epc, firstDir.pid);
 
     const known = Object.prototype.hasOwnProperty.call(this.catalog, epc);
     const item = known
       ? this.catalog[epc]
       : { sku: `UNKNOWN-${String(++this._unknownSeq).padStart(3, '0')}`, name: 'Unregistered item', pallet: null, category: null };
+
+    // Direction: observed (IR) when a stamped read exists — ground truth wins
+    // in any mode — otherwise inferred from state (toggle mode only).
+    let direction;
+    let method;
+    let basis = null;
+    if (firstDir) {
+      direction = firstDir.dir;
+      method = 'ir';
+    } else {
+      const inferred = this._inferToggleDirection(rec0, item, known);
+      direction = inferred.direction;
+      basis = inferred.basis;
+      method = 'toggle';
+      this.emit('log', `no-IR decision: ${epc} (${item.sku}) -> ${direction.toUpperCase()} [${basis}] from ${p.reads.length} reads`);
+    }
 
     // An outbound passage that Nexus's own records contradict. The passage is
     // still reported — it physically happened and the record of it is the whole
@@ -408,6 +544,10 @@ class PassageDetector extends EventEmitter {
       // ignore it (it owns the decision), but the field means the gate no
       // longer reports a contested exit as though it were a clean one.
       unexpected,
+      // toggle mode only: WHY this direction was inferred (see
+      // _inferToggleDirection). null on observed (IR) passages. Without it a
+      // desync during the no-IR trial is undiagnosable.
+      basis,
       timestamp,
     };
     this.events.unshift(event);
@@ -439,6 +579,11 @@ class PassageDetector extends EventEmitter {
       dedupMs: this.dedupMs,
       quietMs: this.quietMs,
       maxWindowMs: this.maxWindowMs,
+      detectMode: this.detectMode,
+      toggleDedupMs: this.toggleDedupMs,
+      absenceMs: this.absenceMs,
+      minRssi: this.minRssi,
+      toggleMinReads: this.toggleMinReads,
       location: this.location,
       catalogSize: Object.keys(this.catalog).length,
       catalogSource: this.catalogSource,
@@ -450,6 +595,7 @@ class PassageDetector extends EventEmitter {
     this.events.length = 0;
     this._lastEventAt.clear();
     this._lastEventPassage.clear();
+    this._lastReadAt.clear();
     for (const p of this._pending.values()) {
       if (p.quiet) clearTimeout(p.quiet);
       if (p.max) clearTimeout(p.max);

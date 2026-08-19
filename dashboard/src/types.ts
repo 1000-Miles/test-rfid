@@ -1,5 +1,25 @@
 export type Mode = 'manual' | 'ir' | 'hw';
 
+/**
+ * How the passage detector decides direction. 'ir' = observed from the two IR
+ * beams (the production setup). 'toggle' = the NO-IR trial: antennas face each
+ * other, every read burst is a passage, and direction is inferred from state
+ * (first pass = received/IN, next pass = ship/OUT).
+ */
+export type DetectMode = 'ir' | 'toggle';
+
+/** The no-IR trial's knobs, as reported by GET /nexus/summary. */
+export interface NexusConfig {
+  dedupMs: number;
+  quietMs: number;
+  maxWindowMs: number;
+  detectMode: DetectMode;
+  toggleDedupMs: number;
+  absenceMs: number;
+  minRssi: number | null;
+  toggleMinReads: number;
+}
+
 export interface GpiState {
   gpi1: boolean | null;
   gpi2: boolean | null;
@@ -93,7 +113,8 @@ export type OutboundFault = 'not-received' | 'already-shipped';
 export interface EntryMsg {
   type: 'entry' | 'exit';
   direction: 'in' | 'out';
-  method: 'antenna' | 'toggle';
+  /** 'ir' = direction observed by the beams; 'toggle' = inferred (no-IR trial). */
+  method: 'ir' | 'antenna' | 'toggle';
   epc: string;
   known: boolean;
   item: NexusItem;
@@ -108,6 +129,12 @@ export interface EntryMsg {
    * older than this field simply omits it.
    */
   unexpected?: OutboundFault | null;
+  /**
+   * Toggle mode only: WHY the direction was inferred — 'local-flip',
+   * 'state-never-received', 'state-in-building', 'state-shipped-return' or
+   * 'default-first-seen'. null/absent on observed (IR) passages.
+   */
+  basis?: string | null;
   timestamp: string;
 }
 

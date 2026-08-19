@@ -377,7 +377,10 @@ class Controller extends EventEmitter {
           }
           if (!this.connected) await sleep(5000);
         }
-        if (this.connected) this.log('Auto-reconnect OK — reader is back.');
+        if (this.connected) {
+          this.log('Auto-reconnect OK — reader is back.');
+          this.emit('reconnected');
+        }
         return;
       }
 
@@ -392,7 +395,10 @@ class Controller extends EventEmitter {
         }
         if (!this.connected) await sleep(5000);
       }
-      if (this.connected) this.log('Auto-reconnect OK — reader is back.');
+      if (this.connected) {
+        this.log('Auto-reconnect OK — reader is back.');
+        this.emit('reconnected');
+      }
     } finally {
       this._reconnecting = false;
     }

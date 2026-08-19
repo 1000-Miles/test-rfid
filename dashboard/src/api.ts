@@ -1,4 +1,4 @@
-import type { Mode, PrinterConfig, PrinterStatusInfo, PrintResult, Status } from './types';
+import type { DetectMode, Mode, NexusConfig, PrinterConfig, PrinterStatusInfo, PrintResult, Status } from './types';
 
 // Bridge host: ?bridge=<ip> in the URL targets a genuinely remote bridge (e.g.
 // a Raspberry Pi / VM elsewhere on the network).
@@ -52,11 +52,20 @@ export const api = {
     return res.json();
   },
   setPower: (dBm: number) => post<{ ok: boolean; dBm: number | null }>('/power', { dBm }),
-  nexusSummary: async (): Promise<{ dedupMs: number; quietMs: number; maxWindowMs: number }> => {
+  nexusSummary: async (): Promise<NexusConfig> => {
     const res = await fetch(`${BRIDGE_HTTP}/nexus/summary`);
     return res.json();
   },
-  setNexusConfig: (cfg: { dedupMs?: number; quietMs?: number; maxWindowMs?: number }) => post('/nexus/config', cfg),
+  setNexusConfig: (cfg: {
+    dedupMs?: number;
+    quietMs?: number;
+    maxWindowMs?: number;
+    detectMode?: DetectMode;
+    toggleDedupMs?: number;
+    absenceMs?: number;
+    minRssi?: number | null;
+    toggleMinReads?: number;
+  }): Promise<NexusConfig & { ok: boolean }> => post('/nexus/config', cfg),
   /** The bridge PC's real LAN IPv4 — what a phone on the same network can reach (never localhost). */
   network: async (): Promise<{ ok: boolean; ip: string | null }> => {
     const res = await fetch(`${BRIDGE_HTTP}/network`);
@@ -65,4 +74,7 @@ export const api = {
   /** Simulate a full IR passage — emits the same trigger + direction-stamped reads a real one does. */
   mockPassage: (body: { epc?: string; direction?: 'in' | 'out' }) =>
     post<{ ok: boolean; epc: string; direction: string }>('/debug/mock-passage', body),
+  /** Simulate a NO-IR visit — direction-less reads; only moves anything while detectMode is 'toggle'. */
+  mockVisit: (body: { epc?: string; rssi?: number; reads?: number }) =>
+    post<{ ok: boolean; epc: string; reads: number; detectMode: DetectMode }>('/debug/mock-visit', body),
 };

@@ -219,6 +219,7 @@ export function useBridge(): BridgeState {
               antennas: msg.antennas ?? [],
               reads: msg.reads ?? 0,
               unexpected: msg.unexpected ?? null,
+              basis: msg.basis ?? null,
               timestamp: msg.timestamp,
             };
             setEntries((prev) => [row, ...prev].slice(0, 100));
