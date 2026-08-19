@@ -21,6 +21,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { writeFileAtomic } = require('./atomic-write');
 
 const CACHE_PATH = path.join(__dirname, '..', 'data', 'board-cache.json');
 
@@ -61,7 +62,10 @@ class BoardFeed {
 
   _writeCache(payload) {
     try {
-      fs.writeFileSync(CACHE_PATH, JSON.stringify(payload, null, 2) + '\n');
+      // Atomic: this file is the whole "boots with no WAN still shows a board"
+      // story — a kill mid-write must leave the old complete board, not a
+      // truncated one.
+      writeFileAtomic(CACHE_PATH, JSON.stringify(payload, null, 2) + '\n');
     } catch (err) {
       this.log(`board cache write failed: ${err.message}`, 'warn');
     }

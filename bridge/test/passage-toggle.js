@@ -152,6 +152,60 @@ async function main() {
     assert(events.length === 1 && events[0]?.direction === 'out' && events[0]?.method === 'ir', 'observed direction fires immediately, method ir');
   }
 
+  console.log('hydrate: journal memory survives a "restart"');
+  {
+    const { d, events } = makeDetector({ detectMode: 'toggle' });
+    const old = new Date(Date.now() - 60_000).toISOString();
+    d.hydrate([
+      { seq: 1, at: old, event: { epc: 'DD01', direction: 'in', timestamp: old, known: false, item: { sku: 'X', name: 'x', pallet: null, category: null } } },
+    ]);
+    await burst(d, 'DD01');
+    await sleep(250);
+    assert(events.length === 1 && events[0]?.direction === 'out' && events[0]?.basis === 'local-flip', 'hydrated IN flips to OUT after restart');
+  }
+
+  console.log('hydrate: re-arm clock survives a "restart"');
+  {
+    const { d, events } = makeDetector({ detectMode: 'toggle' });
+    const justNow = new Date(Date.now() - 100).toISOString();
+    d.hydrate([{ seq: 1, at: justNow, event: { epc: 'DD02', direction: 'in', timestamp: justNow, known: false, item: null } }]);
+    await burst(d, 'DD02'); // still inside the 400ms re-arm restored from the journal
+    await sleep(250);
+    assert(events.length === 0, 'visit inside the restored re-arm window did not fire');
+  }
+
+  console.log('toggle mode: stale Nexus state still guides direction (marked, no accusation)');
+  {
+    const { d, events } = makeDetector({ detectMode: 'toggle' });
+    d.catalog = {
+      EE01: { kind: 'carton', sku: 'S-1', name: 's', pallet: null, category: null, state: 'received', receivedAt: '2026-08-01T00:00:00Z' },
+    };
+    d._cartonStateAt = Date.now() - 31 * 60_000; // older than stateMaxAgeMs (30 min)
+    await burst(d, 'EE01');
+    await sleep(250);
+    assert(events.length === 1 && events[0]?.direction === 'out' && events[0]?.basis === 'state-in-building-stale', 'stale state -> OUT, basis marked -stale');
+    assert(events[0]?.unexpected == null, 'no accusatory flag from stale state');
+  }
+
+  console.log('toggle mode: fresh Nexus record overrides old gate memory');
+  {
+    const { d, events } = makeDetector({ detectMode: 'toggle' });
+    const old = new Date(Date.now() - 10 * 60_000).toISOString();
+    d.hydrate([
+      { seq: 1, at: old, event: { epc: 'FF01', direction: 'in', timestamp: old, known: true, item: { sku: 'S-2', name: 's', pallet: null, category: null } } },
+    ]);
+    d.catalog = {
+      FF01: { kind: 'carton', sku: 'S-2', name: 's', pallet: null, category: null, state: 'shipped', receivedAt: '2026-08-01T00:00:00Z' },
+    };
+    d._cartonStateAt = Date.now(); // decisively newer than the 10-min-old local verdict
+    await burst(d, 'FF01');
+    await sleep(250);
+    assert(
+      events.length === 1 && events[0]?.direction === 'in' && events[0]?.basis === 'state-shipped-return',
+      'fresh shipped state wins over local INSIDE (local flip alone would have said OUT)'
+    );
+  }
+
   console.log('');
   if (failures) {
     console.error(`${failures} assertion(s) FAILED`);

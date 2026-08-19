@@ -94,6 +94,7 @@
 const fs = require('fs');
 const path = require('path');
 const EventEmitter = require('events');
+const { writeFileAtomic } = require('./atomic-write');
 
 const CATALOG_PATH = path.join(__dirname, '..', 'data', 'catalog.json');
 
@@ -269,7 +270,9 @@ class PassageDetector extends EventEmitter {
         `catalog loaded from Supabase: ${rows.length} carton tags (${withState.size} with a warehouse record), ${pallets} pallet tags`
       );
       try {
-        fs.writeFileSync(CATALOG_PATH, JSON.stringify(map, null, 2) + '\n', 'utf8');
+        // Atomic: this file is what an OFFLINE boot knows the tags by — a kill
+        // mid-write must leave the previous complete catalog, not half of one.
+        writeFileAtomic(CATALOG_PATH, JSON.stringify(map, null, 2) + '\n');
       } catch (err) {
         this.emit('log', `catalog cache write failed (${err.message}) — in-memory catalog still active`);
       }
@@ -308,41 +311,105 @@ class PassageDetector extends EventEmitter {
   }
 
   /**
+   * Rebuild the gate's own memory from the outbox's movement journal at boot.
+   *
+   * The in-memory live view used to die with the process, which made every tag
+   * look "never seen" after a restart — and in toggle mode that memory is the
+   * primary direction source. The journal already holds every movement this
+   * gate ever fired, so replaying "last event per EPC" restores both the
+   * INSIDE/OUTSIDE flip and the re-arm clock (_lastEventAt), making them
+   * survive restarts and long offline stretches.
+   *
+   * Purely local: no network, no 'movement' events emitted, nothing re-sent.
+   * Entries must be in seq order (Outbox.readJournal guarantees it).
+   */
+  hydrate(entries = []) {
+    let applied = 0;
+    for (const entry of entries) {
+      const e = entry && entry.event;
+      if (!e || !e.epc || (e.direction !== 'in' && e.direction !== 'out')) continue;
+      const t = Date.parse(e.timestamp || entry.at || '');
+      if (!Number.isFinite(t)) continue;
+      const iso = new Date(t).toISOString();
+      let rec = this.inventory.get(e.epc);
+      if (!rec) {
+        rec = {
+          epc: e.epc,
+          item: e.item ?? { sku: 'UNKNOWN', name: 'Unregistered item', pallet: null, category: null },
+          known: Boolean(e.known),
+          status: 'OUTSIDE',
+          firstSeen: iso,
+          lastSeen: iso,
+          entries: 0,
+          exits: 0,
+          lastMoveAt: 0,
+        };
+        this.inventory.set(e.epc, rec);
+      }
+      if (t >= (rec.lastMoveAt || 0)) {
+        rec.status = e.direction === 'in' ? 'INSIDE' : 'OUTSIDE';
+        rec.lastMoveAt = t;
+        rec.lastSeen = iso;
+        if (e.item) rec.item = e.item;
+        rec.known = Boolean(e.known);
+      }
+      // Same tally rules as _fire: a contested exit is not a dispatch.
+      if (e.direction === 'in') rec.entries += 1;
+      else if (!e.unexpected) rec.exits = (rec.exits || 0) + 1;
+      if (t > (this._lastEventAt.get(e.epc) || 0)) this._lastEventAt.set(e.epc, t);
+      applied += 1;
+    }
+    if (applied) this.emit('log', `hydrated ${this.inventory.size} tag state(s) from ${applied} journaled movement(s)`);
+    return applied;
+  }
+
+  /**
    * NO-IR direction inference — used only when detectMode is 'toggle'.
    *
    * The rule being trialled is "first pass = received, next pass = shipping
-   * out". A blind per-EPC flip implements that but desyncs silently (bridge
-   * restart, one missed read) and then inverts every later event, so the flip
-   * is anchored to the best state available, in order of freshness:
+   * out". A blind per-EPC flip implements that but desyncs silently and then
+   * inverts every later event, so the flip is anchored to evidence — and
+   * RECENCY, not a fixed pecking order, decides which evidence wins:
    *
-   *   1. local-flip     this bridge's own last verdict for the EPC. Beats the
-   *                     catalog because the 2-min catalog refresh lags the
-   *                     events this process itself just fired — without this,
-   *                     a carton received a moment ago still reads
-   *                     "never received" and double-receives.
-   *   2. state-*        Nexus carton state from the catalog, only while fresh
-   *                     (same stateMaxAgeMs stance as _outboundCheck):
+   *   local-flip        the gate's own last verdict for this EPC (survives
+   *                     restarts via hydrate()). Wins unless Nexus's snapshot
+   *                     is DECISIVELY newer — the margin is one catalog
+   *                     refresh cycle, because a snapshot merely slightly
+   *                     newer than the local event may predate that event's
+   *                     arrival in Nexus (drain + ingest + refresh lag).
+   *                     The decisive-win rule is also what lets a hand-
+   *                     correction in Nexus override the gate's memory within
+   *                     minutes instead of waiting for a restart.
+   *   state-*           Nexus carton state from the catalog:
    *                     no warehouse row = never received -> IN;
    *                     'shipped' = it left, a read now is a return -> IN;
    *                     anything else = it is in the building -> OUT.
-   *   3. default        nothing known (unknown EPC, pallet, stale state) —
-   *                     the rule's opening move: IN.
+   *                     STALE state is still used for direction — an old
+   *                     record beats a blind guess — but the basis is marked
+   *                     '-stale'. Only _outboundCheck (the accusatory flags)
+   *                     keeps a hard freshness gate: guesses may be humble,
+   *                     accusations may not be stale.
+   *   default           nothing known at all — the rule's opening move: IN.
    *
    * `basis` travels on the event so the trial tab can show WHY each direction
    * was chosen.
    */
   _inferToggleDirection(rec, item, known) {
-    if (rec && (rec.status === 'INSIDE' || rec.status === 'OUTSIDE')) {
-      return rec.status === 'INSIDE'
-        ? { direction: 'out', basis: 'local-flip' }
-        : { direction: 'in', basis: 'local-flip' };
-    }
-    const stateFresh = this._cartonStateAt && Date.now() - this._cartonStateAt <= this.stateMaxAgeMs;
-    if (known && item && item.kind === 'carton' && stateFresh) {
-      if (!item.state && !item.receivedAt) return { direction: 'in', basis: 'state-never-received' };
-      if (item.state === 'shipped') return { direction: 'in', basis: 'state-shipped-return' };
-      return { direction: 'out', basis: 'state-in-building' };
-    }
+    const flip = (status) =>
+      status === 'INSIDE' ? { direction: 'out', basis: 'local-flip' } : { direction: 'in', basis: 'local-flip' };
+    const localAt = rec && (rec.status === 'INSIDE' || rec.status === 'OUTSIDE') ? rec.lastMoveAt || 0 : 0;
+    const stateAt = this._cartonStateAt || 0;
+    const stateUsable = Boolean(known && item && item.kind === 'carton' && stateAt);
+    const stateFresh = stateUsable && Date.now() - stateAt <= this.stateMaxAgeMs;
+    const fromState = () => {
+      const suffix = stateFresh ? '' : '-stale';
+      if (!item.state && !item.receivedAt) return { direction: 'in', basis: `state-never-received${suffix}` };
+      if (item.state === 'shipped') return { direction: 'in', basis: `state-shipped-return${suffix}` };
+      return { direction: 'out', basis: `state-in-building${suffix}` };
+    };
+    if (stateUsable && stateAt > localAt + 120_000) return fromState(); // snapshot decisively newer
+    if (localAt) return flip(rec.status);
+    if (stateUsable) return fromState();
     return { direction: 'in', basis: 'default-first-seen' };
   }
 
@@ -520,6 +587,7 @@ class PassageDetector extends EventEmitter {
     }
     rec.status = direction === 'in' ? 'INSIDE' : 'OUTSIDE';
     rec.lastSeen = timestamp;
+    rec.lastMoveAt = now; // recency anchor for _inferToggleDirection
     // A contested exit is not a dispatch, so it does not move the local tally
     // the TV board counts. Status still goes OUTSIDE: whatever the paperwork
     // says, the thing is no longer in the building.

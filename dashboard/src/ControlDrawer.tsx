@@ -168,6 +168,11 @@ const BASIS_LABEL: Record<string, string> = {
   'state-never-received': 'Nexus: never received → IN',
   'state-in-building': 'Nexus: in building → OUT',
   'state-shipped-return': 'Nexus: already shipped → IN (return?)',
+  // '-stale' = the gate was offline too long to refresh, so this came from its
+  // last saved copy of Nexus's records — still a better guess than nothing.
+  'state-never-received-stale': 'Nexus (old copy): never received → IN',
+  'state-in-building-stale': 'Nexus (old copy): in building → OUT',
+  'state-shipped-return-stale': 'Nexus (old copy): already shipped → IN (return?)',
   'default-first-seen': 'nothing known → first pass IN',
 };
 
@@ -453,7 +458,8 @@ function NoIrPanel(props: { bridge: BridgeState }) {
           </li>
           <li>
             <span className="text-slate-100 font-medium">A wrong flip self-perpetuates.</span> One bad decision inverts the next one for that box. The "why"
-            column is how you catch it; fix by correcting the carton in Nexus (state wins after the local memory ages out or the bridge restarts).
+            column is how you catch it; fix by correcting the carton in Nexus — a Nexus record newer than the gate's last sighting of that box wins within a
+            few minutes. The gate's memory itself survives restarts (rebuilt from its journal).
           </li>
           <li>
             <span className="text-slate-100 font-medium">Boxes with reprinted labels flip per-label.</span> A box carrying several live EPCs can read IN under

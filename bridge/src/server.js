@@ -158,9 +158,18 @@ const nexus = new PassageDetector({
 // MOVEMENT_API_KEY is preferred because that is the variable Nexus itself reads;
 // NEXUS_API_KEY is the fallback for deployments that only carry the older name.
 const { Outbox } = require('./outbox');
+// Permanent identity of this gate — the `gateId` half of every movement's
+// immutable event id (`gateId:seq`). Falls back to the location tag so a
+// single-gate site needs no extra config, but a second gate MUST set GATE_ID
+// or the two would mint colliding event ids.
+const GATE_ID = process.env.GATE_ID?.trim();
+if (process.env.NEXUS_URL && !GATE_ID) {
+  throw new Error('GATE_ID is required when NEXUS_URL is configured; assign a permanent unique ID to this physical gate.');
+}
 const outbox = new Outbox({
   url: process.env.NEXUS_URL || '',
   apiKey: process.env.MOVEMENT_API_KEY || process.env.NEXUS_API_KEY || '',
+  gateId: GATE_ID || 'unconfigured-local-gate',
   timeoutMs: Number(process.env.MOVEMENT_TIMEOUT_MS || 10_000),
   baseBackoffMs: Number(process.env.MOVEMENT_BACKOFF_MS || 1_000),
   maxBackoffMs: Number(process.env.MOVEMENT_MAX_BACKOFF_MS || 60_000),
@@ -206,21 +215,40 @@ controller.on('reconnected', () => {
 });
 
 nexus.on('log', (text) => controller.log(`[passage] ${text}`));
+
+// The gate's own memory of who is INSIDE used to die with the process — fatal
+// for toggle mode, where that memory is the primary direction source. The
+// outbox journal already holds every movement this gate ever fired, so replay
+// it into the live view at boot: the in/out flip and the re-arm clock survive
+// restarts and offline stretches alike. Local only — nothing is re-sent.
+try {
+  nexus.hydrate(outbox.readJournal());
+} catch (err) {
+  controller.log(`journal hydrate failed (${err.message}) — starting with empty local state`, 'warn');
+}
 nexus.on('movement', (event) => {
   controller.log(
     `[passage] ${event.type === 'entry' ? 'CHECK-IN ' : 'CHECK-OUT'} ${event.item.sku} (${
       event.known ? event.item.name : 'UNKNOWN EPC'
     }) dir=${event.direction} via=${event.method} ants=[${event.antennas}] epc=${event.epc}`
   );
-  broadcast(event); // event.type is already 'entry' | 'exit'
-  // Journal FIRST (survives an outage), then the pump delivers. A failure here
-  // means the event is not durable anywhere, so it is logged loudly rather than
-  // swallowed the way a delivery failure is.
+  // Journal FIRST, broadcast SECOND — and this time the code matches the
+  // comment. The old order showed the movement on the TV before it was durable
+  // anywhere: a disk failure at that instant produced a counted-but-nonexistent
+  // event, unfindable afterwards. Now a movement is only ever shown once it is
+  // fsynced in the journal (and carries its eventId, stamped by enqueue). A
+  // journal failure is a critical alarm: the log line below broadcasts to every
+  // dashboard, and the failure is counted in /status movement.journal.
   try {
-    outbox.enqueue(event);
+    outbox.enqueue(event); // stamps event.eventId/gateId/seq in place
   } catch (err) {
-    controller.log(`[outbox] FAILED TO JOURNAL movement ${event.epc}: ${err.message}`, 'error');
+    controller.log(
+      `[outbox] FAILED TO JOURNAL movement ${event.epc}: ${err.message} — event NOT counted, NOT broadcast. Check the disk.`,
+      'error'
+    );
+    return; // not durable => not accepted: no board credit, no legacy write
   }
+  broadcast(event); // event.type is already 'entry' | 'exit'
   forwardMovementToSupabase(event); // legacy dual-write, inert after the burn-in
 });
 
