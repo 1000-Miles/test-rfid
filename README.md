@@ -124,6 +124,33 @@ Config keys: `gpi1Byte`, `gpi2Byte`, `activeHigh`. Once confirmed, bake the valu
 
 **WebSocket** `ws://localhost:3001/ws` pushes JSON messages: `tag`, `gpi`, `trigger`, `status`, `log`, `udp` (raw datagram + parse result in HW mode).
 
+### Passage-level receiving (15-second system SLA)
+
+Set both movement URLs during the staged rollout:
+
+```env
+NEXUS_URL=https://nexus.example/api/movement
+NEXUS_BATCH_URL=https://nexus.example/api/movement/batch
+GATE_ID=yiwu-main-gate
+MOVEMENT_BATCH_SETTLE_MS=500
+MOVEMENT_TOGGLE_BATCH_QUIET_MS=1500
+MOVEMENT_TOGGLE_PALLET_WINDOW_MS=120000
+```
+
+IR events use the controller's physical `passageId`. In no-IR toggle mode, the
+first inbound movement opens a durable synthetic pallet session with a fixed
+two-minute deadline. The 1.5-second quiet interval only settles the RFID burst
+and refreshes the operator UI; it does not close the pallet. Every carton read
+within the session joins the same pallet, with no carton-count limit. Clicking
+**Close & print** on `/printing` closes it immediately; if the operator does not
+click, the two-minute deadline closes and prints it automatically. Only after
+closure does the outbox send the complete assignment to Nexus. The next inbound
+carton then opens a new pallet and replaces the previous batch on GateBoard.
+`NEXUS_URL` remains the fallback for old journal entries. The TV shows Nexus's
+completed pallet, `AMZ` location, and measured system time; physical label
+printing and warehouse work are not part of that timer. Apply Nexus migration
+`20260821000100_gate_passage_auto_pallet.sql` before enabling `NEXUS_BATCH_URL`.
+
 ## Remote reader (bridge on one PC, reader on another)
 
 The driver layer is swappable (`UHF_DRIVER=dll | sidecar`), and the sidecar driver is the same

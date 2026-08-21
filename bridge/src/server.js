@@ -124,7 +124,8 @@ async function forwardMovementToSupabase(event) {
 // --- Controller ---------------------------------------------------------------
 const controller = new Controller();
 
-// --- Printer (Chainway CP30, ZPL) ----------------------------------------------
+// --- Printers: carton labels on the Chainway CP30 (ZPL, main config) and
+// --- barcode-only pallet tags on the dedicated Gprinter (TSPL, palletPrinterName)
 const { PrinterManager } = require('./printer');
 const printer = new PrinterManager({ log: (text, level) => controller.log(`[printer] ${text}`, level) });
 
@@ -163,18 +164,43 @@ const { Outbox } = require('./outbox');
 // single-gate site needs no extra config, but a second gate MUST set GATE_ID
 // or the two would mint colliding event ids.
 const GATE_ID = process.env.GATE_ID?.trim();
-if (process.env.NEXUS_URL && !GATE_ID) {
+if ((process.env.NEXUS_URL || process.env.NEXUS_BATCH_URL) && !GATE_ID) {
   throw new Error('GATE_ID is required when NEXUS_URL is configured; assign a permanent unique ID to this physical gate.');
 }
 const outbox = new Outbox({
   url: process.env.NEXUS_URL || '',
+  batchUrl: process.env.NEXUS_BATCH_URL || '',
   apiKey: process.env.MOVEMENT_API_KEY || process.env.NEXUS_API_KEY || '',
   gateId: GATE_ID || 'unconfigured-local-gate',
+  // Normally unset. Point at a scratch directory (relative to bridge/) to run
+  // test passages against a throwaway journal: nothing touches the live
+  // movement-log.jsonl, so no test event can drain to Nexus later or hydrate
+  // real toggle state on the next boot. Pair with a blank NEXUS_URL, or the
+  // pump will still deliver the scratch journal.
+  dataDir: process.env.MOVEMENT_DATA_DIR
+    ? require('path').resolve(__dirname, '..', process.env.MOVEMENT_DATA_DIR)
+    : undefined,
   timeoutMs: Number(process.env.MOVEMENT_TIMEOUT_MS || 10_000),
   baseBackoffMs: Number(process.env.MOVEMENT_BACKOFF_MS || 1_000),
   maxBackoffMs: Number(process.env.MOVEMENT_MAX_BACKOFF_MS || 60_000),
   drainPerSec: Number(process.env.MOVEMENT_DRAIN_PER_SEC || 5),
+  batchSettleMs: Number(process.env.MOVEMENT_BATCH_SETTLE_MS || 500),
+  toggleBatchQuietMs: Number(process.env.MOVEMENT_TOGGLE_BATCH_QUIET_MS || 1_500),
+  togglePalletWindowMs: Number(process.env.MOVEMENT_TOGGLE_PALLET_WINDOW_MS || 120_000),
   log: (text, level) => controller.log(`[outbox] ${text}`, level),
+});
+outbox.on('batch-sent', (reply) => {
+  broadcast({ type: 'passage-complete', timestamp: new Date().toISOString(), ...reply });
+});
+outbox.on('pallet-open', (pallet) => {
+  broadcast({ type: 'pallet-open', ...pallet });
+});
+outbox.on('batch-ready', (batch) => {
+  broadcast({ type: 'pallet-ready', ...batch });
+  if (batch.direction !== 'in') return;
+  printer.printPalletTag({ palletCode: batch.palletCode, jobId: batch.requestId })
+    .then((result) => broadcast({ type: 'pallet-print', ok: true, ...batch, replayed: result.replayed }))
+    .catch((error) => broadcast({ type: 'pallet-print', ok: false, ...batch, error: error.message }));
 });
 
 // --- Board feed (real receiving / shipping documents for the kiosk) ------------
@@ -182,7 +208,7 @@ const outbox = new Outbox({
 // setting covers both the movement push and the document reads.
 const { BoardFeed } = require('./board');
 const board = new BoardFeed({
-  baseUrl: process.env.NEXUS_BASE_URL || deriveNexusBase(process.env.NEXUS_URL || ''),
+  baseUrl: process.env.NEXUS_BASE_URL || deriveNexusBase(process.env.NEXUS_URL || process.env.NEXUS_BATCH_URL || ''),
   token: process.env.OPERATIONS_HANDHELD_TOKEN || '',
   // Kept below the kiosk poll so the faster polling actually returns fresher
   // data. Env-tunable so a site with many screens can back the Nexus read rate
@@ -389,11 +415,16 @@ app.get('/printer/status', async (_req, res) => {
   // computed against when no size is configured. Surfaced so a layout that does
   // not fill the media can be diagnosed without printing anything.
   const labelLengthDots = await printer.labelLengthDots().catch(() => null);
+  // The pallet-tag printer is a SEPARATE device with its own queue, so it needs
+  // its own readiness verdict — the CP30 being fine says nothing about it.
+  const pallet = await printer.checkPalletReady().catch((e) => ({ ready: false, detail: e.message }));
   res.json({
     ok: true,
     ...printer.getStatus(),
     printerReady: readiness.ready,
     printerDetail: readiness.detail,
+    palletReady: pallet.ready,
+    palletDetail: pallet.detail,
     labelLengthDots,
   });
 });
@@ -761,6 +792,15 @@ app.get('/movement/status', (_req, res) =>
   res.json({ ok: true, ...outbox.status(), burnInUntil: BURN_IN_UNTIL || null, legacyDirectWrite: BURN_IN_ACTIVE })
 );
 
+// Operator Print is also the explicit pallet boundary. The outbox closes the
+// durable session first; its batch-ready event then drives the local printer
+// and Nexus delivery through the same path as the two-minute timeout.
+app.post('/movement/pallet/close', (req, res) => {
+  const result = outbox.closeTogglePallet({ requestId: req.body?.requestId, reason: 'operator-print' });
+  if (!result.closed) return res.status(409).json({ ok: false, ...result });
+  res.json({ ok: true, ...result });
+});
+
 // Re-push already-delivered history. Safe to run at any time and with any
 // range — the ingest dedupes on physical passage time, so replaying the whole
 // journal produces zero duplicate rows. This is the recovery path when the pump
@@ -835,6 +875,8 @@ wss.on('connection', (ws) => {
   controller.log(`WS client connected (${wss.clients.size} total).`);
   // send a snapshot immediately
   ws.send(JSON.stringify({ type: 'status', ...controller.getStatus(), timestamp: new Date().toISOString() }));
+  const openPallet = outbox.openPallet();
+  if (openPallet) ws.send(JSON.stringify({ type: 'pallet-open', ...openPallet }));
   ws.isAlive = true;
   ws.on('pong', () => {
     ws.isAlive = true;
@@ -874,6 +916,52 @@ controller.on('message', (msg) => {
     forwardToSupabase(msg);
     nexus.tagSeen(msg); // warehouse check-in (dedup + catalog inside)
   }
+  if (msg.type === 'passage-end') outbox.flushPassage(msg.passageId);
+});
+
+app.post('/printer/print-pallet-tag', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const result = await printer.printPalletTag(body);
+    broadcast({ type: 'pallet-print', ok: true, timestamp: new Date().toISOString(), requestId: result.jobId, palletCode: result.palletCode, passageId: body.passageId ?? 'manual', cartonCount: Number(body.cartonCount) || 0, queued: Boolean(body.queued), replayed: result.replayed });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    const body = req.body || {};
+    broadcast({ type: 'pallet-print', ok: false, timestamp: new Date().toISOString(), requestId: body.jobId || `pallet:${body.palletCode || 'unknown'}`, palletCode: body.palletCode || 'UNKNOWN', passageId: body.passageId ?? 'manual', cartonCount: Number(body.cartonCount) || 0, queued: Boolean(body.queued), error: err.message });
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Make the pallet printer print its OWN config label (TSPL SELFTEST) — the only
+// way to read its printhead dpi, which palletDpi must match.
+app.post('/printer/pallet-selftest', async (_req, res) => {
+  try {
+    res.json({ ok: true, ...(await printer.palletSelfTest()) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// One sample pallet tag on the CURRENT pallet config — the "did my dpi / offset
+// / media settings come out right?" button. Uses a unique jobId per press so the
+// idempotency guard (which exists to stop a real pallet printing twice) doesn't
+// silently swallow a deliberate bench re-test.
+app.post('/printer/pallet-test-tag', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const palletCode = String(body.palletCode || 'Pallet-TEST').trim();
+    const result = await printer.printPalletTag({
+      palletCode,
+      jobId: `pallet-bench:${Date.now()}`,
+      widthMm: body.widthMm,
+      heightMm: body.heightMm,
+      leftOffsetMm: body.leftOffsetMm,
+      dpi: body.dpi,
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // --- boot ---------------------------------------------------------------------
@@ -899,6 +987,7 @@ server.listen(PORT, () => {
   // the ingest dedupe key and the row's created_at. Surface the offset at boot.
   reportClockOffset();
   outbox.start();
+  outbox.emitPendingBatches();
   board.start(); // warm the document cache so the first kiosk paint is instant
 
   // Refresh the catalog from the live tag registry (falls back to the cached

@@ -47,6 +47,17 @@ export const api = {
   printerPrint: (body: { epc?: string; title?: string; copies?: number }): Promise<PrintResult> =>
     post('/printer/print', body),
   printerRaw: (zpl: string): Promise<{ ok: boolean; error?: string }> => post('/printer/raw', { zpl }),
+  /** Make the pallet printer print its OWN config label (TSPL SELFTEST) — the
+   *  only way to read its printhead dpi, since USB RAW is one-way. */
+  palletSelfTest: (): Promise<{ ok: boolean; queue?: string; error?: string }> => post('/printer/pallet-selftest'),
+  /** One sample pallet tag on the current pallet config (or the overrides given). */
+  palletTestTag: (body: {
+    palletCode?: string;
+    widthMm?: number;
+    heightMm?: number;
+    leftOffsetMm?: number;
+    dpi?: number;
+  }): Promise<{ ok: boolean; palletCode?: string; target?: string; error?: string }> => post('/printer/pallet-test-tag', body),
   getPower: async (): Promise<{ ok: boolean; dBm: number | null }> => {
     const res = await fetch(`${BRIDGE_HTTP}/power`);
     return res.json();

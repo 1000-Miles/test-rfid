@@ -123,6 +123,10 @@ export interface EntryMsg {
   antenna: number | null;
   antennas: number[];
   reads: number;
+  passageId?: string | number | null;
+  passageRequestId?: string | null;
+  palletCode?: string | null;
+  eventId?: string | null;
   /**
    * Set only on a contested exit. The movement is real and was reported anyway;
    * this says it must not be treated as a dispatch. Optional because a bridge
@@ -144,7 +148,36 @@ export interface PingMsg {
   timestamp: string;
 }
 
-export type WsMsg = TagMsg | GpiMsg | TriggerMsg | StatusMsg | LogMsg | UdpMsg | EntryMsg | PingMsg;
+export interface PassageCompleteMsg {
+  type: 'passage-complete';
+  timestamp: string;
+  passageId: string | number;
+  processed: number;
+  systemMs: number;
+  assignment?: {
+    palletCode?: string;
+    cartonsAssigned?: number;
+    location?: string;
+  } | null;
+}
+
+export interface PalletWorkflowMsg {
+  type: 'pallet-open' | 'pallet-ready' | 'pallet-print';
+  timestamp: string;
+  requestId: string;
+  passageId: string | number;
+  palletCode: string;
+  cartonCount: number;
+  queued: boolean;
+  ok?: boolean;
+  replayed?: boolean;
+  error?: string;
+  openedAt?: string;
+  closesAt?: string;
+  closeReason?: string;
+}
+
+export type WsMsg = TagMsg | GpiMsg | TriggerMsg | StatusMsg | LogMsg | UdpMsg | EntryMsg | PingMsg | PassageCompleteMsg | PalletWorkflowMsg;
 
 export interface EntryRow extends Omit<EntryMsg, 'type'> {
   id: number;
@@ -175,6 +208,15 @@ export interface PrinterConfig {
   topOffsetDots: number;
   leftOffsetDots: number;
   extraZpl: string;
+  // Pallet-tag printer — a SEPARATE device from the CP30 above, driven with
+  // TSPL. Sizes are mm (TSPL declares label size in mm, unlike the dot-based
+  // ZPL fields); palletDpi must match the physical printhead or the design
+  // prints at the wrong scale with no error.
+  palletPrinterName: string;
+  palletWidthMm: number;
+  palletHeightMm: number;
+  palletLeftOffsetMm: number;
+  palletDpi: number;
 }
 
 export interface LastPrint {
@@ -189,6 +231,12 @@ export interface PrinterStatusInfo {
   config: PrinterConfig;
   nextEpc: string;
   lastPrint: LastPrint | null;
+  /** Main (CP30) printer reachability. undefined = older bridge. */
+  printerReady?: boolean;
+  printerDetail?: string;
+  /** Pallet-tag printer reachability — its own queue, its own verdict. */
+  palletReady?: boolean;
+  palletDetail?: string;
 }
 
 export interface PrintResult {

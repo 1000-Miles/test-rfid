@@ -580,6 +580,7 @@ class PassageDetector extends EventEmitter {
     }
 
     const timestamp = new Date(now).toISOString();
+    const scanStartedAt = new Date(Math.min(...p.reads.map((read) => read.t))).toISOString();
     let rec = rec0;
     if (!rec) {
       rec = { epc, item, known, status: 'OUTSIDE', firstSeen: timestamp, lastSeen: timestamp, entries: 0, exits: 0 };
@@ -607,6 +608,13 @@ class PassageDetector extends EventEmitter {
       antenna: strongest.ant,
       antennas: [...new Set(p.reads.map((r) => r.ant).filter((a) => a != null))],
       reads: p.reads.length,
+      // Stable boundary for one physical IR passage. The delivery layer uses
+      // this to send every carton on the pallet in one Nexus request instead
+      // of serialising one HTTP request per tag. Toggle mode has no physical
+      // passage boundary and therefore keeps the legacy single-event path.
+      passageId: firstDir?.pid ?? null,
+      detectedAt: timestamp,
+      scanStartedAt,
       // null on every ordinary passage; a reason code when this exit
       // contradicts Nexus's record of the carton. Nexus's ingest is free to
       // ignore it (it owns the decision), but the field means the gate no

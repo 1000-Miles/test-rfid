@@ -6,6 +6,7 @@ import { useGateBoard } from './documents';
 import GateBoard from './GateBoard';
 import ControlDrawer from './ControlDrawer';
 import TvBoard from './TvBoard';
+import PalletPrintingPage from './PalletPrintingPage';
 
 /**
  * Shell and router.
@@ -21,7 +22,7 @@ import TvBoard from './TvBoard';
  * without extra config; a production host needs the same SPA fallback.
  */
 
-const ROUTES = { gate: '/gateboard', tv: '/tv' } as const;
+const ROUTES = { gate: '/gateboard', tv: '/tv', printing: '/printing' } as const;
 type Route = keyof typeof ROUTES;
 
 /** Change the URL without a reload, preserving ?bridge=<ip> and friends. */
@@ -55,7 +56,7 @@ export default function App() {
   }, []);
 
   // Route table. `#tv` is the legacy hash; anything unrecognised is the board.
-  const route: Route = location.hash === '#tv' || location.pathname === ROUTES.tv ? 'tv' : 'gate';
+  const route: Route = location.hash === '#tv' || location.pathname === ROUTES.tv ? 'tv' : location.pathname === ROUTES.printing ? 'printing' : 'gate';
 
   // Give `/`, unknown paths and the legacy hash a real URL.
   useEffect(() => {
@@ -90,10 +91,11 @@ export default function App() {
   const sound = useAudioGate(voiceOn);
 
   if (route === 'tv') return <TvBoard bridge={bridge} onExit={() => navigate(ROUTES.gate)} />;
+  if (route === 'printing') return <PalletPrintingPage bridge={bridge} />;
 
   return (
     <>
-      <GateBoard bridge={bridge} board={board} sound={sound} onOpenControls={() => setControlsOpen(true)} />
+      <GateBoard board={board} entries={bridge.entries} onOpenControls={() => setControlsOpen(true)} />
       <ControlDrawer
         open={controlsOpen}
         onClose={() => setControlsOpen(false)}
@@ -102,6 +104,7 @@ export default function App() {
         voiceOn={voiceOn}
         onToggleVoice={toggleVoice}
         onOpenTv={() => navigate(ROUTES.tv)}
+        onOpenPrinting={() => navigate(ROUTES.printing)}
       />
     </>
   );

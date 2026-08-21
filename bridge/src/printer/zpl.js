@@ -346,4 +346,7 @@ function buildLabel(opts = {}) {
   return z.join('\n') + '\n';
 }
 
+// Pallet tags are NOT built here: they print as TSPL on the dedicated pallet
+// printer (see ./tspl.js) — this module is CP30/ZPL carton labels only.
+
 module.exports = { validateEpcHex, testEpc, buildLabel };

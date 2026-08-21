@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BRIDGE_WS } from './api';
-import type { EntryRow, GpiState, Status, TagRow, UdpFrameRow, WsMsg } from './types';
+import type { EntryRow, GpiState, PalletWorkflowMsg, PassageCompleteMsg, Status, TagRow, UdpFrameRow, WsMsg } from './types';
 
 const MAX_ROWS = 100;
 const MAX_UDP_ROWS = 50;
@@ -50,6 +50,8 @@ export interface BridgeState {
   uniqueEpcs: number;
   readsPerSec: number;
   lastTriggerAt: number; // ms epoch of last IR trigger (0 = none)
+  passageComplete: PassageCompleteMsg | null;
+  palletWorkflow: PalletWorkflowMsg | null;
   clear: () => void;
 }
 
@@ -73,6 +75,8 @@ export function useBridge(): BridgeState {
   const [uniqueEpcs, setUniqueEpcs] = useState(0);
   const [readsPerSec, setReadsPerSec] = useState(0);
   const [lastTriggerAt, setLastTriggerAt] = useState(0);
+  const [passageComplete, setPassageComplete] = useState<PassageCompleteMsg | null>(null);
+  const [palletWorkflow, setPalletWorkflow] = useState<PalletWorkflowMsg | null>(null);
 
   const idRef = useRef(0);
   const seenRef = useRef<Set<string>>(new Set());
@@ -218,6 +222,10 @@ export function useBridge(): BridgeState {
               antenna: msg.antenna,
               antennas: msg.antennas ?? [],
               reads: msg.reads ?? 0,
+              passageId: msg.passageId ?? null,
+              passageRequestId: msg.passageRequestId ?? null,
+              palletCode: msg.palletCode ?? null,
+              eventId: msg.eventId ?? null,
               unexpected: msg.unexpected ?? null,
               basis: msg.basis ?? null,
               timestamp: msg.timestamp,
@@ -237,6 +245,14 @@ export function useBridge(): BridgeState {
           }
           case 'trigger':
             setLastTriggerAt(Date.now());
+            break;
+          case 'passage-complete':
+            setPassageComplete(msg);
+            break;
+          case 'pallet-open':
+          case 'pallet-ready':
+          case 'pallet-print':
+            setPalletWorkflow(msg);
             break;
           case 'status':
             setStatus({
@@ -287,6 +303,8 @@ export function useBridge(): BridgeState {
     uniqueEpcs,
     readsPerSec,
     lastTriggerAt,
+    passageComplete,
+    palletWorkflow,
     clear,
   };
 }

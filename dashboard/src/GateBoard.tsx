@@ -3,8 +3,8 @@ import { activeDocs, docTitle, docTotals, pct, sumTotals, type Direction, type D
 import { accent, C, dueChip, Icon, Tile, u } from './boardKit';
 import DirectionView from './DirectionView';
 import Qr from './Qr';
-import type { BridgeState } from './useBridge';
 import type { SoundState } from './useAudioGate';
+import type { EntryRow } from './types';
 
 /**
  * Landscape warehouse gate board — 1920 × 1080 kiosk.
@@ -31,15 +31,46 @@ const IDLE_TIMEOUT_MS = 45_000;
 /** How long a just-counted product stays highlighted on the board. */
 const FOCUS_MS = 9_000;
 
-export default function GateBoard(props: { bridge: BridgeState; board: GateBoardApi; sound: SoundState; onOpenControls: () => void }) {
-  const { bridge, board } = props;
-  const { docs, exceptions } = board.board;
+export default function GateBoard(props: { board: GateBoardApi; entries: EntryRow[]; onOpenControls: () => void }) {
+  const { board } = props;
+  const { docs } = board.board;
+  const latestEntry = props.entries[0] ?? null;
+  const liveBatchId = latestEntry ? String(latestEntry.passageId ?? latestEntry.eventId ?? latestEntry.id) : null;
+  const liveEntries = useMemo(
+    () => liveBatchId == null ? [] : props.entries.filter((entry) => String(entry.passageId ?? entry.eventId ?? entry.id) === liveBatchId),
+    [props.entries, liveBatchId]
+  );
+  const liveDirection: Direction = latestEntry?.direction ?? 'in';
+  const liveDocs = useMemo<GateDoc[]>(() => {
+    if (!latestEntry || !liveBatchId) return [];
+    const counts = new Map<string, { count: number; entry: EntryRow }>();
+    for (const entry of liveEntries) {
+      const sku = entry.item?.sku || entry.epc;
+      const previous = counts.get(sku);
+      counts.set(sku, { count: (previous?.count ?? 0) + 1, entry });
+    }
+    const catalogLines = docs.flatMap((doc) => doc.lines);
+    const lines: DocLine[] = [...counts.entries()].map(([sku, value]) => {
+      const catalog = catalogLines.find((line) => line.sku === sku);
+      return {
+        sku,
+        name: value.entry.item?.name || catalog?.name || sku,
+        expected: catalog?.expected ?? value.count,
+        received: value.count,
+        photoUrl: catalog?.photoUrl ?? null,
+        emoji: catalog?.emoji ?? null,
+        unitsPerCarton: catalog?.unitsPerCarton ?? null,
+      };
+    });
+    return [{ id: liveBatchId, title: latestEntry.palletCode || `BATCH ${liveBatchId}`, dir: liveDirection, party: 'Current gate reading', meta: `${liveEntries.length} cartons read`, due: 0, lines }];
+  }, [docs, latestEntry, liveBatchId, liveDirection, liveEntries]);
+  const liveTotals = useMemo(() => sumTotals(liveDocs), [liveDocs]);
+  const liveFocus = latestEntry && liveDocs[0] ? `${liveDocs[0].id}-${latestEntry.item?.sku || latestEntry.epc}` : null;
 
   const [mode, setMode] = useState<'idle' | 'live'>('idle');
   const [dir, setDir] = useState<Direction>('in');
   /** null = the whole direction; an id = that one document. */
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [showExc, setShowExc] = useState(false);
   /** `${docId}-${sku}` of the product just counted — the tile the board points at. */
   const [focus, setFocus] = useState<string | null>(null);
 
@@ -72,23 +103,14 @@ export default function GateBoard(props: { bridge: BridgeState; board: GateBoard
   // A stray tap (the panel may still be a touchscreen) unwinds itself.
   useEffect(() => {
     const t = setInterval(() => {
-      if (mode === 'idle' || showExc) return;
+      if (mode === 'idle') return;
       if (Date.now() - lastTouch.current > IDLE_TIMEOUT_MS) {
         setMode('idle');
         setActiveId(null);
       }
     }, 1000);
     return () => clearInterval(t);
-  }, [mode, showExc]);
-
-  // "READING" pill: the reader is bursting, or a read just landed.
-  const [justRead, setJustRead] = useState(false);
-  useEffect(() => {
-    if (!board.lastCounted) return;
-    setJustRead(true);
-    const t = setTimeout(() => setJustRead(false), 1100);
-    return () => clearTimeout(t);
-  }, [board.lastCounted]);
+  }, [mode]);
 
   const inDocs = useMemo(() => activeDocs(docs, 'in'), [docs]);
   const outDocs = useMemo(() => activeDocs(docs, 'out'), [docs]);
@@ -109,25 +131,11 @@ export default function GateBoard(props: { bridge: BridgeState; board: GateBoard
     touch();
     setMode('idle');
     setActiveId(null);
-    setShowExc(false);
   };
 
   return (
     <div className="gate" style={{ width: u(1920), height: '100%', margin: '0 auto', position: 'relative', overflow: 'hidden', background: C.white, color: C.fg, display: 'flex', flexDirection: 'column', userSelect: 'none' }}>
       <Header
-        scanning={bridge.status.reading || justRead}
-        online={bridge.wsConnected && bridge.status.connected}
-        sound={props.sound}
-        feed={board.feed}
-        onRefresh={() => {
-          touch();
-          board.refresh();
-        }}
-        exceptionCount={exceptions.length}
-        onExceptions={() => {
-          touch();
-          setShowExc(true);
-        }}
         onControls={() => {
           touch();
           props.onOpenControls();
@@ -135,32 +143,14 @@ export default function GateBoard(props: { bridge: BridgeState; board: GateBoard
       />
 
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-        {mode === 'idle' ? (
-          <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', gap: u(16), padding: `${u(18)} ${u(28)}` }}>
-            <DirectionSection dir="in" docs={inDocs} totals={inTotals} focus={focus} onOpen={(id) => open('in', id)} />
-            <DirectionSection dir="out" docs={outDocs} totals={outTotals} focus={focus} onOpen={(id) => open('out', id)} />
-          </div>
-        ) : activeDoc ? (
-          <DocumentView dir={dir} doc={activeDoc} focus={focus} onBack={goIdle} onAll={() => open(dir, null)} />
-        ) : (
-          <DirectionView dir={dir} docs={dirDocs} focus={focus} onBack={goIdle} onOpenDoc={(id) => open(dir, id)} />
-        )}
+        <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', padding: `${u(18)} ${u(28)}` }}>
+          <DirectionSection dir={liveDirection} docs={liveDocs} totals={liveTotals} focus={liveFocus} onOpen={() => {}} />
+        </div>
 
         {board.dupMsg && <DupToast message={board.dupMsg} />}
         {board.flashTag && <UnknownFlash tag={board.flashTag} />}
       </div>
 
-      {showExc && (
-        <ExceptionsScreen
-          rows={exceptions}
-          onClear={() => {
-            board.clearExceptions();
-            setShowExc(false);
-          }}
-          onClose={() => setShowExc(false)}
-          onOverview={goIdle}
-        />
-      )}
     </div>
   );
 }
@@ -168,13 +158,6 @@ export default function GateBoard(props: { bridge: BridgeState; board: GateBoard
 /* ---------------------------------------------------------------- header */
 
 function Header(props: {
-  scanning: boolean;
-  online: boolean;
-  sound: SoundState;
-  feed: FeedState;
-  onRefresh: () => void;
-  exceptionCount: number;
-  onExceptions: () => void;
   onControls: () => void;
 }) {
   const [now, setNow] = useState(() => new Date());
@@ -207,34 +190,6 @@ function Header(props: {
       <div style={{ flex: '0 0 auto', width: 1, background: C.border, alignSelf: 'stretch' }} />
 
       <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: u(18) }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: u(12), minWidth: 0, flex: '0 0 auto' }}>
-          <span
-            className={props.online ? 'gate-pulse-online' : undefined}
-            style={{ width: u(13), height: u(13), borderRadius: '50%', background: props.online ? C.green : C.red, flex: '0 0 auto' }}
-            title={props.online ? 'Bridge and reader online' : 'Bridge or reader offline'}
-          />
-          <div style={{ fontSize: u(36), fontWeight: 800, letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>RFID GATE 01</div>
-        </div>
-
-        {props.scanning && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: u(12), padding: `${u(12)} ${u(22)}`, borderRadius: u(26), background: C.cyanBg, border: `1px solid ${C.cyanEdge}`, flex: '0 0 auto' }}>
-            <div className="gate-dot" style={{ width: u(14), height: u(14), borderRadius: '50%', background: C.cyan }} />
-            <div style={{ fontSize: u(17), fontWeight: 700, letterSpacing: '0.12em', color: C.cyanDk, whiteSpace: 'nowrap' }}>READING</div>
-          </div>
-        )}
-
-        <FeedChip feed={props.feed} onRefresh={props.onRefresh} />
-
-        <SoundChip state={props.sound} />
-
-        {props.exceptionCount > 0 && (
-          <div onClick={props.onExceptions} style={{ display: 'flex', alignItems: 'center', gap: u(12), padding: `${u(12)} ${u(24)}`, borderRadius: u(26), background: C.redBg, border: `1px solid ${C.redEdge}`, cursor: 'pointer', flex: '0 0 auto' }}>
-            <Icon.Warning size={24} color={C.red} />
-            <div style={{ fontSize: u(26), fontWeight: 800, color: C.red, lineHeight: 1, whiteSpace: 'nowrap' }}>{props.exceptionCount}</div>
-            <div style={{ fontSize: u(15), fontWeight: 700, letterSpacing: '0.1em', color: C.redDk, whiteSpace: 'nowrap' }}>EXCEPTIONS</div>
-          </div>
-        )}
-
         <div style={{ flex: 1, minWidth: u(20) }} />
 
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: u(4), flex: '0 0 auto' }}>
@@ -371,6 +326,11 @@ function DirectionSection(props: { dir: Direction; docs: GateDoc[]; totals: { re
   // has-no-work, not on the counts, so the layout doesn't reshuffle under a
   // forklift driver every time a carton moves between buckets.
   const empty = items.length === 0;
+  // The TV is for live progress, not the future backlog: unstarted inbound
+  // products remain represented in the total above, while the canvas focuses
+  // on cartons actively arriving or already completed. Shipping keeps all
+  // three stages because "to load" is actionable work at the outbound gate.
+  const visibleBuckets = props.dir === 'in' ? BUCKETS.filter((bucket) => bucket.key !== 'todo') : BUCKETS;
 
   return (
     <div style={{ flex: empty ? '0 0 auto' : 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: u(10) }}>
@@ -397,7 +357,7 @@ function DirectionSection(props: { dir: Direction; docs: GateDoc[]; totals: { re
         </div>
       ) : (
         <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: u(14) }}>
-          {BUCKETS.map((b) => (
+          {visibleBuckets.map((b) => (
             <StatusBox
               key={b.key}
               label={b.label[props.dir]}
@@ -407,6 +367,7 @@ function DirectionSection(props: { dir: Direction; docs: GateDoc[]; totals: { re
               items={items.filter(({ line }) => bucketOf(line) === b.key)}
               focus={props.focus}
               onOpen={props.onOpen}
+              roomy={props.dir === 'in'}
             />
           ))}
         </div>
@@ -424,30 +385,31 @@ function StatusBox(props: {
   items: BoardItem[];
   focus: string | null;
   onOpen: (id: string) => void;
+  roomy?: boolean;
 }) {
   const cartons = props.items.reduce((n, { line }) => n + line.expected, 0);
 
   return (
     <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: C.white, borderRadius: u(16), border: `1px solid ${props.tone.edge}`, boxShadow: '0 1px 3px rgba(0,0,0,0.04)', overflow: 'hidden' }}>
-      <div style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: u(10), padding: `${u(9)} ${u(14)}`, background: props.tone.soft, borderBottom: `1px solid ${props.tone.edge}` }}>
-        <div style={{ width: u(10), height: u(10), borderRadius: u(3), background: props.tone.fill, flex: '0 0 auto' }} />
-        <div style={{ fontSize: u(15), fontWeight: 800, letterSpacing: '0.14em', color: props.tone.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{props.label}</div>
+      <div style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: u(props.roomy ? 13 : 10), padding: `${u(props.roomy ? 13 : 9)} ${u(props.roomy ? 18 : 14)}`, background: props.tone.soft, borderBottom: `1px solid ${props.tone.edge}` }}>
+        <div style={{ width: u(props.roomy ? 12 : 10), height: u(props.roomy ? 12 : 10), borderRadius: u(3), background: props.tone.fill, flex: '0 0 auto' }} />
+        <div style={{ fontSize: u(props.roomy ? 24 : 15), fontWeight: 800, letterSpacing: '0.12em', color: props.tone.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{props.label}</div>
         <div style={{ flex: 1 }} />
         {props.items.length > 0 && (
-          <div style={{ fontSize: u(13), fontWeight: 600, color: C.muted, fontVariantNumeric: 'tabular-nums', flex: '0 0 auto' }}>{cartons} ctn</div>
+          <div style={{ fontSize: u(props.roomy ? 19 : 13), fontWeight: 700, color: C.muted, fontVariantNumeric: 'tabular-nums', flex: '0 0 auto' }}>{cartons} ctn</div>
         )}
-        <div style={{ minWidth: u(28), padding: `${u(2)} ${u(8)}`, borderRadius: u(20), background: props.items.length ? props.tone.fill : C.border, color: props.items.length ? C.white : C.faint, fontSize: u(16), fontWeight: 800, textAlign: 'center', fontVariantNumeric: 'tabular-nums', flex: '0 0 auto' }}>
+        <div style={{ minWidth: u(props.roomy ? 34 : 28), padding: `${u(props.roomy ? 4 : 2)} ${u(props.roomy ? 10 : 8)}`, borderRadius: u(20), background: props.items.length ? props.tone.fill : C.border, color: props.items.length ? C.white : C.faint, fontSize: u(props.roomy ? 20 : 16), fontWeight: 800, textAlign: 'center', fontVariantNumeric: 'tabular-nums', flex: '0 0 auto' }}>
           {props.items.length}
         </div>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: u(12) }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: u(props.roomy ? 16 : 12) }}>
         {props.items.length === 0 ? (
           <div style={{ fontSize: u(16), fontWeight: 600, color: C.faint, padding: `${u(10)} ${u(2)}` }}>{props.empty}</div>
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: `repeat(auto-fill, minmax(${u(134)}, 1fr))`, gap: u(8) }}>
+          <div style={{ display: 'grid', gridTemplateColumns: `repeat(auto-fill, minmax(${u(props.roomy ? 212 : 134)}, 1fr))`, gap: u(props.roomy ? 14 : 8) }}>
             {props.items.map(({ line, doc }) => (
-              <Tile key={`${doc.id}-${line.sku}`} line={line} dir={props.dir} compact focused={props.focus === `${doc.id}-${line.sku}`} doc={{ label: docTitle(doc), due: doc.due }} onClick={() => props.onOpen(doc.id)} />
+              <Tile key={`${doc.id}-${line.sku}`} line={line} dir={props.dir} compact={!props.roomy} large={props.roomy} focused={props.focus === `${doc.id}-${line.sku}`} doc={{ label: docTitle(doc), due: doc.due }} onClick={() => props.onOpen(doc.id)} />
             ))}
           </div>
         )}

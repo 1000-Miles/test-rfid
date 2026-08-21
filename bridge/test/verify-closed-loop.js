@@ -54,6 +54,7 @@ function mgr(port, verify = true) {
   pm._save = () => {};
   pm._appendLog = (e) => pm._logged.push(e);
   pm._logged = [];
+  pm.readPrintLog = ({ jobId } = {}) => pm._logged.filter((e) => !jobId || e.jobId === jobId);
   pm.setConfig({ transport: 'tcp', host: '127.0.0.1', port, verify, reprintRetries: 1 });
   return pm;
 }
@@ -157,7 +158,22 @@ async function main() {
     ok('prove-it-bites: fault slips through with verify OFF, caught with verify ON');
   }
 
-  console.log(`\n${passed}/6 scenarios passed`);
+  // 7. Pallet labels are barcode-only, durable, and idempotent by passage job.
+  {
+    const fp = fakePrinter(() => HEALTHY);
+    const port = await fp.listen();
+    const pm = mgr(port, false);
+    const first = await pm.printPalletTag({ palletCode: 'PLT-TEST-GATE-00000042', jobId: 'test-gate:passage:42' });
+    const replay = await pm.printPalletTag({ palletCode: 'PLT-TEST-GATE-00000042', jobId: 'test-gate:passage:42' });
+    assert.equal(first.replayed, false);
+    assert.equal(replay.replayed, true);
+    assert.equal(fp.printed.length, 1, 'same offline passage prints once');
+    assert.equal(pm._logged[0].kind, 'pallet');
+    await fp.close();
+    ok('offline pallet label prints once and replays idempotently');
+  }
+
+  console.log(`\n${passed}/7 scenarios passed`);
 }
 
 main().then(

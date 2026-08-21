@@ -47,11 +47,15 @@ class Outbox extends EventEmitter {
   constructor(opts = {}) {
     super();
     this.url = opts.url || '';
+    this.batchUrl = opts.batchUrl || '';
     this.apiKey = opts.apiKey || '';
     this.timeoutMs = opts.timeoutMs ?? 10_000;
     this.baseBackoffMs = opts.baseBackoffMs ?? 1_000;
     this.maxBackoffMs = opts.maxBackoffMs ?? 60_000;
     this.drainPerSec = opts.drainPerSec ?? 5;
+    this.batchSettleMs = opts.batchSettleMs ?? 500;
+    this.toggleBatchQuietMs = opts.toggleBatchQuietMs ?? 1_500;
+    this.togglePalletWindowMs = opts.togglePalletWindowMs ?? 120_000;
     this.log = opts.log || (() => {});
     // Permanent identity of THIS gate. Together with the journal seq it forms
     // the immutable event id (`gateId:seq`) stamped on every movement before it
@@ -66,6 +70,7 @@ class Outbox extends EventEmitter {
     this._archivePath = `${this._logPath}.1`;
     this._cursorPath = path.join(this.dataDir, 'movement-cursor.json');
     this._deadPath = path.join(this.dataDir, 'movement-dead.jsonl');
+    this._openPalletPath = path.join(this.dataDir, 'movement-open-pallet.json');
     this._quarantinePath = `${this._logPath}.quarantine`;
 
     this.pending = []; // [{ seq, at, event }] — undelivered, oldest first
@@ -81,12 +86,19 @@ class Outbox extends EventEmitter {
     this._stopped = false;
     this._fd = null;
     this._timer = null;
+    this._batchTimer = null;
+    this._palletTimer = null;
     this._tornRecovered = 0;
     this._journalCorrupt = false;
     this._enqueueFailures = 0;
     this._lastEnqueueError = null;
+    this._passageRequestIds = new Map();
+    this._passagePalletCodes = new Map();
+    this._readyEmitted = new Set();
+    this._togglePassage = null;
 
     this._restore();
+    this._restoreOpenPallet();
   }
 
   /**
@@ -231,6 +243,23 @@ class Outbox extends EventEmitter {
    */
   enqueue(event) {
     const seq = this.nextSeq;
+    // In no-IR receiving mode the first carton opens a fixed two-minute pallet
+    // session. Quiet RFID gaps only settle the UI; they never close the pallet.
+    if (this.batchUrl && event?.method === 'toggle' && event.direction === 'in' && event.passageId == null) {
+      if (!this._togglePassage) {
+        const openedAt = new Date();
+        this._togglePassage = {
+          id: `toggle-${seq}`,
+          openedAt: openedAt.toISOString(),
+          closesAt: new Date(openedAt.getTime() + this.togglePalletWindowMs).toISOString(),
+        };
+      }
+      event.passageId = this._togglePassage.id;
+      event.syntheticPassage = true;
+      event.palletSession = true;
+      event.palletOpenedAt = this._togglePassage.openedAt;
+      event.palletClosesAt = this._togglePassage.closesAt;
+    }
     // Immutable identity, stamped BEFORE journaling so it survives restart and
     // replay byte-for-byte. Entries journaled by older bridge versions have no
     // eventId and are sent as-is — Nexus's time-window dedupe still covers them.
@@ -238,6 +267,25 @@ class Outbox extends EventEmitter {
       event.gateId = this.gateId;
       event.seq = seq;
       event.eventId = `${this.gateId}:${seq}`;
+    }
+    if (event && event.passageId != null && !event.passageRequestId) {
+      const key = `${event.direction}:${event.passageId}`;
+      let requestId = this._passageRequestIds.get(key);
+      if (!requestId) {
+        // Controller passage numbers restart at 1 after a reboot; the durable
+        // movement sequence does not. Basing the request identity on seq avoids
+        // colliding with an old "passage 1" from a previous process lifetime.
+        requestId = `${this.gateId}:passage:${seq}`;
+        this._passageRequestIds.set(key, requestId);
+      }
+      event.passageRequestId = requestId;
+      let palletCode = this._passagePalletCodes.get(key);
+      if (!palletCode) {
+        const gate = this.gateId.toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 18) || 'GATE';
+        palletCode = `PLT-${gate}-${String(seq).padStart(8, '0')}`;
+        this._passagePalletCodes.set(key, palletCode);
+      }
+      event.palletCode = palletCode;
     }
     const entry = { seq, at: new Date().toISOString(), event };
     try {
@@ -252,7 +300,38 @@ class Outbox extends EventEmitter {
     }
     this.nextSeq = seq + 1;
     this.pending.push(entry);
-    this._pump();
+    if (event?.palletSession) {
+      this._togglePassage.requestId = event.passageRequestId;
+      this._togglePassage.palletCode = event.palletCode;
+      this._writeOpenPallet();
+      this._schedulePalletDeadline();
+      if (this._batchTimer) clearTimeout(this._batchTimer);
+      const passageId = event.passageId;
+      this._batchTimer = setTimeout(() => {
+        this._batchTimer = null;
+        this._emitPalletOpen(passageId);
+      }, this.toggleBatchQuietMs);
+      this._batchTimer.unref?.();
+      this._emitPalletOpen(passageId);
+      return { seq, eventId: event?.eventId ?? null };
+    }
+    // IR reads for one physical pallet arrive as a short burst. Debounce that
+    // burst so the pump can deliver the whole passage in one request. Events
+    // without a passage boundary retain the immediate legacy path.
+    if (this.batchUrl && event?.passageId != null) {
+      if (this._batchTimer) clearTimeout(this._batchTimer);
+      const settleMs = event.syntheticPassage ? this.toggleBatchQuietMs : this.batchSettleMs;
+      const closingPassageId = event.passageId;
+      this._batchTimer = setTimeout(() => {
+        this._batchTimer = null;
+        if (this._togglePassage?.id === closingPassageId) this._togglePassage = null;
+        this._emitBatchReady(closingPassageId);
+        this._pump();
+      }, settleMs);
+      if (this._batchTimer.unref) this._batchTimer.unref();
+    } else {
+      this._pump();
+    }
     return { seq, eventId: event?.eventId ?? null };
   }
 
@@ -290,6 +369,119 @@ class Outbox extends EventEmitter {
     } catch (err) {
       // Non-fatal: a stale cursor only costs redundant (deduped) POSTs later.
       this.log(`movement cursor write failed: ${err.message}`, 'warn');
+    }
+  }
+
+  /** The controller observed both beams clear, so no more tags can join this
+   * physical passage. Flush immediately instead of waiting for the safety
+   * debounce. */
+  flushPassage(passageId) {
+    if (!this.batchUrl || passageId == null) return;
+    if (this._batchTimer) clearTimeout(this._batchTimer);
+    this._batchTimer = null;
+    if (this._togglePassage?.id === passageId) this._togglePassage = null;
+    this._emitBatchReady(passageId);
+    this._pump();
+  }
+
+  _restoreOpenPallet() {
+    let saved;
+    try { saved = JSON.parse(fs.readFileSync(this._openPalletPath, 'utf8')); }
+    catch { return; }
+    const firstMatching = this.pending.find((entry) => entry.event?.passageId === saved?.id);
+    const closesAt = Date.parse(saved?.closesAt);
+    if (!firstMatching || !Number.isFinite(closesAt) || closesAt <= Date.now()) {
+      try { fs.unlinkSync(this._openPalletPath); } catch { /* already absent */ }
+      return;
+    }
+    this._togglePassage = saved;
+    const first = firstMatching.event;
+    const key = `${first.direction}:${first.passageId}`;
+    if (first.passageRequestId) this._passageRequestIds.set(key, first.passageRequestId);
+    if (first.palletCode) this._passagePalletCodes.set(key, first.palletCode);
+  }
+
+  _writeOpenPallet() {
+    try {
+      writeFileAtomic(this._openPalletPath, JSON.stringify(this._togglePassage) + '\n');
+    } catch (err) {
+      this.log(`open pallet state write failed: ${err.message}`, 'error');
+    }
+  }
+
+  _schedulePalletDeadline() {
+    if (!this._togglePassage) return;
+    if (this._palletTimer) clearTimeout(this._palletTimer);
+    const delay = Math.max(0, Date.parse(this._togglePassage.closesAt) - Date.now());
+    this._palletTimer = setTimeout(() => this.closeTogglePallet({ reason: 'timeout' }), delay);
+    this._palletTimer.unref?.();
+  }
+
+  openPallet() {
+    if (!this._togglePassage) return null;
+    const entries = this.pending.filter((entry) => entry.event?.passageId === this._togglePassage.id);
+    if (!entries.length) return null;
+    const first = entries[0].event;
+    return {
+      requestId: first.passageRequestId,
+      passageId: first.passageId,
+      palletCode: first.palletCode,
+      direction: first.direction,
+      cartonCount: entries.length,
+      openedAt: this._togglePassage.openedAt,
+      closesAt: this._togglePassage.closesAt,
+      queued: Boolean(this.lastError || !this.batchUrl),
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  _emitPalletOpen(passageId) {
+    const pallet = this.openPallet();
+    if (pallet?.passageId === passageId) this.emit('pallet-open', pallet);
+  }
+
+  closeTogglePallet({ requestId, reason = 'operator' } = {}) {
+    const pallet = this.openPallet();
+    if (!pallet) return { closed: false, error: 'No open pallet.' };
+    if (requestId && requestId !== pallet.requestId) {
+      return { closed: false, error: 'The open pallet changed. Refresh and try again.' };
+    }
+    if (this._batchTimer) clearTimeout(this._batchTimer);
+    if (this._palletTimer) clearTimeout(this._palletTimer);
+    this._batchTimer = null;
+    this._palletTimer = null;
+    this._togglePassage = null;
+    try { fs.unlinkSync(this._openPalletPath); } catch (err) {
+      if (err.code !== 'ENOENT') this.log(`open pallet state cleanup failed: ${err.message}`, 'warn');
+    }
+    this._emitBatchReady(pallet.passageId, reason);
+    this._pump();
+    return { closed: true, reason, ...pallet };
+  }
+
+  _emitBatchReady(passageId, closeReason) {
+    const entries = this.pending.filter((entry) => entry.event?.passageId === passageId);
+    if (!entries.length) return;
+    const first = entries[0].event;
+    const requestId = first.passageRequestId;
+    if (!requestId || this._readyEmitted.has(requestId)) return;
+    this._readyEmitted.add(requestId);
+    this.emit('batch-ready', {
+      requestId,
+      passageId,
+      palletCode: first.palletCode,
+      direction: first.direction,
+      cartonCount: entries.length,
+      queued: Boolean(this.lastError || !this.batchUrl),
+      closeReason,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  emitPendingBatches() {
+    for (const passageId of new Set(this.pending.map((entry) => entry.event?.passageId).filter((id) => id != null))) {
+      if (passageId === this._togglePassage?.id) continue;
+      this._emitBatchReady(passageId);
     }
   }
 
@@ -358,6 +550,53 @@ class Outbox extends EventEmitter {
     }
   }
 
+  /** Deliver one complete IR passage. Each member keeps its original eventId,
+   * so Nexus can apply and dedupe the same durable events as the legacy route. */
+  async _sendBatch(entries) {
+    const first = entries[0]?.event;
+    const headers = { 'Content-Type': 'application/json' };
+    if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
+    const requestId = first.passageRequestId || `${this.gateId}:passage:${first.seq}`;
+    try {
+      const res = await fetch(this.batchUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          requestId,
+          palletCode: first.palletCode,
+          gateId: this.gateId,
+          passageId: first.passageId,
+          direction: first.direction,
+          startedAt: entries.reduce(
+            (earliest, entry) => {
+              const candidate = entry.event.scanStartedAt || entry.event.timestamp;
+              return !earliest || Date.parse(candidate) < Date.parse(earliest) ? candidate : earliest;
+            },
+            null
+          ),
+          events: entries.map((entry) => entry.event),
+        }),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      const body = await res.text().catch(() => '');
+      if (res.ok) {
+        let reply;
+        try { reply = JSON.parse(body); }
+        catch { return { ok: false, terminal: false, error: `HTTP ${res.status}: invalid JSON acknowledgement` }; }
+        if (reply?.ok !== true || reply?.state !== 'applied' || reply?.requestId !== requestId) {
+          return { ok: false, terminal: false, error: `HTTP ${res.status}: invalid passage acknowledgement${body ? `: ${body.slice(0, 200)}` : ''}` };
+        }
+        return { ok: true, state: reply.state, reply };
+      }
+      const detail = `HTTP ${res.status}${body ? `: ${body.slice(0, 200)}` : ''}`;
+      if (res.status === 400) return { ok: false, terminal: true, error: detail };
+      return { ok: false, terminal: false, error: detail };
+    } catch (err) {
+      const why = err.name === 'TimeoutError' ? `timeout after ${this.timeoutMs}ms` : err.message;
+      return { ok: false, terminal: false, error: why };
+    }
+  }
+
   /**
    * Drain the queue head-first. Retries the SAME head with capped backoff until
    * it succeeds or is dead-lettered — never skipping ahead, because order is a
@@ -369,22 +608,35 @@ class Outbox extends EventEmitter {
     // happened. A human fixes the file, then restarts. (_repairJournal logged
     // the loud instruction at boot.)
     if (this._journalCorrupt) return;
-    if (this._pumping || this._stopped || !this.url) return;
+    if (this._pumping || this._stopped || (!this.url && !this.batchUrl)) return;
     this._pumping = true;
     try {
       while (this.pending.length && !this._stopped) {
         const entry = this.pending[0];
-        const result = await this._send(entry);
+        const passageId = entry.event?.passageId;
+        // The open no-IR pallet is durable but intentionally not deliverable
+        // until Print or the fixed deadline closes it.
+        if (passageId != null && passageId === this._togglePassage?.id) break;
+        const batch = [entry];
+        if (this.batchUrl && passageId != null) {
+          for (let i = 1; i < this.pending.length; i++) {
+            const candidate = this.pending[i];
+            if (candidate.event?.passageId !== passageId || candidate.event?.direction !== entry.event?.direction) break;
+            batch.push(candidate);
+          }
+        }
+        const result = this.batchUrl && passageId != null ? await this._sendBatch(batch) : await this._send(entry);
 
         if (result.ok) {
-          this.pending.shift();
-          this.cursor = entry.seq;
+          this.pending.splice(0, batch.length);
+          this.cursor = batch[batch.length - 1].seq;
           this._writeCursor();
-          this.sentCount += 1;
+          this.sentCount += batch.length;
           this.lastPushAt = new Date().toISOString();
           this.lastError = null;
           this._backoff = this.baseBackoffMs;
-          this.emit('sent', entry);
+          for (const delivered of batch) this.emit('sent', delivered);
+          if (result.reply) this.emit('batch-sent', result.reply);
           // Throttle the drain so a reconnect after a long outage doesn't
           // flood Nexus. Nothing here is time-critical once it is already late.
           if (this.pending.length) await sleep(1000 / this.drainPerSec);
@@ -414,13 +666,21 @@ class Outbox extends EventEmitter {
     if (this._timer) return;
     this._timer = setInterval(() => this._pump(), 15_000);
     if (this._timer.unref) this._timer.unref();
+    if (this._togglePassage) {
+      this._schedulePalletDeadline();
+      this._emitPalletOpen(this._togglePassage.id);
+    }
     this._pump();
   }
 
   stop() {
     this._stopped = true;
     if (this._timer) clearInterval(this._timer);
+    if (this._batchTimer) clearTimeout(this._batchTimer);
+    if (this._palletTimer) clearTimeout(this._palletTimer);
     this._timer = null;
+    this._batchTimer = null;
+    this._palletTimer = null;
     if (this._fd != null) {
       try { fs.closeSync(this._fd); } catch { /* closing on shutdown */ }
       this._fd = null;
@@ -479,6 +739,8 @@ class Outbox extends EventEmitter {
       deadLetters: this.deadCount,
       lastPushAt: this.lastPushAt,
       lastError: this.lastError,
+      openPallet: this.openPallet(),
+      togglePalletWindowMs: this.togglePalletWindowMs,
       // Journal health — the operational-visibility block. `healthy: false`
       // means either the disk is rejecting appends (enqueueFailures) or the
       // file has interior corruption and delivery is paused (corrupt).

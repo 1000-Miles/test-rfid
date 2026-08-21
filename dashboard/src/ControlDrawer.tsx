@@ -23,6 +23,7 @@ export default function ControlDrawer(props: {
   voiceOn: boolean;
   onToggleVoice: () => void;
   onOpenTv: () => void;
+  onOpenPrinting: () => void;
 }) {
   const { bridge, board } = props;
   const { status } = bridge;
@@ -79,6 +80,13 @@ export default function ControlDrawer(props: {
           <div className="flex items-center gap-3">
             <Pill ok={bridge.wsConnected} okText="Bridge" badText="Bridge" />
             <Pill ok={status.connected} okText="Reader" badText="Reader" />
+            <button
+              onClick={props.onOpenPrinting}
+              title="Open pallet printing"
+              className="text-sm rounded-md px-3 py-1.5 border border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20 font-medium"
+            >
+              Pallet printing
+            </button>
             <button
               onClick={props.onOpenTv}
               title="Open TV wallboard mode"
@@ -146,6 +154,8 @@ export default function ControlDrawer(props: {
               <Stats total={bridge.totalReads} unique={bridge.uniqueEpcs} rps={bridge.readsPerSec} />
 
               <PrintPanel rows={bridge.rows} readerConnected={status.connected} reading={status.reading} />
+
+              <PalletTagPanel />
 
               <MovementsPanel entries={bridge.entries} />
 
@@ -1161,6 +1171,181 @@ function PrintPanel(props: { rows: TagRow[]; readerConnected: boolean; reading: 
           </button>
         </div>
       </details>
+    </Card>
+  );
+}
+
+/* ------------------------------------------- Pallet tag printer (TSPL) */
+
+/** Printhead densities that exist on TSPL hardware we'd use. Free-text would
+ *  let a typo silently rescale every tag, so this is a fixed choice. */
+const PALLET_DPI_OPTIONS = [203, 300, 600];
+
+/**
+ * Config for the barcode-only pallet tag and the printer that makes it — a
+ * different device from the CP30 above (plain paper, no RFID encode, TSPL not
+ * ZPL), so it gets its own queue, media size and printhead density.
+ *
+ * The density is the reason this panel exists. TSPL declares label size in mm
+ * but positions every element in printhead DOTS, so a 300 dpi printer driven at
+ * 203 prints the whole design squashed into a corner and reports success. The
+ * printer only tells you its dpi on its own config label, hence the SELFTEST
+ * button next to the selector.
+ */
+function PalletTagPanel() {
+  const [cfg, setCfg] = useState<PrinterConfig | null>(null);
+  const [queues, setQueues] = useState<string[]>([]);
+  const [ready, setReady] = useState<{ ok?: boolean; detail?: string }>({});
+  const [testCode, setTestCode] = useState('Pallet-TEST');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [note, setNote] = useState('');
+
+  const refresh = () => {
+    api
+      .printerStatus()
+      .then((s) => {
+        if (s.config) setCfg(s.config);
+        setReady({ ok: s.palletReady, detail: s.palletDetail });
+      })
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    refresh();
+    api
+      .printerQueues()
+      .then((r) => setQueues(r.queues ?? []))
+      .catch(() => {});
+  }, []);
+
+  const applyCfg = async (partial: Partial<PrinterConfig>) => {
+    setError('');
+    setNote('');
+    // Optimistic so the inputs feel live; the bridge response is authoritative
+    // (it clamps/whitelists, e.g. a rejected dpi snaps back to 203).
+    setCfg((c) => (c ? { ...c, ...partial } : c));
+    try {
+      const r = await api.printerConfig(partial);
+      if (r.config) setCfg(r.config);
+      else if (r.error) setError(r.error);
+      // Queue changes invalidate the readiness verdict — re-probe the new one.
+      if (partial.palletPrinterName) refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const run = async (label: string, fn: () => Promise<{ ok: boolean; error?: string }>) => {
+    setBusy(true);
+    setError('');
+    setNote('');
+    try {
+      const r = await fn();
+      if (!r.ok) throw new Error(r.error || `${label} failed`);
+      setNote(`${label} sent`);
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const numField = (label: string, key: keyof PrinterConfig, step = 1) => (
+    <label className="text-sm flex-1">
+      <span className="text-slate-400">{label}</span>
+      <input
+        type="number"
+        min={0}
+        step={step}
+        value={(cfg?.[key] as number) ?? 0}
+        onChange={(e) => applyCfg({ [key]: Number(e.target.value) || 0 } as Partial<PrinterConfig>)}
+        disabled={!cfg}
+        className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm"
+      />
+    </label>
+  );
+
+  return (
+    <Card title="Pallet Tag Printer (TSPL — Gprinter / TSC)">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        {/* printer + density */}
+        <div className="flex flex-col gap-3">
+          <label className="text-sm">
+            <span className="text-slate-400">Windows print queue</span>
+            <select
+              value={cfg?.palletPrinterName ?? ''}
+              onChange={(e) => applyCfg({ palletPrinterName: e.target.value })}
+              disabled={!cfg}
+              className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 text-sm"
+            >
+              {cfg && !queues.includes(cfg.palletPrinterName) && <option value={cfg.palletPrinterName}>{cfg.palletPrinterName}</option>}
+              {queues.map((q) => (
+                <option key={q} value={q}>
+                  {q}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {ready.detail && (
+            <div
+              className={`rounded-md border px-3 py-2 text-sm font-medium ${
+                ready.ok ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-rose-500/40 bg-rose-500/10 text-rose-300'
+              }`}
+            >
+              {ready.ok ? '✓ ' : '✕ '}
+              {ready.detail}
+            </div>
+          )}
+
+          <div className="text-sm">
+            <span className="text-slate-400">Printhead density</span>
+            <div className="mt-1 flex rounded-lg bg-black/40 border border-white/10 p-1">
+              {PALLET_DPI_OPTIONS.map((d) => (
+                <ModeButton key={d} active={cfg?.palletDpi === d} onClick={() => applyCfg({ palletDpi: d })} disabled={busy || !cfg}>
+                  {d} dpi
+                </ModeButton>
+              ))}
+            </div>
+          </div>
+          <button
+            onClick={() => run('Config label', () => api.palletSelfTest())}
+            disabled={busy || !cfg}
+            className="rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-4 py-2 text-sm font-medium"
+            title="Prints the printer's own configuration label, which lists its dpi"
+          >
+            🧾 Print config label — read the dpi off it
+          </button>
+        </div>
+
+        {/* media + test print */}
+        <div className="flex flex-col gap-3">
+          <div className="flex gap-2">
+            {numField('Label width (mm)', 'palletWidthMm')}
+            {numField('Label height (mm)', 'palletHeightMm')}
+          </div>
+          {numField('Left offset (mm)', 'palletLeftOffsetMm')}
+          <label className="text-sm">
+            <span className="text-slate-400">Test tag code</span>
+            <input
+              value={testCode}
+              onChange={(e) => setTestCode(e.target.value)}
+              className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm"
+            />
+          </label>
+          <button
+            onClick={() => run('Test tag', () => api.palletTestTag({ palletCode: testCode.trim() || undefined }))}
+            disabled={busy || !cfg}
+            className="rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 px-4 py-3 font-semibold"
+          >
+            🏷 Print test tag
+          </button>
+          {note && <p className="text-sm text-emerald-300">{note}</p>}
+          {error && <p className="text-sm text-rose-400 break-all">{error}</p>}
+        </div>
+      </div>
     </Card>
   );
 }

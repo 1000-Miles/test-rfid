@@ -683,10 +683,10 @@ class Controller extends EventEmitter {
   /** Burst ended with both beams clear — close the passage. */
   _endPassage() {
     if (!this.passage) return;
-    const { direction, startedAt } = this.passage;
+    const { id, direction, startedAt } = this.passage;
     this.passage = null;
     this.log(`Passage closed (direction ${direction ?? 'unknown'}, ${Date.now() - startedAt}ms).`);
-    this.emit('message', { type: 'passage-end', direction, timestamp: new Date().toISOString() });
+    this.emit('message', { type: 'passage-end', passageId: id, direction, timestamp: new Date().toISOString() });
   }
 }
 

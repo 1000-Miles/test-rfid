@@ -200,6 +200,87 @@ async function main() {
     }
   }
 
+  console.log('passage batching: one IR passage is delivered in one request');
+  {
+    freshScratch();
+    const o = new Outbox({ dataDir: SCRATCH, gateId: 'test-gate', batchUrl: 'http://nexus.test/api/movement/batch', batchSettleMs: 5000 });
+    const originalFetch = global.fetch;
+    let payload = null;
+    global.fetch = async (_url, init) => {
+      payload = JSON.parse(init.body);
+      return Response.json({ ok: true, state: 'applied', requestId: payload.requestId });
+    };
+    try {
+      o.enqueue({ epc: 'AA01', direction: 'in', passageId: 42, timestamp: new Date().toISOString() });
+      o.enqueue({ epc: 'AA02', direction: 'in', passageId: 42, timestamp: new Date().toISOString() });
+      o.flushPassage(42);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      assert(payload?.events?.length === 2, 'two carton events sent in one passage request');
+      assert(/^PLT-TEST-GATE-\d{8}$/.test(payload.palletCode), 'bridge-issued pallet code rides in the durable payload');
+      assert(payload.events.every((event) => event.passageRequestId === payload.requestId), 'all events carry the same durable passage identity');
+      assert(o.pending.length === 0 && o.cursor === 2, 'one acknowledgement advances the whole passage');
+      console.log('  ok   batch acknowledgement advances both durable events');
+    } finally {
+      global.fetch = originalFetch;
+      o.stop();
+    }
+  }
+
+  console.log('no-IR pallet sessions: quiet gaps do not close; print or deadline does');
+  {
+    freshScratch();
+    const o = new Outbox({ dataDir: SCRATCH, gateId: 'test-gate', batchUrl: 'http://nexus.test/api/movement/batch', toggleBatchQuietMs: 10, togglePalletWindowMs: 80 });
+    const originalFetch = global.fetch;
+    const payloads = [];
+    global.fetch = async (_url, init) => {
+      const payload = JSON.parse(init.body);
+      payloads.push(payload);
+      return Response.json({ ok: true, state: 'applied', requestId: payload.requestId });
+    };
+    try {
+      o.enqueue({ epc: 'BB01', direction: 'in', method: 'toggle', timestamp: new Date().toISOString() });
+      o.enqueue({ epc: 'BB02', direction: 'in', method: 'toggle', timestamp: new Date().toISOString() });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      assert(payloads.length === 0, 'quiet gap does not send or close the open pallet');
+      o.enqueue({ epc: 'BB03', direction: 'in', method: 'toggle', timestamp: new Date().toISOString() });
+      const first = o.openPallet();
+      assert(first?.cartonCount === 3, 'cartons across quiet gaps remain on one pallet');
+      const closed = o.closeTogglePallet({ requestId: first.requestId, reason: 'operator-print' });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      assert(closed.closed && payloads.length === 1, 'operator print closes and sends exactly one pallet');
+      assert(payloads[0].events.length === 3, 'closed payload contains every carton in the session');
+
+      o.enqueue({ epc: 'BB04', direction: 'in', method: 'toggle', timestamp: new Date().toISOString() });
+      const second = o.openPallet();
+      assert(second.requestId !== first.requestId && second.palletCode !== first.palletCode, 'next carton opens a distinct pallet');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert(payloads.length === 2 && payloads[1].events.length === 1, 'fixed deadline auto-closes and sends the next pallet');
+    } finally {
+      global.fetch = originalFetch;
+      o.stop();
+    }
+  }
+
+  console.log('no-IR pallet session: open identity survives bridge restart');
+  {
+    freshScratch();
+    const firstProcess = new Outbox({ dataDir: SCRATCH, gateId: 'test-gate', batchUrl: 'http://nexus.test/api/movement/batch', togglePalletWindowMs: 5000 });
+    firstProcess.enqueue({ epc: 'CC01', direction: 'in', method: 'toggle', timestamp: new Date().toISOString() });
+    const before = firstProcess.openPallet();
+    firstProcess.stop();
+
+    const secondProcess = new Outbox({ dataDir: SCRATCH, gateId: 'test-gate', batchUrl: 'http://nexus.test/api/movement/batch', togglePalletWindowMs: 5000 });
+    try {
+      secondProcess.enqueue({ epc: 'CC02', direction: 'in', method: 'toggle', timestamp: new Date().toISOString() });
+      const after = secondProcess.openPallet();
+      assert(after?.requestId === before?.requestId, 'restart keeps the durable pallet request identity');
+      assert(after?.palletCode === before?.palletCode, 'restart keeps the printed pallet code');
+      assert(after?.cartonCount === 2, 'new carton rejoins the restored open pallet');
+    } finally {
+      secondProcess.stop();
+    }
+  }
+
   fs.rmSync(SCRATCH, { recursive: true, force: true });
   console.log('');
   if (failures) {

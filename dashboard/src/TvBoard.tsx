@@ -56,6 +56,13 @@ export default function TvBoard(props: { bridge: BridgeState; onExit: () => void
           <div className="tv-mono text-sm text-[#f5edd8]/50 mt-1">WH-ENTRANCE-1 · RFID CHECK-IN</div>
         </div>
         <div className="flex items-center gap-8">
+          {bridge.passageComplete && (
+            <div className={`tv-mono rounded-lg border px-4 py-2 text-sm ${bridge.passageComplete.systemMs <= 15000 ? 'border-[#3ddc84] text-[#3ddc84]' : 'border-[#ff4545] text-[#ff4545]'}`}>
+              {bridge.passageComplete.assignment?.palletCode ?? `${bridge.passageComplete.processed} CARTONS`}
+              {' · '}{bridge.passageComplete.assignment?.location ?? 'NEXUS'}
+              {' · '}{(bridge.passageComplete.systemMs / 1000).toFixed(1)}s
+            </div>
+          )}
           <StatusLamp on={bridge.wsConnected} label="BRIDGE" />
           <StatusLamp on={status.connected} label="READER" />
           <BeamLamp broken={bridge.gpi.gpi1 === true} unknown={bridge.gpi.gpi1 === null} />

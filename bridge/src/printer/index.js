@@ -18,6 +18,7 @@ const net = require('net');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
 const zpl = require('./zpl');
+const tspl = require('./tspl');
 
 const IS_WINDOWS = process.platform === 'win32';
 
@@ -57,6 +58,21 @@ const DEFAULT_CONFIG = {
   // printer's receive buffer drains, via ~HS) before returning — so a caller's
   // progress reflects labels actually out, not just accepted. TCP + verify only.
   trackPhysical: true,
+  // Pallet-tag printer — a SEPARATE device from the CP30. Barcode-only pallet
+  // tags print on the Gprinter (TSPL, 203 dpi) through its own OS print queue;
+  // carton labels keep going to the main printer above. Sizes are mm because
+  // TSPL SIZE takes mm and the tag design scales to any media. leftOffsetMm is
+  // per-unit head↔media alignment (the current test unit needs 5).
+  palletPrinterName: process.env.PALLET_PRINTER_NAME || 'Gprinter Test',
+  palletWidthMm: Number(process.env.PALLET_WIDTH_MM || 75),
+  palletHeightMm: Number(process.env.PALLET_HEIGHT_MM || 130),
+  palletLeftOffsetMm: Number(process.env.PALLET_LEFT_OFFSET_MM || 0),
+  // Printhead density of the pallet printer. MUST match the hardware: TSPL
+  // element coordinates are dots, so a wrong value prints the design at the
+  // wrong scale with no error anywhere. 203 for the Gprinter test unit and most
+  // TSC desktops; 300 for the 300 dpi models. Confirm per unit by running
+  // SELFTEST on the printer and reading the dpi off its config label.
+  palletDpi: Number(process.env.PALLET_DPI || 203),
 };
 
 const CONFIG_KEYS = Object.keys(DEFAULT_CONFIG);
@@ -308,6 +324,13 @@ class PrinterManager {
       else if (k === 'trackPhysical') this.config.trackPhysical = Boolean(partial.trackPhysical);
       else if (k === 'reprintRetries')
         this.config.reprintRetries = Math.max(0, Math.min(5, Math.round(Number(partial.reprintRetries) || 0)));
+      else if (k === 'palletWidthMm' || k === 'palletHeightMm')
+        this.config[k] = Number(partial[k]) > 0 ? Number(partial[k]) : DEFAULT_CONFIG[k];
+      else if (k === 'palletLeftOffsetMm') this.config[k] = Math.max(0, Number(partial[k]) || 0);
+      // Whitelisted rather than free-numeric: a typo'd density silently
+      // rescales every tag, and these are the only heads that exist on TSPL
+      // hardware we'd use.
+      else if (k === 'palletDpi') this.config.palletDpi = [203, 300, 600].includes(Number(partial[k])) ? Number(partial[k]) : DEFAULT_CONFIG.palletDpi;
       else this.config[k] = String(partial[k]);
     }
     if (this.config.transport !== 'tcp') this.config.transport = 'usb';
@@ -315,6 +338,7 @@ class PrinterManager {
     // it answers status queries instead of staying latched in degraded mode.
     this._statusMute = false;
     this._readyCache = null;
+    this._palletReadyCache = null;
     this._save();
     this.log(`config updated: ${JSON.stringify(this.config)}`);
     return this.config;
@@ -329,6 +353,9 @@ class PrinterManager {
       // /printer/print. Lets clients fall back to pushing /printer/config
       // before a run when talking to an older bridge that lacks this.
       layoutPerPrint: true,
+      // Capability flag: /printer/print-pallet-tag prints TSPL to the dedicated
+      // pallet-tag printer (mm sizes) — same contract as the Gprinter test bridge.
+      palletTag: true,
     };
   }
 
@@ -354,6 +381,21 @@ class PrinterManager {
     return result;
   }
 
+  /** Same trust model as checkReady(), but for the pallet-tag printer's queue.
+   * Always a spooler/CUPS queue — the Gprinter has no TCP transport here. */
+  async checkPalletReady() {
+    const cache = this._palletReadyCache;
+    if (cache && Date.now() - cache.at < 5000) return cache.result;
+    const name = this.config.palletPrinterName;
+    const result = !name
+      ? { ready: false, detail: 'no pallet printer configured (palletPrinterName)' }
+      : IS_WINDOWS
+        ? await this._probeQueueWindows(name)
+        : await this._probeReadyCups(name);
+    this._palletReadyCache = { at: Date.now(), result };
+    return result;
+  }
+
   async _probeReady() {
     if (this.config.transport === 'tcp') {
       const { host, port } = this.config;
@@ -372,15 +414,21 @@ class PrinterManager {
         return { ready: false, detail: `printer at ${host}:${port} unreachable (${err.message})` };
       }
     }
-    if (!IS_WINDOWS) return this._probeReadyCups();
-    // usb: `Get-Printer` is NOT trustworthy here — with the CP30 unplugged it
+    if (!IS_WINDOWS) return this._probeReadyCups(this.config.printerName);
+    return this._probeQueueWindows(this.config.printerName);
+  }
+
+  /** Windows spooler-queue readiness, by queue name (main CP30 queue or the
+   *  pallet-tag queue — the trust model is identical for both). */
+  _probeQueueWindows(queueName) {
+    // `Get-Printer` is NOT trustworthy here — with the CP30 unplugged it
     // still reports PrinterStatus Normal / WorkOffline blank (verified
     // 2026-07-15). Two signals that DO tell the truth:
     //   1. WMI Win32_Printer.WorkOffline flips True when the device is absent.
     //   2. Jobs that never drain: anything sitting in the queue older than a
     //      few seconds means nothing is consuming it.
     // DetectedErrorState catches paper-out/jam-style errors as a bonus.
-    const name = this.config.printerName.replace(/'/g, "''").replace(/"/g, '`"');
+    const name = queueName.replace(/'/g, "''").replace(/"/g, '`"');
     const script =
       `$p = Get-CimInstance Win32_Printer -Filter "Name='${name}'"; ` +
       `if (-not $p) { Write-Output 'MISSING' } else { ` +
@@ -395,13 +443,13 @@ class PrinterManager {
         (err, stdout) => {
           const out = (stdout || '').trim();
           if (err || out === 'MISSING') {
-            return resolve({ ready: false, detail: `print queue "${this.config.printerName}" not found` });
+            return resolve({ ready: false, detail: `print queue "${queueName}" not found` });
           }
           const [workOffline = '', errorState = '0', jobCount = '0', stuck = '0'] = out.split('|');
           if (/true/i.test(workOffline)) {
             return resolve({
               ready: false,
-              detail: `queue "${this.config.printerName}" reports the printer offline — is it plugged in and on?`,
+              detail: `queue "${queueName}" reports the printer offline — is it plugged in and on?`,
             });
           }
           if (Number(errorState) >= 3) {
@@ -412,10 +460,10 @@ class PrinterManager {
           if (Number(stuck) > 0) {
             return resolve({
               ready: false,
-              detail: `${jobCount} job(s) stuck in queue "${this.config.printerName}" — printer not consuming (clear the queue after reconnecting)`,
+              detail: `${jobCount} job(s) stuck in queue "${queueName}" — printer not consuming (clear the queue after reconnecting)`,
             });
           }
-          resolve({ ready: true, detail: `queue "${this.config.printerName}" ready (${jobCount} job(s) in queue)` });
+          resolve({ ready: true, detail: `queue "${queueName}" ready (${jobCount} job(s) in queue)` });
         }
       );
     });
@@ -426,8 +474,7 @@ class PrinterManager {
    * jobs with the printer unplugged, so "queue exists" proves nothing — we
    * check the queue is enabled and that jobs are actually draining.
    */
-  _probeReadyCups() {
-    const name = this.config.printerName;
+  _probeReadyCups(name) {
     return new Promise((resolve) => {
       execFile('lpstat', ['-p', name], { timeout: 10000 }, (err, stdout, stderr) => {
         const out = `${stdout || ''}${stderr || ''}`;
@@ -450,14 +497,17 @@ class PrinterManager {
                 .split(/\r?\n/)
                 .map((l) => l.split(/\s+/)[0])
                 .filter(Boolean);
-          const seen = this._cupsJobsSeen || {};
+          // Tracked per queue: probing the pallet queue must not reset the
+          // main queue's stuck-job clocks (and vice versa).
+          this._cupsJobsSeenByQueue = this._cupsJobsSeenByQueue || {};
+          const seen = this._cupsJobsSeenByQueue[name] || {};
           const next = {};
           let stuck = 0;
           for (const id of ids) {
             next[id] = seen[id] || now;
             if (now - next[id] >= 15000) stuck++;
           }
-          this._cupsJobsSeen = next;
+          this._cupsJobsSeenByQueue[name] = next;
           if (stuck > 0) {
             return resolve({
               ready: false,
@@ -681,6 +731,65 @@ class PrinterManager {
     this._save();
     this.log(`printed + encoded batch of ${n}: ${epcs[0]}..${epcs[n - 1]} via ${res.transport} -> ${res.target}`);
     return { count: n, epcs, ...res, nextEpc: zpl.testEpc(this.config.epcPrefix, this.counter + 1) };
+  }
+
+  /** Barcode-only pallet tag on the DEDICATED pallet printer (Gprinter, TSPL) —
+   * never the CP30: pallet tags are plain paper with no RFID encode, and the
+   * two devices hold different media. Sizes are mm; per-request overrides win
+   * over the stored pallet config. Idempotent by jobId so an offline restart or
+   * operator retry cannot print a second label for an already-recorded job. */
+  async printPalletTag({ palletCode, palletLabel, batchRef, jobId, copies = 1, force = false, widthMm, heightMm, leftOffsetMm, dpi } = {}) {
+    if (!palletCode) throw new Error('palletCode is required');
+    palletCode = String(palletCode).trim();
+    jobId = jobId || `pallet:${palletCode}`;
+    const prior = this.readPrintLog({ jobId }).find((entry) => entry.kind === 'pallet' && entry.palletCode === palletCode);
+    if (prior && !force) return { palletCode, jobId, replayed: true, at: prior.at };
+    const readiness = await this.checkPalletReady().catch((e) => ({ ready: false, detail: e.message }));
+    if (!readiness.ready) throw new Error(`Pallet printer not ready — ${readiness.detail}`);
+    const { data, layout } = await tspl.buildPalletTag({
+      palletCode,
+      palletLabel,
+      batchRef,
+      widthMm: Number(widthMm) > 0 ? Number(widthMm) : this.config.palletWidthMm,
+      heightMm: Number(heightMm) > 0 ? Number(heightMm) : this.config.palletHeightMm,
+      leftOffsetMm: Number.isFinite(Number(leftOffsetMm)) ? Number(leftOffsetMm) : this.config.palletLeftOffsetMm,
+      // Per-request dpi is for bench-testing a second printer without
+      // repointing the bridge; the configured head is the normal path.
+      dpi: Number(dpi) > 0 ? Number(dpi) : this.config.palletDpi,
+      copies,
+    });
+    const queue = this.config.palletPrinterName;
+    const res = IS_WINDOWS
+      ? require('./winspool').sendRaw(queue, data, 'nexus-pallet-tag')
+      : await sendRawCups(queue, data);
+    const at = new Date().toISOString();
+    this._appendLog({ kind: 'pallet', palletCode, jobId, at });
+    this.log(`printed pallet ${palletCode} (${layout} layout, ${this.config.palletDpi} dpi) -> queue "${queue}"`);
+    // res.jobId is the OS spooler's job number — kept under its own name so it
+    // can never clobber the logical jobId the caller dedupes/broadcasts by.
+    return { palletCode, jobId, at, transport: 'usb', target: queue, bytes: res.bytes ?? null, spoolJobId: res.jobId ?? null, replayed: false };
+  }
+
+  /**
+   * Make the PALLET printer print its own configuration label (TSPL SELFTEST).
+   *
+   * This is the only way to learn the printhead density, which `palletDpi` must
+   * match: USB RAW is one-way, so the bridge cannot ask. The printer answers on
+   * paper instead — the config label lists dpi along with the sensor and media
+   * settings. Deliberately NOT written to the durable print log: that log's
+   * contract is "every line is a pallet tag that physically exists", and a
+   * diagnostic page in it would corrupt the reconcile oracle.
+   */
+  async palletSelfTest() {
+    const readiness = await this.checkPalletReady().catch((e) => ({ ready: false, detail: e.message }));
+    if (!readiness.ready) throw new Error(`Pallet printer not ready — ${readiness.detail}`);
+    const queue = this.config.palletPrinterName;
+    const data = Buffer.from('SELFTEST\r\n', 'ascii');
+    const res = IS_WINDOWS
+      ? require('./winspool').sendRaw(queue, data, 'nexus-pallet-selftest')
+      : await sendRawCups(queue, data);
+    this.log(`pallet SELFTEST config label sent -> queue "${queue}"`);
+    return { queue, at: new Date().toISOString(), spoolJobId: res.jobId ?? null };
   }
 
   /** Send arbitrary ZPL verbatim (tuning/experiments, e.g. ^RS write power). */
