@@ -37,6 +37,17 @@ const { existsSync } = require('fs');
 const DEFAULT_PALLET_DPI = 203;
 const GAP_MM = 3;
 
+// Band heights as a fraction of the across-the-stack dimension, and the cap on
+// the barcode's share. Named rather than inline because they are one budget:
+// they plus the gaps have to stay under the usable height, and the leftover is
+// dead white space an operator reads as a misprint. Tuned so a 100x150 tag comes
+// out around 95% full — the remainder is the safety margin that keeps a slightly
+// mis-fed label from clipping the top line.
+const TITLE_H = 0.26;
+const REF_H = 0.1;
+const FOOTER_H = 0.07;
+const BAR_H_CAP = 0.46;
+
 // Code 128 narrow-module floor, in MILLIMETRES rather than dots — the physical
 // bar width is what a scanner cares about, and the same dot count is a
 // different bar on every head density. 0.25 mm is a conservative retail-grade
@@ -173,12 +184,14 @@ function geometry(c) {
 
 /** Built-in-font layout. Returns the job as a TSPL string (CRLF applied by the caller via toBuffer). */
 function palletTagTspl(c) {
-  const { wMm, hMm, oxMm, copies, dpm, W, H, ox, margin } = geometry(c);
-  const usable = W - margin * 2;
+  const { wMm, hMm, oxMm, copies, dpm, W, ox, margin, landscape, LW, LH } = geometry(c);
+  // Laid out in the LOGICAL canvas, exactly as the Montserrat path: LW across,
+  // LH down, which in landscape is the label turned on its side.
+  const usable = LW - margin * 2;
   const code = esc(c.palletCode);
   const title = palletCaption(c, code);
   const reference = palletReference(c, code);
-  const gap = Math.max(8, Math.round(H * 0.025));
+  const gap = Math.max(8, Math.round(LH * 0.025));
   const titleFit = fitText(title.length, usable);
   const refFit = fitText(reference.length, usable);
 
@@ -186,25 +199,37 @@ function palletTagTspl(c) {
   // (spaced out when it fits, plain when the code is long).
   const narrow = pickModule(code, usable, dpm);
   const barcodeWidth = code128Modules(code) * narrow;
-  const bx = ox + Math.max(margin, Math.round((W - barcodeWidth) / 2));
   const footerFit = fitText(title.length, usable);
 
   // Barcode takes what's left of the height, capped near the design's ~1/3
   // proportion so tall media doesn't become one giant barcode.
   const fixedH = titleFit.h + gap + refFit.h + gap + footerFit.h + Math.round(gap / 2);
-  const barH = Math.min(Math.round(H * 0.42), Math.max(40, H - margin * 2 - fixedH));
+  const barH = Math.min(Math.round(LH * BAR_H_CAP), Math.max(40, LH - margin * 2 - fixedH));
 
   // Center the whole block vertically (the cap above can leave slack).
-  let y = margin + Math.max(0, Math.round((H - margin * 2 - fixedH - barH) / 2));
+  let y = margin + Math.max(0, Math.round((LH - margin * 2 - fixedH - barH) / 2));
+
+  // Same transform as the Montserrat path: a quarter turn clockwise sends the
+  // logical top edge to the physical right edge. TSPL TEXT and BARCODE both
+  // take a rotation argument, so the built-in path can rotate too — it just
+  // could not before, which is why asking for landscape on a bridge without
+  // sharp silently produced a portrait tag.
+  const rot = landscape ? 90 : 0;
+  const place = (x, ly, lh) => (landscape ? { x: ox + (W - ly - lh), y: x } : { x: ox + x, y: ly });
 
   const lines = [`SIZE ${wMm + oxMm} mm,${hMm} mm`, `GAP ${GAP_MM} mm,0 mm`, 'DIRECTION 1', 'CLS'];
-  lines.push(`TEXT ${ox + centerX(title.length, titleFit.font, titleFit.mul, W)},${y},"${titleFit.font}",0,${titleFit.mul},${titleFit.mul},"${title}"`);
-  y += titleFit.h + gap;
-  lines.push(`TEXT ${ox + centerX(reference.length, refFit.font, refFit.mul, W)},${y},"${refFit.font}",0,${refFit.mul},${refFit.mul},"${reference}"`);
-  y += refFit.h + gap;
-  lines.push(`BARCODE ${bx},${y},"128",${barH},0,0,${narrow},${narrow * 2},"${code}"`);
+  const emitText = (text, fit) => {
+    const p = place(centerX(text.length, fit.font, fit.mul, LW), y, fit.h);
+    lines.push(`TEXT ${p.x},${p.y},"${fit.font}",${rot},${fit.mul},${fit.mul},"${text}"`);
+    y += fit.h + gap;
+  };
+
+  emitText(title, titleFit);
+  emitText(reference, refFit);
+  const bp = place(Math.max(margin, Math.round((LW - barcodeWidth) / 2)), y, barH);
+  lines.push(`BARCODE ${bp.x},${bp.y},"128",${barH},0,${rot},${narrow},${narrow * 2},"${code}"`);
   y += barH + Math.round(gap / 2);
-  lines.push(`TEXT ${ox + centerX(title.length, footerFit.font, footerFit.mul, W)},${y},"${footerFit.font}",0,${footerFit.mul},${footerFit.mul},"${title}"`);
+  emitText(title, footerFit);
   lines.push(`PRINT ${copies},1`);
   return lines.join('\n');
 }
@@ -287,15 +312,15 @@ async function buildPalletTagJob(sharp, c) {
   // which in landscape is the label turned on its side. `place` is the only
   // place that knows about rotation.
   const [titleBmp, refBmp, footerBmp] = await Promise.all([
-    textBitmap(sharp, title, FONT_BOLD, Math.max(28, Math.round(LH * 0.2)), usable, dpi, landscape),
-    textBitmap(sharp, reference, FONT_BOLD, Math.max(18, Math.round(LH * 0.09)), usable, dpi, landscape),
-    textBitmap(sharp, title, FONT_MEDIUM, Math.max(14, Math.round(LH * 0.065)), usable, dpi, landscape),
+    textBitmap(sharp, title, FONT_BOLD, Math.max(28, Math.round(LH * TITLE_H)), usable, dpi, landscape),
+    textBitmap(sharp, reference, FONT_BOLD, Math.max(18, Math.round(LH * REF_H)), usable, dpi, landscape),
+    textBitmap(sharp, title, FONT_MEDIUM, Math.max(14, Math.round(LH * FOOTER_H)), usable, dpi, landscape),
   ]);
 
   const narrow = pickModule(code, usable, dpm);
   const barW = code128Modules(code) * narrow;
   const fixedH = titleBmp.logicalH + gap + refBmp.logicalH + gap + Math.round(gap / 2) + footerBmp.logicalH;
-  const barH = Math.min(Math.round(LH * 0.42), Math.max(40, LH - margin * 2 - fixedH));
+  const barH = Math.min(Math.round(LH * BAR_H_CAP), Math.max(40, LH - margin * 2 - fixedH));
 
   /** Logical (x,y) of an element sized lw x lh -> emitted top-left.
    *  A quarter turn clockwise sends the logical TOP edge to the physical RIGHT
