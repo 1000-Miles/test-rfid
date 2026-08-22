@@ -274,7 +274,9 @@ function geometry(c) {
   };
 }
 
-/** Built-in-font layout. Returns the job as a TSPL string (CRLF applied by the caller via toBuffer). */
+/** Built-in-font layout. Returns the job as a Buffer: the barcode is a BITMAP
+ *  (this firmware drops rotated BARCODE commands) and its payload is binary, so
+ *  the job can no longer be a string that gets newline-rewritten. */
 function palletTagTspl(c) {
   const { wMm, hMm, oxMm, copies, dpm, W, ox, margin, landscape, LW, LH } = geometry(c);
   // Laid out in the LOGICAL canvas, exactly as the Montserrat path: LW across,
@@ -290,7 +292,6 @@ function palletTagTspl(c) {
   // Barcode centered; module width from fit math. Our own readable line below
   // (spaced out when it fits, plain when the code is long).
   const narrow = pickModule(code, usable, dpm);
-  const barcodeWidth = code128Modules(code) * narrow;
   const footerFit = fitText(title.length, usable);
 
   // Barcode takes what's left of the height, capped near the design's ~1/3
@@ -309,21 +310,27 @@ function palletTagTspl(c) {
   const rot = landscape ? 90 : 0;
   const place = (x, ly, lh) => (landscape ? { x: ox + (W - ly - lh), y: x } : { x: ox + x, y: ly });
 
-  const lines = [`SIZE ${wMm + oxMm} mm,${hMm} mm`, `GAP ${GAP_MM} mm,0 mm`, 'DIRECTION 1', 'CLS'];
+  const parts = [cmd(`SIZE ${wMm + oxMm} mm,${hMm} mm`), cmd(`GAP ${GAP_MM} mm,0 mm`), cmd('DIRECTION 1'), cmd('CLS')];
   const emitText = (text, fit) => {
     const p = place(centerX(text.length, fit.font, fit.mul, LW), y, fit.h);
-    lines.push(`TEXT ${p.x},${p.y},"${fit.font}",${rot},${fit.mul},${fit.mul},"${text}"`);
+    parts.push(cmd(`TEXT ${p.x},${p.y},"${fit.font}",${rot},${fit.mul},${fit.mul},"${text}"`));
     y += fit.h + gap;
   };
 
   emitText(title, titleFit);
   emitText(reference, refFit);
-  const bp = place(Math.max(margin, Math.round((LW - barcodeWidth) / 2)), y, barH);
-  lines.push(`BARCODE ${bp.x},${bp.y},"128",${barH},0,${rot},${narrow},${narrow * 2},"${code}"`);
+  // Rasterised here too, not just on the Montserrat path. Drawing the barcode
+  // needs no sharp — only bit packing — so the zero-dependency fallback has no
+  // reason to keep using a native BARCODE this firmware silently discards.
+  // Without this, a bridge missing sharp printed a landscape tag with no
+  // barcode at all, which is exactly what reached the gate.
+  const barBmp = barcodeBitmap(code, narrow, barH, landscape);
+  const bp = place(Math.max(margin, Math.round((LW - barBmp.logicalW) / 2)), y, barBmp.logicalH);
+  parts.push(bitmapCmd(bp.x, bp.y, barBmp));
   y += barH + Math.round(gap / 2);
   emitText(title, footerFit);
-  lines.push(`PRINT ${copies},1`);
-  return lines.join('\n');
+  parts.push(cmd(`PRINT ${copies},1`));
+  return Buffer.concat(parts);
 }
 
 // ── Montserrat bitmap rendering ───────────────────────────────────────────────
@@ -468,12 +475,13 @@ async function buildPalletTag(content) {
   // The built-in-font fallback has no rotation, so it reports the orientation it
   // actually produced rather than the one asked for — a caller that logs the
   // requested value would claim a landscape tag that printed portrait.
-  const text = palletTagTspl(content);
+  // Already a Buffer with CRLF applied — the fallback carries a BITMAP barcode
+  // now, and its binary payload must never pass through newline rewriting.
   return {
-    data: Buffer.from(text.replace(/\n/g, '\r\n') + '\r\n', 'ascii'),
+    data: palletTagTspl(content),
     layout: 'builtin',
     dpi,
-    orientation: 'portrait',
+    orientation: landscape ? 'landscape' : 'portrait',
   };
 }
 
