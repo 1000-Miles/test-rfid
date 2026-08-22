@@ -182,8 +182,13 @@ const esc = (s) => String(s).replace(/["\\]/g, ' ').trim();
 function palletCaption(c, code) {
   const supplied = esc(c.palletLabel || '');
   if (supplied) return supplied;
+  // Current codes (PALLET-007) are already the name: printing them verbatim
+  // keeps the caption, the barcode and the screen character-for-character the
+  // same thing, which is the point of shortening the code in the first place.
+  if (/^PALLET-(?:[A-Z0-9]+-)?\d+$/i.test(code)) return code.toUpperCase();
+  // Legacy PLT-GATE-00000319 codes still get a readable caption.
   const match = code.match(/(\d+)$/);
-  return match ? `Pallet ${Number(match[1])}` : code.replace(/^PLT[-_ ]*/i, 'Pallet ');
+  return match ? `PALLET-${String(Number(match[1])).padStart(3, '0')}` : code.replace(/^PLT[-_ ]*/i, 'PALLET-');
 }
 
 /** Receiving-batch reference when the operator/Nexus knows it; offline labels

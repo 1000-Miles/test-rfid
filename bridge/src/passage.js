@@ -35,8 +35,11 @@
  *       passage by 10-20s)
  *     - minRssi: optional logical read-zone shrink — weaker reads are ignored
  *       entirely (not even presence), as if the tag were out of range
- *     - toggleMinReads: a visit with fewer reads is dropped as noise; one
- *       multipath ghost read must not flip warehouse state
+ *     - toggleMinReads: a visit with fewer reads is dropped as noise.
+ *       DEFAULT 1 — i.e. off. Set >1 only with evidence of ghost reads at this
+ *       gate, and never without somewhere for the drops to show: a single read
+ *       is usually a real carton at an awkward angle, and dropping it loses a
+ *       carton silently, which costs far more than an occasional stray.
  *
  * Direction (two IR beams, decided by the bridge controller):
  *   - GPI1 beam broken first = IN, GPI2 beam broken first = OUT. The
@@ -71,14 +74,18 @@
  *     apart. Each successful load is cached to data/catalog.json so offline
  *     boots still know the tags. Unknown EPCs are auto-registered as unknown
  *     items (still tracked).
- *   - Outbound sanity check: an exit whose carton Nexus says was never
- *     received, or has already shipped, is stamped `unexpected: <reason>`.
- *     Such an exit is still reported and still journaled — it physically
- *     happened — but it is not presented as a dispatch: it does not move the
- *     local exit tally, the board files it as an exception instead of
- *     crediting a shipment line, and the voice warns instead of confirming.
- *     See _outboundCheck for why the check is a blacklist and why it goes
- *     quiet rather than guessing when the state data is stale.
+ *   - Sanity check, both directions (_movementCheck). A passage that
+ *     contradicts what Nexus knows is stamped `unexpected: <reason>`:
+ *       inbound  'no-open-batch'    no live receiving batch expects this
+ *                                   product, so nothing here is a receipt
+ *       outbound 'not-received'     the carton was never taken in
+ *       outbound 'already-shipped'  the carton has already left
+ *     Such a passage is still reported and still journaled — it physically
+ *     happened — but it is not presented as a receipt or a dispatch: it moves
+ *     neither local tally, the board files it as an exception instead of
+ *     crediting a line, and the TV stamps it as an anomaly instead of
+ *     CHECKED IN. Every arm goes QUIET rather than guessing when its source
+ *     data is missing or stale; see _movementCheck.
  *   - In-memory live view: epc -> { item, status: 'INSIDE'|'OUTSIDE', ... }.
  *     This is a LOCAL DISPLAY CONVENIENCE for the dashboard/TV board only — it
  *     resets on restart and is not a record of anything. Nexus owns warehouse
@@ -88,7 +95,7 @@
  *   { type: 'entry'|'exit', direction: 'in'|'out', method: 'ir'|'toggle',
  *     epc, known, item, location, timestamp, antennas: number[],
  *     basis: null | string (toggle only: WHY this direction was inferred),
- *     unexpected: null | 'not-received' | 'already-shipped' }.
+ *     unexpected: null | 'no-open-batch' | 'not-received' | 'already-shipped' }.
  */
 
 const fs = require('fs');
@@ -109,7 +116,7 @@ class PassageDetector extends EventEmitter {
     this.toggleDedupMs = opts.toggleDedupMs ?? 60_000;
     this.absenceMs = opts.absenceMs ?? 30_000;
     this.minRssi = Number.isFinite(opts.minRssi) ? opts.minRssi : null;
-    this.toggleMinReads = opts.toggleMinReads ?? 2;
+    this.toggleMinReads = opts.toggleMinReads ?? 1; // 1 = accept a single read; see the note above
     this._lastReadAt = new Map(); // epc -> ms epoch of last accepted read (feeds the absence gate)
     this.location = opts.location ?? 'WH-ENTRANCE-1';
     this.catalogUrl = opts.catalogUrl || ''; // Supabase project URL for the tag registry
@@ -121,6 +128,11 @@ class PassageDetector extends EventEmitter {
     // back to reporting the passage without a verdict.
     this.stateMaxAgeMs = opts.stateMaxAgeMs ?? 30 * 60_000;
     this._cartonStateAt = null; // ms epoch of the last successful warehouse_carton read
+    // Injected by server.js from the BoardFeed: sku -> true | false | null.
+    // A function rather than a snapshot because the board refreshes on its own
+    // schedule and the answer must be the one true at PASSAGE time, not at
+    // construction time. Absent (reader-only builds, tests) = never judged.
+    this.expectsInbound = typeof opts.expectsInbound === 'function' ? opts.expectsInbound : null;
     this.catalog = {};
     this.inventory = new Map(); // epc -> record
     this.events = []; // newest first, capped
@@ -345,6 +357,13 @@ class PassageDetector extends EventEmitter {
       `${withdrawn.length} carton tag(s) withdrawn in Nexus (receiving reset or delete) — ` +
         `${cleared} local record(s) set OUTSIDE; they now read as ARRIVING at the gate`
     );
+    // Tell the screens too. Fixing the gate's own direction state is only half
+    // the job: the kiosk holds its own record of what it has credited today, and
+    // after a reset in Nexus that record is stale in a way no poll reveals —
+    // the cartons come back through and the board answers "already received
+    // today" while the pallet and the print show them correctly. Nothing else
+    // knows a reset happened, so the detector has to say so.
+    this.emit('withdrawn', { epcs: withdrawn, cleared });
   }
 
   /**
@@ -365,8 +384,32 @@ class PassageDetector extends EventEmitter {
    * and can grow, and an unrecognised state must read as "no objection" rather
    * than alarming on every passage the day a new state is added.
    */
-  _outboundCheck(item) {
+  _movementCheck(direction, item, rec) {
     if (!item || item.kind !== 'carton') return null; // pallets have their own lifecycle
+
+    // INBOUND: is any live receiving batch actually waiting for this product?
+    // Nothing arrives at a warehouse door by accident, so a carton whose product
+    // is on no open batch is either a mis-tag, a delivery nobody booked, or
+    // stock that never left — none of which is a receipt.
+    if (direction === 'in') {
+      if (!this.expectsInbound) return null;
+      return this.expectsInbound(item.sku) === false ? 'no-open-batch' : null;
+    }
+
+    // OUTBOUND: does Nexus's own record of the carton contradict it leaving?
+    //
+    // FIRST, believe our own eyes. If this gate watched the carton come IN, it
+    // is in the building — whatever the snapshot says. The snapshot is up to
+    // `NEXUS_CATALOG_REFRESH_MS` old and sits behind the outbox's delivery lag,
+    // so a carton received two minutes ago and leaving now is simply not in it
+    // yet, and every one of those exits was being stamped 'not-received'. The
+    // screens went permanently red for movements that were entirely correct,
+    // which reads as a caching fault because that is exactly what it is.
+    //
+    // Local evidence only ever SUPPRESSES an accusation here; it never creates
+    // one. A carton this gate never saw arrive is still judged on the snapshot.
+    if (rec && rec.status === 'INSIDE') return null;
+
     if (!this._cartonStateAt) return null; // state never loaded — nothing to check against
     if (Date.now() - this._cartonStateAt > this.stateMaxAgeMs) return null; // too stale to accuse
     if (!item.receivedAt && !item.state) return 'not-received';
@@ -595,10 +638,18 @@ class PassageDetector extends EventEmitter {
       this._lastEventAt.set(epc, now - Math.max(0, this.dedupMs - 1000));
       return null;
     }
-    // Toggle mode noise floor: one multipath ghost read must not flip
-    // warehouse state — a real pass between facing antennas produces plenty.
+    // Toggle mode noise floor. OFF by default (toggleMinReads = 1): a tag read
+    // once is a carton that was read once, not noise. This dropped real stock
+    // — a carton read a single time vanished with only a log line to show for
+    // it, so the board showed 7 of 8 and nothing said why.
+    //
+    // The drop is now emitted as a 'dropped' event as well as a log line, so if
+    // the floor is ever raised again the losses are visible on the board
+    // instead of silent.
     if (!firstDir && p.reads.length < this.toggleMinReads) {
-      this.emit('log', `no-IR visit dropped: ${epc} only ${p.reads.length} read(s) (< ${this.toggleMinReads}) — noise, not a passage`);
+      const detail = `${epc} only ${p.reads.length} read(s) (< ${this.toggleMinReads})`;
+      this.emit('log', `no-IR visit dropped: ${detail} — treated as noise, NOT counted`);
+      this.emit('dropped', { epc, reads: p.reads.length, minReads: this.toggleMinReads, timestamp: new Date(now).toISOString() });
       return null;
     }
     // Passage-scoped dedup: a tag fires at most ONE event per physical
@@ -638,9 +689,12 @@ class PassageDetector extends EventEmitter {
     // point — but it is stamped so nothing downstream mistakes it for a clean
     // dispatch: the board files it as an exception instead of crediting a
     // shipment line, and the voice warns instead of confirming.
-    const unexpected = direction === 'out' && known ? this._outboundCheck(item) : null;
+    const unexpected = known ? this._movementCheck(direction, item, rec0) : null;
     if (unexpected) {
-      this.emit('log', `UNEXPECTED OUT: ${epc} (${item.sku}) — ${unexpected}; reported but not counted as shipped`);
+      this.emit(
+        'log',
+        `UNEXPECTED ${direction.toUpperCase()}: ${epc} (${item.sku}) — ${unexpected}; reported but not counted`
+      );
     }
 
     const timestamp = new Date(now).toISOString();
@@ -656,8 +710,13 @@ class PassageDetector extends EventEmitter {
     // A contested exit is not a dispatch, so it does not move the local tally
     // the TV board counts. Status still goes OUTSIDE: whatever the paperwork
     // says, the thing is no longer in the building.
-    if (direction === 'in') rec.entries += 1;
-    else if (!unexpected) rec.exits = (rec.exits || 0) + 1;
+    // A contested passage is not a receipt and not a dispatch, so it moves
+    // neither tally. Status still follows the physical fact: the thing is
+    // either in the building or it is not, whatever the paperwork says.
+    if (unexpected) {
+      /* counted in neither direction */
+    } else if (direction === 'in') rec.entries += 1;
+    else rec.exits = (rec.exits || 0) + 1;
 
     const strongest = p.reads.reduce((a, b) => ((b.rssi ?? -999) > (a.rssi ?? -999) ? b : a));
     const event = {
@@ -728,6 +787,36 @@ class PassageDetector extends EventEmitter {
       catalogSize: Object.keys(this.catalog).length,
       catalogSource: this.catalogSource,
     };
+  }
+
+  /**
+   * Receiving was reset in Nexus, so forget everything this gate believes about
+   * where each carton is.
+   *
+   * Without this the bridge silently rejects a redo. Its per-EPC memory
+   * outlives the reset, and each part of it refuses a re-read for a different
+   * reason: `_lastEventAt` holds the tag inside `toggleDedupMs`, and
+   * `inventory` still says INSIDE so the direction inference reports the carton
+   * LEAVING. Walk the same eight cartons back through and only the two that
+   * happen to clear every gate register — the reader sees all eight and the
+   * bridge accepts two.
+   *
+   * `_lastReadAt` is deliberately KEPT, for the reason _forgetWithdrawn gives:
+   * it is the absence gate, the only thing stopping a pallet parked in the read
+   * zone from firing on its own, and a reset in Nexus is not a movement at the
+   * door. A carton still has to leave the field and come back — which is what
+   * physically happens when someone redoes the receiving.
+   */
+  resetForReceiving() {
+    const known = this.inventory.size;
+    const readAt = new Map(this._lastReadAt); // survive the wipe below
+    this.reset();
+    this._lastReadAt = readAt;
+    this.emit(
+      'log',
+      `receiving reset — cleared movement memory for ${known} tag(s); every carton now reads as ARRIVING ` +
+        `(absence gate kept, so a tag must still leave the read zone first)`
+    );
   }
 
   reset() {

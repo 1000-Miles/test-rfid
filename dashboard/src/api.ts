@@ -58,11 +58,24 @@ export const api = {
     leftOffsetMm?: number;
     dpi?: number;
   }): Promise<{ ok: boolean; palletCode?: string; target?: string; error?: string }> => post('/printer/pallet-test-tag', body),
-  getPower: async (): Promise<{ ok: boolean; dBm: number | null }> => {
+  getPower: async (): Promise<{ ok: boolean; dBm: number | null; applied?: Record<number, number> }> => {
     const res = await fetch(`${BRIDGE_HTTP}/power`);
     return res.json();
   },
   setPower: (dBm: number) => post<{ ok: boolean; dBm: number | null }>('/power', { dBm }),
+  /** Which antenna ports the reader has enabled. */
+  antennas: async (): Promise<{ ok: boolean; enabled: number[] }> => {
+    const res = await fetch(`${BRIDGE_HTTP}/antennas`);
+    return res.json();
+  },
+  /** Enable a set of ports. The reader rejects this mid-inventory, so the
+   *  bridge pauses and resumes around it. */
+  setAntennas: (ports: number[]) => post<{ ok: boolean; enabled: number[]; rc: number }>('/antennas', { ports }),
+  /** Power per antenna, e.g. { 3: 20, 4: 26 }. The ports at a gate are not
+   *  equivalent — one covers the doorway, another reaches down the aisle — so a
+   *  single global dBm is the wrong knob for tuning a read zone. */
+  setAntennaPower: (perAntenna: Record<number, number>) =>
+    post<{ ok: boolean; rc: number; applied: Record<number, number> }>('/power', { perAntenna }),
   nexusSummary: async (): Promise<NexusConfig> => {
     const res = await fetch(`${BRIDGE_HTTP}/nexus/summary`);
     return res.json();

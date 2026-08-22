@@ -41,11 +41,35 @@ class BoardFeed {
     // payload and the faster polling achieves nothing. BOARD_CACHE_MS overrides;
     // raise it and the kiosk interval together if Nexus read load ever bites.
     this.maxAgeMs = opts.maxAgeMs ?? 4_000;
+    // How long a FAILING board may still be trusted to judge an inbound passage
+    // (see expectsInbound). Far longer than maxAgeMs on purpose: serving a
+    // slightly stale board to a screen is harmless, but refusing to credit a
+    // real delivery because the WAN blipped is not, so the verdict outlives the
+    // display's idea of freshness.
+    this.expectMaxAgeMs = opts.expectMaxAgeMs ?? 30 * 60_000;
     this.log = opts.log || (() => {});
+    // Called when a load shows receiving having gone BACKWARDS — see _detectReset.
+    this.onReceivingReset = opts.onReceivingReset || (() => {});
     this.lastFetchAt = null;
     this.lastError = null;
     this._refreshing = null;
     this.cache = this._readCache();
+  }
+
+  /**
+   * Drop the cached board — part of a local wipe when Nexus has been reset.
+   * Without it the kiosk keeps painting yesterday's documents from disk and the
+   * "clean slate" still shows the batch that was just deleted server-side.
+   */
+  clearCache() {
+    this.cache = null;
+    this.lastFetchAt = null;
+    this.lastError = null;
+    try {
+      if (fs.existsSync(CACHE_PATH)) fs.unlinkSync(CACHE_PATH);
+    } catch (err) {
+      this.log(`board cache remove failed: ${err.message}`, 'warn');
+    }
   }
 
   /** Warm the cache at boot so the first kiosk request is already instant. */
@@ -147,6 +171,7 @@ class BoardFeed {
       const pool = batches.filter((b) => b.status === 'draft').map(batchToDoc);
 
       const payload = { docs, pool, fetchedAt: new Date().toISOString() };
+      this._detectReset(this.cache, payload);
       this.cache = payload;
       this._writeCache(payload);
       this.lastFetchAt = payload.fetchedAt;
@@ -159,6 +184,79 @@ class BoardFeed {
       if (this.cache) return { ok: true, stale: true, source: 'cache', error: err.message, ...this.cache };
       return { ok: false, stale: true, source: 'none', error: err.message, ...emptyBoard() };
     }
+  }
+
+  /**
+   * Does any LIVE receiving batch expect this product?
+   *
+   *   true  — the product code is on a batch Nexus is currently returning
+   *   false — it is on none of them, so nothing at this door is waiting for it
+   *   null  — the gate cannot tell, and must not accuse: no board has ever
+   *           loaded, or the last load failed and the cache has aged past
+   *           `expectMaxAgeMs`. Same stance as the carton-state check in
+   *           passage.js — going quiet beats inventing a verdict.
+   *
+   * Nexus does the deleted/archived filtering: the receiving endpoint only ever
+   * returns live batches (there is no deletedAt or archived field on the
+   * payload at all), so "absent from this feed" already means deleted,
+   * archived, closed, or never created. The bridge does not re-derive that, and
+   * must not try — a second rule here could only disagree with Nexus's.
+   *
+   * The POOL counts as live. Draft batches are real, undeleted documents that
+   * staff can add to the board by hand, so a draft SKU is not an anomaly worth
+   * alarming about. It still will not be CREDITED unless someone adds it —
+   * that is the board's call (applyMovement), not this one.
+   */
+  expectsInbound(sku) {
+    if (!sku) return null;
+    // A SUCCESSFUL live load is the licence to judge, and `lastFetchAt` is set
+    // only by one. The disk cache deliberately does NOT count: it exists to keep
+    // a doorway PAINTING through an outage and can be days old, so a bridge that
+    // boots with no WAN would otherwise reject every real delivery against
+    // yesterday's batches. Showing a stale board is the point of that file;
+    // accusing a carton with it is not.
+    if (!this.lastFetchAt) return null;
+    if (Date.now() - Date.parse(this.lastFetchAt) > this.expectMaxAgeMs) return null; // known-good too long ago
+    if (!this.cache) return null;
+    for (const doc of [...(this.cache.docs || []), ...(this.cache.pool || [])]) {
+      if ((doc.lines || []).some((l) => l.sku === sku)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Did receiving go BACKWARDS between two loads?
+   *
+   * The carton-withdrawal signal in passage.js only fires when warehouse_carton
+   * rows disappear, which misses the common case entirely: resetting a batch
+   * that has no carton rows yet changes nothing at carton level, so nothing is
+   * "withdrawn" and no screen is told anything. What always moves is the
+   * FIGURE — a line's received count dropping, or a whole document vanishing.
+   *
+   * That is a fact this feed can see for itself, on the poll it already runs.
+   * Only DECREASES count: receiving going up is the normal case and says
+   * nothing about a reset.
+   */
+  _detectReset(before, after) {
+    if (!before) return; // first load of this process — nothing to compare
+    const priorReceived = new Map();
+    for (const doc of before.docs || []) {
+      for (const line of doc.lines || []) priorReceived.set(`${doc.id}::${line.sku}`, line.received || 0);
+    }
+    const reasons = [];
+    const stillThere = new Set();
+    for (const doc of after.docs || []) {
+      for (const line of doc.lines || []) {
+        const key = `${doc.id}::${line.sku}`;
+        stillThere.add(key);
+        const was = priorReceived.get(key);
+        if (was != null && (line.received || 0) < was) reasons.push(`${doc.id} ${line.sku} ${was}->${line.received || 0}`);
+      }
+    }
+    for (const key of priorReceived.keys()) if (!stillThere.has(key)) reasons.push(`${key} removed`);
+    if (!reasons.length) return;
+    this.log(`receiving reset detected: ${reasons.slice(0, 6).join(', ')}${reasons.length > 6 ? ` (+${reasons.length - 6} more)` : ''}`);
+    this.onReceivingReset({ reasons });
   }
 
   status() {

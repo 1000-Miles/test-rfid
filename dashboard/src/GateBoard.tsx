@@ -41,35 +41,72 @@ export default function GateBoard(props: { board: GateBoardApi; entries: EntryRo
   // Receiving-only: the board follows the latest INBOUND passage. A pallet
   // leaving the building doesn't blank the panel or relabel it SHIPPING — it
   // simply isn't this board's business, so the last arrival stays up.
-  const inboundEntries = useMemo(() => props.entries.filter((entry) => entry.direction === 'in'), [props.entries]);
+  //
+  // `!unexpected` and `known` are load-bearing. This panel is built straight
+  // from the movement stream and never consults `docs`, so without them ANY
+  // inbound read became a line — and because `expected` falls back to the read
+  // count below, a product on no receiving batch rendered as a finished line.
+  // That is how a deleted batch's product kept appearing here long after the
+  // counting path had learned to refuse it: the counting path was never asked.
+  //
+  // A contested carton also carries no passageId, so it used to become its own
+  // `liveBatchId` and REPLACE the panel — one stray tag wiping a real passage
+  // off the screen.
+  const inboundEntries = useMemo(
+    () => props.entries.filter((entry) => entry.direction === 'in' && !entry.unexpected && entry.known),
+    [props.entries]
+  );
   const latestEntry = inboundEntries[0] ?? null;
   const liveBatchId = latestEntry ? String(latestEntry.passageId ?? latestEntry.eventId ?? latestEntry.id) : null;
   const liveEntries = useMemo(
     () => liveBatchId == null ? [] : inboundEntries.filter((entry) => String(entry.passageId ?? entry.eventId ?? entry.id) === liveBatchId),
     [inboundEntries, liveBatchId]
   );
+  /**
+   * What the live panel shows: the BATCH being filled, at its RUNNING TOTAL —
+   * not this passage's reads.
+   *
+   * It used to synthesise a document out of the current passage alone, so a
+   * batch already holding 6 of 8 cartons read "2" when the last two went
+   * through, and a product counted in an earlier passage disappeared from the
+   * panel altogether. Both are the same misreading: a passage is not a
+   * document, and the number the floor needs is how much of the BATCH is done.
+   *
+   * So the real documents this passage touched are shown WHOLE — every line, at
+   * the cumulative received/expected the counting path maintains. The passage
+   * becomes context in `meta` instead of the subject.
+   */
   const liveDocs = useMemo<GateDoc[]>(() => {
     if (!latestEntry || !liveBatchId) return [];
+    const skusRead = new Set(liveEntries.map((entry) => entry.item?.sku).filter(Boolean));
+    const passageNote = `${liveEntries.length} carton${liveEntries.length === 1 ? '' : 's'} this passage`;
+    const touched = docs.filter((doc) => doc.lines.some((line) => skusRead.has(line.sku)));
+    if (touched.length) {
+      return touched.map((doc) => ({
+        ...doc,
+        meta: latestEntry.palletCode ? `${latestEntry.palletCode} · ${passageNote}` : passageNote,
+      }));
+    }
+
+    // Nothing matched a document — the feed has not answered yet (cold start).
+    // Synthesise from the passage rather than paint an empty panel, which would
+    // read as "nothing arrived".
     const counts = new Map<string, { count: number; entry: EntryRow }>();
     for (const entry of liveEntries) {
       const sku = entry.item?.sku || entry.epc;
       const previous = counts.get(sku);
       counts.set(sku, { count: (previous?.count ?? 0) + 1, entry });
     }
-    const catalogLines = docs.flatMap((doc) => doc.lines);
-    const lines: DocLine[] = [...counts.entries()].map(([sku, value]) => {
-      const catalog = catalogLines.find((line) => line.sku === sku);
-      return {
-        sku,
-        name: value.entry.item?.name || catalog?.name || sku,
-        expected: catalog?.expected ?? value.count,
-        received: value.count,
-        photoUrl: catalog?.photoUrl ?? null,
-        emoji: catalog?.emoji ?? null,
-        unitsPerCarton: catalog?.unitsPerCarton ?? null,
-      };
-    });
-    return [{ id: liveBatchId, title: latestEntry.palletCode || `BATCH ${liveBatchId}`, dir: 'in', party: 'Current gate reading', meta: `${liveEntries.length} cartons read`, due: 0, lines }];
+    const lines: DocLine[] = [...counts.entries()].map(([sku, value]) => ({
+      sku,
+      name: value.entry.item?.name || sku,
+      expected: value.count,
+      received: value.count,
+      photoUrl: null,
+      emoji: null,
+      unitsPerCarton: null,
+    }));
+    return [{ id: liveBatchId, title: latestEntry.palletCode || `BATCH ${liveBatchId}`, dir: 'in', party: 'Current gate reading', meta: passageNote, due: 0, lines }];
   }, [docs, latestEntry, liveBatchId, liveEntries]);
   const liveTotals = useMemo(() => sumTotals(liveDocs), [liveDocs]);
   const liveFocus = latestEntry && liveDocs[0] ? `${liveDocs[0].id}-${latestEntry.item?.sku || latestEntry.epc}` : null;
@@ -122,6 +159,27 @@ export default function GateBoard(props: { board: GateBoardApi; entries: EntryRo
   const inDocs = useMemo(() => activeDocs(docs, 'in'), [docs]);
   const inTotals = useMemo(() => sumTotals(inDocs), [inDocs]);
 
+  /**
+   * RESTING STATE — what the board shows when no passage is in progress.
+   *
+   * The panel renders `liveDocs`, which is scoped to the current passage and is
+   * therefore EMPTY most of the time: `props.entries` is filled only by live
+   * WebSocket messages, so it starts empty on every page load and stays empty
+   * whenever nothing is crossing. The board had no fallback, so it painted a
+   * blank screen — which on a 43" panel with no input reads as "the gate is
+   * broken", not "nothing is moving".
+   *
+   * It was masked before only because ANY inbound read produced a liveDoc,
+   * including products on no receiving batch. Filtering those out (rightly)
+   * removed the accident that was standing in for a resting state.
+   *
+   * Today's batches are the honest thing to show: the work outstanding at this
+   * door. A passage then narrows the panel to the batch being filled.
+   */
+  const panelDocs = liveDocs.length ? liveDocs : inDocs;
+  const panelTotals = liveDocs.length ? liveTotals : inTotals;
+  const panelFocus = liveDocs.length ? liveFocus : focus;
+
   const dirDocs = inDocs;
   const activeDoc = activeId ? (dirDocs.find((d) => d.id === activeId) ?? null) : null;
 
@@ -149,11 +207,10 @@ export default function GateBoard(props: { board: GateBoardApi; entries: EntryRo
 
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
         <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', padding: `${u(18)} ${u(28)}` }}>
-          <DirectionSection dir="in" docs={liveDocs} totals={liveTotals} focus={liveFocus} onOpen={() => {}} />
+          <DirectionSection dir="in" docs={panelDocs} totals={panelTotals} focus={panelFocus} onOpen={() => {}} />
         </div>
 
         {board.dupMsg && <DupToast message={board.dupMsg} />}
-        {board.flashTag && <UnknownFlash tag={board.flashTag} />}
       </div>
 
     </div>
@@ -503,20 +560,6 @@ function DupToast(props: { message: string }) {
         <div style={{ fontSize: u(20), fontWeight: 600, color: '#7c4a08' }}>{props.message}</div>
       </div>
     </div>
-  );
-}
-
-function UnknownFlash(props: { tag: string }) {
-  return (
-    <>
-      <div className="gate-flash" style={{ position: 'absolute', inset: 0, zIndex: 45, pointerEvents: 'none', boxShadow: `inset 0 0 0 ${u(16)} ${C.red}, inset 0 0 ${u(200)} rgba(223,34,37,0.28)` }} />
-      <div style={{ position: 'absolute', left: u(28), right: u(28), top: u(24), zIndex: 46, pointerEvents: 'none', padding: `${u(20)} ${u(30)}`, borderRadius: u(16), background: C.red, color: C.white, display: 'flex', alignItems: 'center', gap: u(22), boxShadow: '0 8px 24px rgba(0,0,0,0.18)' }}>
-        <div style={{ fontSize: u(17), fontWeight: 800, letterSpacing: '0.16em' }}>UNKNOWN TAG</div>
-        <div style={{ fontSize: u(22), fontWeight: 600, fontFamily: "'Courier New', monospace", letterSpacing: '0.04em' }}>{props.tag}</div>
-        <div style={{ flex: 1 }} />
-        <div style={{ fontSize: u(17), fontWeight: 700, letterSpacing: '0.1em', opacity: 0.8 }}>NOT ON TODAY’S BOARD</div>
-      </div>
-    </>
   );
 }
 

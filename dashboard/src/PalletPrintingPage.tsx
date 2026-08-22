@@ -5,6 +5,25 @@ import type { PalletProduct } from './types';
 
 type Notice = { kind: 'success' | 'error'; text: string } | null;
 
+/**
+ * Operator-facing pallet name, e.g. "Pallet-319".
+ *
+ * The durable code (PLT-YIWU-MAIN-GATE-00000319) is what Nexus and the RFID tag
+ * carry, and it stays the identity everywhere that matters. Nobody at a doorway
+ * reads it aloud, though, so the screen shows the trailing sequence the same way
+ * the printed label does (see palletCaption in bridge/src/printer/tspl.js) —
+ * screen and label MUST agree or an operator holding the tag cannot match it to
+ * the card in front of them.
+ */
+function palletName(code: string | null | undefined): string {
+  if (!code) return 'Pallet';
+  // Already the short form — show it exactly as the barcode carries it.
+  if (/^PALLET-(?:[A-Z0-9]+-)?\d+$/i.test(code)) return code.toUpperCase();
+  const match = String(code).match(/(\d+)$/);
+  if (!match) return String(code);
+  return `PALLET-${String(Number(match[1])).padStart(3, '0')}`;
+}
+
 /** One pallet tag the bridge's durable print log says physically printed. */
 type PalletPrint = {
   palletCode: string;
@@ -121,9 +140,30 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
   // Every pallet tag that prints — from this page or straight off the gate —
   // broadcasts a pallet-print message, so refetching on it keeps the list live
   // without polling the bridge.
+  //
+  // It is also the ONLY place the outcome of "Close & print" is known: that
+  // button closes the pallet over HTTP and the bridge prints afterwards, so the
+  // reply to the close says nothing about the label. The broadcast is what turns
+  // "closing…" into printed or failed.
   useEffect(() => {
-    if (workflow?.type === 'pallet-print' && workflow.ok !== false) void loadHistory();
-  }, [workflow?.type, workflow?.requestId, workflow?.ok, loadHistory]);
+    if (workflow?.type !== 'pallet-print') return;
+    if (workflow.ok === false) {
+      setNotice({ kind: 'error', text: `${palletName(workflow.palletCode)} did not print — ${workflow.error || 'the printer refused the job.'}` });
+      return;
+    }
+    setNotice({ kind: 'success', text: `${palletName(workflow.palletCode)} printed.` });
+    void loadHistory();
+  }, [workflow?.type, workflow?.requestId, workflow?.ok, workflow?.palletCode, workflow?.error, loadHistory]);
+
+  // Nexus reset the receiving. The open pallet card is already gone (useBridge
+  // clears it), but this page also shows the print HISTORY, which is only
+  // reloaded on mount and after a print — so it kept listing labels for a batch
+  // that had just been emptied, with no way to refresh short of a reload.
+  useEffect(() => {
+    if (!bridge.receivingResetAt) return;
+    setNotice({ kind: 'success', text: 'Receiving was reset in Nexus — this page has been refreshed.' });
+    void loadHistory();
+  }, [bridge.receivingResetAt, loadHistory]);
 
   const status = useMemo(() => {
     if (!workflow) return { label: 'WAITING FOR PALLET', tone: 'slate' };
@@ -150,7 +190,7 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok || result.ok === false) throw new Error(result.error || `Bridge returned HTTP ${response.status}`);
-      setNotice({ kind: 'success', text: `${workflow.palletCode} was closed and sent to the local printer.` });
+      setNotice({ kind: 'success', text: `${palletName(workflow.palletCode)} closed — printing the label…` });
     } catch (error) {
       setNotice({ kind: 'error', text: error instanceof Error ? error.message : 'Could not close the pallet.' });
     } finally {
@@ -179,7 +219,7 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
         queued: workflow.queued,
         force: true,
       });
-      setNotice({ kind: 'success', text: `${workflow.palletCode} was sent to the pallet printer.` });
+      setNotice({ kind: 'success', text: `${palletName(workflow.palletCode)} was sent to the pallet printer.` });
       void loadHistory();
     } catch (error) {
       setNotice({ kind: 'error', text: error instanceof Error ? error.message : 'Printing failed.' });
@@ -204,7 +244,7 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
         cartonCount: 0,
         force: true,
       });
-      setNotice({ kind: 'success', text: `${entry.palletCode} was reprinted.` });
+      setNotice({ kind: 'success', text: `${palletName(entry.palletCode)} was reprinted.` });
       void loadHistory();
     } catch (error) {
       setNotice({ kind: 'error', text: error instanceof Error ? error.message : 'Reprint failed.' });
@@ -251,8 +291,14 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
             {workflow ? (
               <div className="grid gap-6 md:grid-cols-[1fr_auto] md:items-end">
                 <div>
-                  <div className="text-sm font-extrabold tracking-[0.08em] text-[#737373]">PALLET CODE</div>
-                  <div className="mt-2 break-all text-2xl font-extrabold tracking-tight md:text-4xl">{workflow.palletCode}</div>
+                  <div className="text-sm font-extrabold tracking-[0.08em] text-[#737373]">PALLET</div>
+                  <div className="mt-2 text-2xl font-extrabold tracking-tight md:text-4xl">{palletName(workflow.palletCode)}</div>
+                  {/* The receiving batch is assigned by Nexus when the passage is
+                      accepted, so it is genuinely unknown until that lands. Saying
+                      so beats printing the raw code and letting it read as a batch. */}
+                  <div className="mt-1 break-all text-sm font-medium text-[#737373]">
+                    {workflow.batchRef ? `Batch ${workflow.batchRef}` : 'Batch not assigned yet'}
+                  </div>
                   <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3">
                     <Metric label="Cartons" value={String(workflow.cartonCount)} />
                     <Metric label="Location" value="AMZ" />
@@ -261,7 +307,7 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
                   <ProductLines products={workflow.products} cartonCount={workflow.cartonCount} />
                 </div>
                 <button disabled={printing} onClick={() => void (workflow.type === 'pallet-open' ? closeAndPrint() : printCurrent())} className="min-h-16 rounded-xl border border-[#008A9C] bg-[#00BCD4] px-8 py-4 text-lg font-extrabold text-white shadow-sm hover:bg-[#008A9C] disabled:cursor-wait disabled:opacity-60">
-                  {printing ? 'Working…' : workflow.type === 'pallet-open' ? 'Close & print' : workflow.type === 'pallet-print' && workflow.ok === false ? 'Retry print' : 'Print again'}
+                  {printing ? 'Working…' : workflow.type === 'pallet-open' ? 'Close & print' : workflow.type === 'pallet-print' ? (workflow.ok === false ? 'Retry print' : 'Print again') : 'Print label'}
                 </button>
               </div>
             ) : (
@@ -290,10 +336,10 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
               {history.map((entry) => (
                 <li key={entry.palletCode} className="flex flex-wrap items-center justify-between gap-4 border-b border-[#f5f5f5] px-6 py-5 last:border-b-0 md:px-8">
                   <div className="min-w-0">
-                    <div className="break-all text-lg font-extrabold tracking-tight">{entry.palletCode}</div>
-                    <div className="mt-1 text-sm font-medium text-[#737373]">
-                      {printedAt(entry.at)}
-                      {entry.batchRef ? ` · batch ${entry.batchRef}` : ''}
+                    <div className="text-lg font-extrabold tracking-tight">{palletName(entry.palletCode)}</div>
+                    <div className="mt-1 break-all text-sm font-medium text-[#737373]">
+                      {entry.batchRef ? `Batch ${entry.batchRef}` : 'Batch not assigned'}
+                      {` · ${printedAt(entry.at)}`}
                       {entry.prints > 1 ? ` · printed ${entry.prints}×` : ''}
                     </div>
                   </div>

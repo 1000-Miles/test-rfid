@@ -94,6 +94,23 @@ class Outbox extends EventEmitter {
     this._cursorPath = path.join(this.dataDir, 'movement-cursor.json');
     this._deadPath = path.join(this.dataDir, 'movement-dead.jsonl');
     this._openPalletPath = path.join(this.dataDir, 'movement-open-pallet.json');
+    // Pallet numbering is its OWN durable counter, not the movement sequence.
+    // Operators read this number off a label and say it out loud, so it has to
+    // start at 1 and count pallets — the movement seq counts cartons and was
+    // already past 300 on day one.
+    this._palletSeqPath = path.join(this.dataDir, 'pallet-seq.json');
+    // Survives wipes ON PURPOSE — see _loadGeneration.
+    this._generationPath = path.join(this.dataDir, 'movement-generation.json');
+    this.generation = this._loadGeneration();
+    // Short gate code carried in every pallet code. The counter is per-gate and
+    // local, so this prefix is the ONLY thing keeping two gates from both
+    // minting 001. Kept to a couple of characters because it is read aloud and
+    // printed on a label people scan, not just stored.
+    this.gateShort =
+      String(opts.gateShort || 'G1')
+        .toUpperCase()
+        .replace(/[^A-Z0-9]+/g, '')
+        .slice(0, 4) || 'G1';
     this._quarantinePath = `${this._logPath}.quarantine`;
 
     this.pending = []; // [{ seq, at, event }] — undelivered, oldest first
@@ -223,6 +240,145 @@ class Outbox extends EventEmitter {
     } catch { /* repair still landed; fsync is belt-and-braces */ }
   }
 
+  /**
+   * Which "life" of the journal this is. Incremented by every wipe and never
+   * reset, so a sequence starting again at 1 still yields event IDs the server
+   * has never seen. This file is the one thing a wipe must NOT delete.
+   */
+  _loadGeneration() {
+    try {
+      const raw = JSON.parse(fs.readFileSync(this._generationPath, 'utf8'));
+      if (Number.isFinite(raw?.generation) && raw.generation >= 1) return Math.floor(raw.generation);
+    } catch (_) {
+      /* first run, or unreadable — 1 is the safe start */
+    }
+    return 1;
+  }
+
+  _bumpGeneration() {
+    this.generation += 1;
+    try {
+      fs.mkdirSync(this.dataDir, { recursive: true });
+      writeFileAtomic(this._generationPath, JSON.stringify({ generation: this.generation }) + '\n');
+    } catch (err) {
+      // Unpersisted, the next boot reverts and IDs collide again — loud, not silent.
+      this.log(`generation write failed (${err.message}) — event IDs may collide with the server after a restart`, 'warn');
+    }
+    return this.generation;
+  }
+
+  /**
+   * The next durable pallet code: PALLET-G1-001, PALLET-G1-002, …
+   *
+   * Short on purpose. This string IS the barcode and the caption on the label,
+   * and it is what someone reads down a radio; the old
+   * PLT-YIWU-MAIN-GATE-00000319 was none of those things comfortably.
+   *
+   * The counter is written to disk BEFORE the code is handed out, because the
+   * failure that matters is a reboot re-issuing a number: two physical pallets
+   * sharing a code merge into one in Nexus, and no later reconciliation can
+   * separate them. Losing a number to a crash is harmless by comparison — the
+   * sequence is allowed to skip.
+   *
+   * Uniqueness across gates rests entirely on `gateShort` (GATE_SHORT), because
+   * the counter itself is local to this bridge. Two gates sharing a short code
+   * WILL mint the same pallet code and merge two physical pallets in Nexus, so
+   * give every gate its own and never reuse a retired one.
+   */
+  _nextPalletCode() {
+    // NOTE: the format is dictated by NEXUS, which validates palletCode and
+    // rejects anything else with 400 {"fieldErrors":{"palletCode":["Invalid"]}}.
+    // A shorter code (PALLET-G1-001) was tried and every carton carrying one was
+    // dead-lettered — the gate read them, the board counted them, and the server
+    // refused them. Do not change this shape without changing Nexus first.
+    //
+    // The human-readable short name still exists: palletCaption() in
+    // printer/tspl.js and palletName() in the dashboard both render this as
+    // "PALLET-526", so the label and screen stay readable while the wire format
+    // stays valid.
+    let next = 1;
+    try {
+      const raw = JSON.parse(fs.readFileSync(this._palletSeqPath, 'utf8'));
+      if (Number.isFinite(raw?.seq) && raw.seq >= 0) next = Math.floor(raw.seq) + 1;
+    } catch (_) {
+      // No counter yet (first pallet) or an unreadable one. Starting from 1 is
+      // right for the first case; for the second it risks a repeat, so say so
+      // loudly rather than silently reusing numbers.
+      if (fs.existsSync(this._palletSeqPath)) {
+        this.log('pallet counter unreadable — restarting at 1, codes may repeat', 'warn');
+      }
+    }
+    try {
+      fs.mkdirSync(this.dataDir, { recursive: true });
+      writeFileAtomic(this._palletSeqPath, JSON.stringify({ seq: next }) + '\n');
+    } catch (err) {
+      // Durability is the whole point, so a failed write must not be papered
+      // over: the caller still gets a code, but the next boot may reuse it.
+      this.log(`pallet counter write failed (${err.message}) — ${next} may be reissued after a restart`, 'warn');
+    }
+    const gate = this.gateId.toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 18) || 'GATE';
+    return `PLT-${gate}-${String(next).padStart(8, '0')}`;
+  }
+
+  /**
+   * Throw away every trace of local receiving state.
+   *
+   * For the case where Nexus has been reset: the server forgets the passages,
+   * and anything still held here would either be re-pushed into a database that
+   * no longer expects it, or sit in a queue forever waiting on rows that are
+   * gone. Wiping only one side leaves the two permanently disagreeing, which is
+   * worse than either being empty.
+   *
+   * Deliberately IRREVERSIBLE and deliberately not automatic — undelivered
+   * passages are real warehouse events, so this must be an explicit act by
+   * someone who knows the server was reset too.
+   *
+   * What survives: the tag catalogue (Nexus's own registry, re-fetched anyway)
+   * and printer settings. Neither is receiving state.
+   */
+  wipeLocalState() {
+    const removed = [];
+    // Close the journal handle first, or the unlink leaves this process writing
+    // to a file nobody can see and the "wiped" log quietly refills.
+    try {
+      if (this._fd != null) {
+        fs.closeSync(this._fd);
+        this._fd = null;
+      }
+    } catch (_) {
+      /* already closed */
+    }
+    for (const file of [this._logPath, this._cursorPath, this._deadPath, this._openPalletPath, this._palletSeqPath]) {
+      try {
+        if (fs.existsSync(file)) {
+          fs.unlinkSync(file);
+          removed.push(path.basename(file));
+        }
+      } catch (err) {
+        this.log(`wipe: could not remove ${path.basename(file)} (${err.message})`, 'warn');
+      }
+    }
+    // In-memory state must go too. Clearing the files alone was the trap: this
+    // process rewrites them from memory moments later, so the wipe appeared to
+    // work and then undid itself.
+    this.pending = [];
+    this.cursor = 0;
+    this.nextSeq = 1;
+    // The sequence restarts, so the generation MUST advance or the new events
+    // collide with the server's memory of the old ones.
+    this._bumpGeneration();
+    this.lastError = null;
+    this.lastPushAt = null;
+    this.sent = 0;
+    this.deadLetters = 0;
+    this._passageRequestIds.clear();
+    this._passagePalletCodes.clear();
+    this._readyEmitted.clear();
+    this._openPallet = null;
+    this.log(`local state wiped: ${removed.join(', ') || 'nothing on disk'}; queue, cursor and pallet numbering reset`);
+    return { removed, queueDepth: 0, cursor: 0, nextSeq: 1 };
+  }
+
   /** Rebuild pending state from the journal + cursor after a restart. */
   _restore() {
     try {
@@ -244,7 +400,10 @@ class Outbox extends EventEmitter {
       for (const entry of readJsonl(file)) {
         if (!Number.isFinite(entry.seq)) continue;
         if (entry.seq > maxSeq) maxSeq = entry.seq;
-        if (entry.seq > this.cursor) this.pending.push(entry);
+        // Same rule as enqueue: contested passages are history, never traffic.
+        // Skipping them here is also the repair path for a queue already jammed
+        // by ones journaled before this rule existed.
+        if (entry.seq > this.cursor && !entry.event?.unexpected) this.pending.push(entry);
       }
     }
     this.pending.sort((a, b) => a.seq - b.seq);
@@ -268,7 +427,14 @@ class Outbox extends EventEmitter {
     const seq = this.nextSeq;
     // In no-IR receiving mode the first carton opens a fixed two-minute pallet
     // session. Quiet RFID gaps only settle the UI; they never close the pallet.
-    if (this.batchUrl && event?.method === 'toggle' && event.direction === 'in' && event.passageId == null) {
+    // `!event.unexpected` is what keeps a contested carton OUT OF THE PALLET.
+    // Without it, a product on no open receiving batch opened a pallet session
+    // and was counted into it, so the pallet card, the count in the console and
+    // the PRINTED PALLET TAG all said 8 cartons when only 4 were receivable —
+    // and the tag listed products nobody had booked. It is still journaled and
+    // still delivered on the plain path below; it just cannot become part of a
+    // pallet that staff put away.
+    if (this.batchUrl && event?.method === 'toggle' && event.direction === 'in' && event.passageId == null && !event.unexpected) {
       if (!this._togglePassage) {
         const openedAt = new Date();
         this._togglePassage = {
@@ -289,7 +455,12 @@ class Outbox extends EventEmitter {
     if (event && typeof event === 'object' && !event.eventId) {
       event.gateId = this.gateId;
       event.seq = seq;
-      event.eventId = `${this.gateId}:${seq}`;
+      // Generation-scoped, because `seq` restarts at 1 after a local wipe while
+      // NEXUS REMEMBERS EVERYTHING. Without it the first carton after a wipe
+      // reuses eventId gate:1 for a different payload, Nexus rightly answers
+      // 409 conflict, and the queue jams on event one — every reading after a
+      // reset silently fails to arrive.
+      event.eventId = `${this.gateId}:g${this.generation}:${seq}`;
     }
     if (event && event.passageId != null && !event.passageRequestId) {
       const key = `${event.direction}:${event.passageId}`;
@@ -304,8 +475,7 @@ class Outbox extends EventEmitter {
       event.passageRequestId = requestId;
       let palletCode = this._passagePalletCodes.get(key);
       if (!palletCode) {
-        const gate = this.gateId.toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 18) || 'GATE';
-        palletCode = `PLT-${gate}-${String(seq).padStart(8, '0')}`;
+        palletCode = this._nextPalletCode();
         this._passagePalletCodes.set(key, palletCode);
       }
       event.palletCode = palletCode;
@@ -322,6 +492,17 @@ class Outbox extends EventEmitter {
       throw err;
     }
     this.nextSeq = seq + 1;
+    // JOURNALED BUT NOT QUEUED. A contested passage is a local record, not
+    // something Nexus is willing to take: the batch endpoint answers a passage
+    // it cannot resolve with `503 passage resolved to 0 receiving batches`,
+    // which the pump correctly treats as retryable — so a single Test Product
+    // in a passage jammed the whole queue behind it and NOTHING was delivered,
+    // legitimate receipts included. Nexus creates no carton row for these
+    // anyway, so sending them buys nothing and costs everything.
+    //
+    // The journal above is still the durable record, and the console, the
+    // wallboard and the bridge log all still show them.
+    if (event?.unexpected) return { seq, eventId: event?.eventId ?? null };
     this.pending.push(entry);
     if (event?.palletSession) {
       this._togglePassage.requestId = event.passageRequestId;
@@ -407,6 +588,21 @@ class Outbox extends EventEmitter {
     this._pump();
   }
 
+  /**
+   * The queued entries for a passage that may legitimately go ON a pallet.
+   *
+   * Contested passages are excluded HERE as well as at the session gate above,
+   * because the two modes get their passageId from different places: in no-IR
+   * mode the gate refuses to open a session for a contested carton, but under IR
+   * the passage id comes from the controller and a contested carton genuinely
+   * shares it with its neighbours. One selector means the carton count, the
+   * per-product breakdown and the printed tag can never disagree about what is
+   * on the pallet.
+   */
+  pallettableEntries(passageId) {
+    return this.pending.filter((entry) => entry.event?.passageId === passageId && !entry.event?.unexpected);
+  }
+
   _restoreOpenPallet() {
     let saved;
     try { saved = JSON.parse(fs.readFileSync(this._openPalletPath, 'utf8')); }
@@ -442,7 +638,7 @@ class Outbox extends EventEmitter {
 
   openPallet() {
     if (!this._togglePassage) return null;
-    const entries = this.pending.filter((entry) => entry.event?.passageId === this._togglePassage.id);
+    const entries = this.pallettableEntries(this._togglePassage.id);
     if (!entries.length) return null;
     const first = entries[0].event;
     return {
@@ -484,7 +680,7 @@ class Outbox extends EventEmitter {
   }
 
   _emitBatchReady(passageId, closeReason) {
-    const entries = this.pending.filter((entry) => entry.event?.passageId === passageId);
+    const entries = this.pallettableEntries(passageId);
     if (!entries.length) return;
     const first = entries[0].event;
     const requestId = first.passageRequestId;

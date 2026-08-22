@@ -11,6 +11,40 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- Crash reporter, deliberately INLINE and deliberately ES5.
+         The wallboard has no devtools and nobody can reach it, so a blank
+         screen used to be undiagnosable: /client-log existed but only speech
+         errors ever reported to it, and a bundle that fails to PARSE runs no
+         app code at all - including any reporter living inside the bundle.
+         This script is the only thing guaranteed to still be running, so it is
+         what tells the bridge why the screen is dark. -->
+    <script>
+      (function () {
+        var host = (location.search.match(/[?&]bridge=([^&]+)/) || [])[1] || location.hostname;
+        var sent = 0;
+        function report(stage, message) {
+          if (sent++ > 4) return; // a render loop must not flood the bridge
+          try {
+            var x = new XMLHttpRequest();
+            x.open('POST', 'http://' + host + ':3001/client-log', true);
+            x.setRequestHeader('Content-Type', 'application/json');
+            x.send(JSON.stringify({ source: 'page', stage: stage, message: String(message), ua: navigator.userAgent }));
+          } catch (e) {}
+        }
+        window.addEventListener('error', function (e) {
+          report('window.onerror', (e.message || 'error') + ' @ ' + (e.filename || '?') + ':' + (e.lineno || 0));
+        });
+        window.addEventListener('unhandledrejection', function (e) {
+          report('unhandledrejection', (e.reason && e.reason.message) || e.reason || 'rejection');
+        });
+        // If React never mounts, say so. A parse error leaves #root empty
+        // forever and produces no 'error' event on some old WebViews.
+        setTimeout(function () {
+          var r = document.getElementById('root');
+          if (r && !r.firstChild) report('never-mounted', 'root still empty after 8s');
+        }, 8000);
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

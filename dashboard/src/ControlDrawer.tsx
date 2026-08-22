@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import { activeDocs, demoEpcsFor, type Direction, type GateBoardApi } from './documents';
 import type { BridgeState } from './useBridge';
@@ -751,7 +751,128 @@ function PowerControl(props: { connected: boolean }) {
         </button>
       </div>
       <p className="text-xs text-slate-500 mt-1">Low = short range (fewer stray reads) · 30 = max. Persists on the reader.</p>
+      <AntennaPower connected={props.connected} />
     </label>
+  );
+}
+
+/**
+ * Per-antenna enable and power.
+ *
+ * The gate's ports are NOT equivalent — one antenna covers the doorway and
+ * another reaches down the aisle — so one global dBm is the wrong knob: raise it
+ * until the passing carton reads well and you have also pulled every shelf in
+ * the building into the read zone. There was no UI for any of this, which is how
+ * a gate ended up running on a single port that returned no reads at all while
+ * the two working antennas sat disabled.
+ *
+ * Enabling a DEAD port is not free either: the reader round-robins across every
+ * enabled port, so each one that answers nothing is dwell time taken from the
+ * ones that do. Turn a port off if nothing is plugged into it.
+ *
+ * The firmware cannot read power back per port, so what is shown is what this
+ * bridge last wrote (`applied`) — blank means "never set from here".
+ */
+function AntennaPower(props: { connected: boolean }) {
+  const PORTS = [1, 2, 3, 4];
+  const [enabled, setEnabled] = useState<number[]>([]);
+  const [applied, setApplied] = useState<Record<number, number>>({});
+  const [draft, setDraft] = useState<Record<number, number>>({});
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!props.connected) return;
+    try {
+      const [a, p] = await Promise.all([api.antennas(), api.getPower()]);
+      setEnabled(Array.isArray(a.enabled) ? a.enabled : []);
+      const app = p.applied ?? {};
+      setApplied(app);
+      setDraft((d) => ({ ...Object.fromEntries(PORTS.map((n) => [n, app[n] ?? p.dBm ?? 18])), ...d }));
+    } catch {
+      /* console is best-effort */
+    }
+  }, [props.connected]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const toggle = async (port: number) => {
+    const next = enabled.includes(port) ? enabled.filter((p) => p !== port) : [...enabled, port].sort();
+    if (!next.length) {
+      setNote('At least one antenna has to stay on.');
+      return;
+    }
+    setBusy(true);
+    setNote(null);
+    try {
+      const r = await api.setAntennas(next);
+      if (!r.ok) setNote(`Reader refused the change (rc ${r.rc}) — it will not accept one mid-read.`);
+      setEnabled(Array.isArray(r.enabled) ? r.enabled : next);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const applyPower = async (port: number) => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const r = await api.setAntennaPower({ [port]: draft[port] });
+      if (!r.ok) setNote(`Reader refused the change (rc ${r.rc}).`);
+      if (r.applied) setApplied(r.applied);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3">
+      <div className="text-xs font-semibold text-slate-300 mb-2">Antennas</div>
+      <div className="space-y-2">
+        {PORTS.map((port) => {
+          const on = enabled.includes(port);
+          return (
+            <div key={port} className="flex items-center gap-2">
+              <button
+                onClick={() => toggle(port)}
+                disabled={!props.connected || busy}
+                className={`w-14 shrink-0 rounded-md px-2 py-1 text-xs font-semibold disabled:opacity-40 ${
+                  on ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : 'bg-slate-700/50 text-slate-500 border border-white/10'
+                }`}
+              >
+                ANT {port}
+              </button>
+              <input
+                type="range"
+                min={1}
+                max={30}
+                value={draft[port] ?? 18}
+                disabled={!props.connected || busy || !on}
+                onChange={(e) => setDraft((d) => ({ ...d, [port]: Number(e.target.value) }))}
+                className="flex-1 accent-emerald-500 disabled:opacity-30"
+              />
+              <span className="w-8 text-right font-mono text-xs tabular-nums text-slate-300">{draft[port] ?? 18}</span>
+              <span className="w-14 text-right font-mono text-[11px] tabular-nums text-slate-500">
+                {applied[port] != null ? `set ${applied[port]}` : '—'}
+              </span>
+              <button
+                onClick={() => applyPower(port)}
+                disabled={!props.connected || busy || !on || draft[port] === applied[port]}
+                className="rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-40 px-2 py-1 text-xs"
+              >
+                Set
+              </button>
+            </div>
+          );
+        })}
+      </div>
+      {note && <p className="text-xs text-amber-400 mt-2">{note}</p>}
+      <p className="text-[11px] text-slate-500 mt-2">
+        Turn a port OFF if nothing is plugged into it — the reader round-robins across enabled ports, so a dead one steals dwell time from the rest.
+      </p>
+    </div>
   );
 }
 
@@ -1410,7 +1531,17 @@ function MovementsPanel(props: { entries: EntryRow[] }) {
                   <td className={`px-4 py-1.5 ${e.known ? '' : 'text-amber-400 italic'}`}>{e.item.name}</td>
                   <td className="px-4 py-1.5 font-mono text-xs text-slate-500">{e.epc}</td>
                   <td className="px-4 py-1.5">
-                    {e.kind === 'entry' ? (
+                    {/* A contested passage gets its own pill rather than a green
+                        IN. This list is where "the console says 8 IN" comes
+                        from, and a pallet that then reports 4 looks like a bug
+                        until you can see that 4 of the 8 were on no open batch.
+                        The No-IR decisions table has carried this all along; the
+                        movement list had not. */}
+                    {e.unexpected ? (
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-300 border border-rose-500/30" title={e.unexpected}>
+                        {e.kind === 'entry' ? 'IN' : 'OUT'} · {e.unexpected}
+                      </span>
+                    ) : e.kind === 'entry' ? (
                       <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">IN</span>
                     ) : (
                       <span className="text-xs px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30">OUT</span>

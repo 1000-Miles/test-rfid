@@ -51,6 +51,12 @@ export interface BridgeState {
   readsPerSec: number;
   lastTriggerAt: number; // ms epoch of last IR trigger (0 = none)
   passageComplete: PassageCompleteMsg | null;
+  /**
+   * Set when Nexus withdrew cartons (receiving reset / batch delete). The value
+   * is the bridge's timestamp, so a consumer can react to a CHANGE rather than
+   * to a boolean it would have to clear itself.
+   */
+  receivingResetAt: string | null;
   palletWorkflow: PalletWorkflowMsg | null;
   clear: () => void;
 }
@@ -76,6 +82,7 @@ export function useBridge(): BridgeState {
   const [readsPerSec, setReadsPerSec] = useState(0);
   const [lastTriggerAt, setLastTriggerAt] = useState(0);
   const [passageComplete, setPassageComplete] = useState<PassageCompleteMsg | null>(null);
+  const [receivingResetAt, setReceivingResetAt] = useState<string | null>(null);
   const [palletWorkflow, setPalletWorkflow] = useState<PalletWorkflowMsg | null>(null);
 
   const idRef = useRef(0);
@@ -243,6 +250,18 @@ export function useBridge(): BridgeState {
             setGpi((prev) => (sameGpi(prev, next) ? prev : next));
             break;
           }
+          case 'receiving-reset':
+            // Timestamp, not a flag: consumers react to it CHANGING.
+            setReceivingResetAt(msg.timestamp);
+            // The open pallet card and the last passage summary both describe
+            // cartons Nexus has just un-received, so they are now claims about
+            // something that no longer exists. Nothing else clears them — they
+            // are only ever replaced by the NEXT passage — so after a reset the
+            // printing page went on offering Print for a pallet that had been
+            // dissolved out from under it.
+            setPalletWorkflow(null);
+            setPassageComplete(null);
+            break;
           case 'trigger':
             setLastTriggerAt(Date.now());
             break;
@@ -314,6 +333,7 @@ export function useBridge(): BridgeState {
     readsPerSec,
     lastTriggerAt,
     passageComplete,
+    receivingResetAt,
     palletWorkflow,
     clear,
   };

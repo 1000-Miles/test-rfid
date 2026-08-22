@@ -142,12 +142,18 @@ const nexus = new PassageDetector({
   toggleDedupMs: Number(process.env.NEXUS_TOGGLE_DEDUP_MS || 60_000),
   absenceMs: Number(process.env.NEXUS_ABSENCE_MS || 30_000),
   minRssi: process.env.NEXUS_MIN_RSSI ? Number(process.env.NEXUS_MIN_RSSI) : null,
-  toggleMinReads: Number(process.env.NEXUS_TOGGLE_MIN_READS || 2),
+  toggleMinReads: Number(process.env.NEXUS_TOGGLE_MIN_READS || 1),
   location: process.env.NEXUS_LOCATION || 'WH-ENTRANCE-1',
   // Tag registry: catalog is loaded from operations_label_tag in this
   // Supabase project (and cached to data/catalog.json for offline boots).
   catalogUrl: SB_URL,
   catalogKey: SB_KEY,
+  // "Is any live receiving batch waiting for this product?" — answered by the
+  // board feed, which already holds exactly that list. Deliberately a closure
+  // over `board` (declared below) rather than a value: it must answer with the
+  // board as it is at PASSAGE time, not as it was at boot. Only ever called
+  // from a movement decision, long after `board` is initialised.
+  expectsInbound: (sku) => board.expectsInbound(sku),
 });
 
 // --- Outbox (durable push to Nexus POST /api/movement) -------------------------
@@ -184,6 +190,9 @@ const outbox = new Outbox({
   baseBackoffMs: Number(process.env.MOVEMENT_BACKOFF_MS || 1_000),
   maxBackoffMs: Number(process.env.MOVEMENT_MAX_BACKOFF_MS || 60_000),
   drainPerSec: Number(process.env.MOVEMENT_DRAIN_PER_SEC || 5),
+  // Short code printed into every pallet code (PALLET-G1-001). MUST differ
+  // between gates — see _nextPalletCode.
+  gateShort: process.env.GATE_SHORT || 'G1',
   batchSettleMs: Number(process.env.MOVEMENT_BATCH_SETTLE_MS || 500),
   toggleBatchQuietMs: Number(process.env.MOVEMENT_TOGGLE_BATCH_QUIET_MS || 1_500),
   togglePalletWindowMs: Number(process.env.MOVEMENT_TOGGLE_PALLET_WINDOW_MS || 120_000),
@@ -195,9 +204,34 @@ outbox.on('batch-sent', (reply) => {
 outbox.on('pallet-open', (pallet) => {
   broadcast({ type: 'pallet-open', ...pallet });
 });
+// Printing a physical label is an ACTION, and this used to take it on every
+// inbound batch with no condition beyond the direction — so a stray read in
+// NO-IR mode (where a read IS a movement, with no beam to gate it) opened a
+// pallet, settled, and spat out a label for a pallet nobody had loaded. Off by
+// default: the card still appears the moment the pallet is ready, and the Print
+// button on it is one press away.
+//
+// PALLET_AUTOPRINT=1 restores the hands-free behaviour for a gate whose read
+// zone is tight enough to trust — see NEXUS_MIN_RSSI.
+const PALLET_AUTOPRINT = /^(1|true|yes|on)$/i.test(process.env.PALLET_AUTOPRINT || '');
+
 outbox.on('batch-ready', (batch) => {
   broadcast({ type: 'pallet-ready', ...batch });
   if (batch.direction !== 'in') return;
+  // The flag gates HANDS-FREE printing — a label nobody asked for. It must not
+  // gate a label an operator just pressed for: /movement/pallet/close is the
+  // "Close & print" button, so its close reason IS the print request. Without
+  // this, that press closed the pallet and printed nothing, and the operator had
+  // to press the card's second button to get the label they had already asked
+  // for twice.
+  const operatorAsked = batch.closeReason === 'operator-print';
+  if (!PALLET_AUTOPRINT && !operatorAsked) {
+    controller.log(
+      `[printer] pallet ${batch.palletCode} ready (${batch.cartonCount} carton(s)) — waiting for Print ` +
+        `(PALLET_AUTOPRINT is off)`
+    );
+    return;
+  }
   printer.printPalletTag({ palletCode: batch.palletCode, jobId: batch.requestId })
     .then((result) => broadcast({ type: 'pallet-print', ok: true, ...batch, replayed: result.replayed }))
     .catch((error) => broadcast({ type: 'pallet-print', ok: false, ...batch, error: error.message }));
@@ -215,6 +249,25 @@ const board = new BoardFeed({
   // off without a code change.
   maxAgeMs: Number(process.env.BOARD_CACHE_MS || 4_000),
   log: (text, level) => controller.log(`[board] ${text}`, level),
+  // Receiving went backwards in Nexus (a batch reset, a document removed). Same
+  // broadcast the carton-withdrawal path uses, from the other direction: that
+  // one sees cartons lose their warehouse rows, this one sees the figures fall.
+  // Either is enough for a screen to know its local counts are about to be
+  // wrong, and a reset rarely shows up as both.
+  onReceivingReset: (info) => {
+    // Wipe the gate's own memory FIRST, then tell the screens. Skipping this is
+    // what made a redo fail silently: the reader saw every carton and the
+    // bridge accepted a couple, because the rest were still inside their re-arm
+    // window or still remembered as INSIDE and therefore read as leaving.
+    nexus.resetForReceiving();
+    broadcast({
+      type: 'receiving-reset',
+      epcs: [],
+      count: 0,
+      reasons: info.reasons,
+      timestamp: new Date().toISOString(),
+    });
+  },
 });
 
 function deriveNexusBase(movementUrl) {
@@ -241,6 +294,22 @@ controller.on('reconnected', () => {
 });
 
 nexus.on('log', (text) => controller.log(`[passage] ${text}`));
+// A receiving reset (or batch delete) in Nexus withdrew some cartons. The gate
+// has already corrected its own direction state; this hands the same fact to
+// every open board so they can drop the credits they are holding for cartons
+// Nexus no longer considers received.
+nexus.on('withdrawn', (info) => {
+  // Same wipe from the other detector. Cheap and idempotent, and a reset that
+  // shows up as withdrawn cartons must clear the gate exactly as one that shows
+  // up as falling figures.
+  nexus.resetForReceiving();
+  broadcast({
+    type: 'receiving-reset',
+    epcs: info.epcs,
+    count: info.epcs.length,
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // The gate's own memory of who is INSIDE used to die with the process — fatal
 // for toggle mode, where that memory is the primary direction source. The
@@ -594,33 +663,136 @@ app.post('/debug/mock-visit', (req, res) => {
   res.json({ ok: true, epc, reads: count, detectMode: nexus.detectMode });
 });
 
-// Read power: GET current, POST { dBm } to set (1..30, persisted).
+/** Last successful power read, so a busy reader never blanks the display. */
+let lastPowerRead = null;
+
+/**
+ * Read power. GET current, POST { dBm } to set (1..30, persisted).
+ *
+ * The reader refuses config reads mid-inventory, and the gate is reading
+ * essentially all the time — so this used to answer {ok:false, dBm:null} on
+ * every call an operator ever made, and the console showed a default. It looked
+ * exactly like settings that would not save, when the values were on the reader
+ * the whole time. So: pause, read, resume, the same way POST already does.
+ */
 app.get('/power', async (_req, res) => {
   try {
     const uhf = require('./driver');
+    const wasReading = controller.reading;
+    if (wasReading) await controller.stopReading();
     const { dBm, perAntenna } = await controller._withLock(async () => ({
       dBm: await uhf.getPower(),
       perAntenna: uhf.getAntennaPower ? await uhf.getAntennaPower() : null,
     }));
-    res.json({ ok: dBm != null, dBm, perAntenna });
+    if (wasReading) {
+      // Never end the shift over a settings read.
+      try {
+        await controller.startReading();
+      } catch (err) {
+        controller.log(`could not resume reading after power read: ${err.message}`, 'warn');
+      }
+    }
+    if (dBm != null) lastPowerRead = { dBm, perAntenna, at: new Date().toISOString() };
+    // `applied` is what this process last wrote per port — kept because the
+    // firmware cannot read back everything, and it survives a failed read.
+    if (dBm == null && lastPowerRead) {
+      return res.json({ ok: true, ...lastPowerRead, stale: true, applied: { ...antennaPowerApplied } });
+    }
+    res.json({ ok: dBm != null, dBm, perAntenna, applied: { ...antennaPowerApplied } });
   } catch (err) {
+    // A cached figure beats a blank box on a wallboard nobody can debug.
+    if (lastPowerRead) return res.json({ ok: true, ...lastPowerRead, stale: true, error: err.message, applied: { ...antennaPowerApplied } });
     res.status(500).json({ ok: false, error: err.message });
   }
 });
 
+/**
+ * Set read power — globally with { dBm }, or per antenna with
+ * { perAntenna: { "3": 20, "4": 26 } }.
+ *
+ * Per-port matters at a real gate because the ports are not equivalent: one
+ * antenna covers the doorway and another reaches down the aisle, and running
+ * both at the same dBm is what pulls distant stock into the read zone while the
+ * carton actually passing reads no better. One knob for both was hiding that.
+ *
+ * The firmware's per-antenna READ-back returns nothing, so the bridge remembers
+ * what it last wrote and reports it as `applied` — otherwise the UI could never
+ * show what is set.
+ */
+const antennaPowerApplied = {}; // port -> dBm last written by this process
+
 app.post('/power', async (req, res) => {
   try {
+    const perAntenna = req.body?.perAntenna;
     const dBm = Number(req.body?.dBm);
-    if (!Number.isInteger(dBm) || dBm < 1 || dBm > 30) return res.status(400).json({ ok: false, error: 'dBm must be 1..30' });
+    const hasPer = perAntenna && typeof perAntenna === 'object' && Object.keys(perAntenna).length > 0;
+    if (!hasPer && (!Number.isInteger(dBm) || dBm < 1 || dBm > 30)) {
+      return res.status(400).json({ ok: false, error: 'dBm must be 1..30, or pass perAntenna: { port: dBm }' });
+    }
+    const entries = hasPer ? Object.entries(perAntenna).map(([k, v]) => [Number(k), Number(v)]) : [];
+    for (const [port, value] of entries) {
+      if (!Number.isInteger(port) || port < 1 || port > 16) return res.status(400).json({ ok: false, error: `bad antenna port ${port}` });
+      if (!Number.isInteger(value) || value < 1 || value > 30) return res.status(400).json({ ok: false, error: `dBm for antenna ${port} must be 1..30` });
+    }
     // reader ignores config commands mid-inventory — pause any active read
-    if (controller.reading) await controller.stopReading();
+    const wasReading = controller.reading;
+    if (wasReading) await controller.stopReading();
     const uhf = require('./driver');
     const result = await controller._withLock(async () => {
-      const rc = await uhf.setPower(dBm, true);
+      // Reject ports this reader does not have — checked HERE, with inventory
+      // paused, because the firmware reports enabled=[1] while it is reading
+      // and would make every real antenna look absent.
+      //
+      // Needed because the reader ACCEPTS a write to a port it does not have:
+      // it returns rc=0 and changes nothing, so a 4-port UR4 confirmed "antenna
+      // 5 set to 13 dBm" and discarded it. Indistinguishable, from the console,
+      // from a setting that will not save.
+      if (entries.length) {
+        const enabled = (await uhf.getAntennas()) || [];
+        // An empty list means the reader would not say. Attempting the write
+        // beats blocking a legitimate one on a failed probe.
+        if (enabled.length) {
+          const missing = entries.map(([port]) => port).filter((port) => !enabled.includes(port));
+          if (missing.length) {
+            return { rejected: `this reader has no antenna ${missing.join(', ')} — enabled ports are ${enabled.join(', ')}`, enabled };
+          }
+        }
+      }
+      let rc = 0;
+      if (hasPer) {
+        for (const [port, value] of entries) {
+          const one = await uhf.setAntennaPower(port, value, true);
+          rc |= one;
+          if (one === 0) antennaPowerApplied[port] = value;
+        }
+      } else {
+        rc = await uhf.setPower(dBm, true);
+        for (const port of (await uhf.getAntennas()) || []) antennaPowerApplied[port] = dBm;
+      }
       return { rc, dBm: await uhf.getPower() };
     });
-    controller.log(`Read power set to ${result.dBm}dBm (rc=${result.rc}).`);
-    res.json({ ok: result.rc === 0, ...result });
+    if (result.rejected) {
+      // Put the gate back the way we found it before reporting the refusal.
+      if (wasReading) {
+        try {
+          await controller.startReading();
+        } catch (_) {
+          /* reported below by /status */
+        }
+      }
+      return res.status(400).json({ ok: false, error: result.rejected, enabled: result.enabled });
+    }
+    // Resume, so tuning power from the console does not silently leave the gate
+    // stopped — the operator asked to change a setting, not to end the shift.
+    if (wasReading && result.rc === 0) {
+      try { await controller.startReading(); } catch (err) { controller.log(`could not resume reading: ${err.message}`, 'warn'); }
+    }
+    controller.log(
+      hasPer
+        ? `Antenna power set: ${entries.map(([p, v]) => `ant${p}=${v}dBm`).join(', ')} (rc=${result.rc}).`
+        : `Read power set to ${result.dBm}dBm on every enabled antenna (rc=${result.rc}).`
+    );
+    res.json({ ok: result.rc === 0, ...result, applied: { ...antennaPowerApplied }, reading: controller.reading });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -773,6 +945,34 @@ app.post('/tag/power', async (req, res) => {
 app.get('/nexus/summary', (_req, res) => res.json({ ok: true, ...nexus.summary() }));
 app.get('/nexus/inventory', (_req, res) => res.json({ ok: true, inventory: nexus.getInventory() }));
 app.get('/nexus/events', (req, res) => res.json({ ok: true, events: nexus.getEvents(Number(req.query.limit) || 50) }));
+/**
+ * Wipe ALL local receiving state — the counterpart to resetting Nexus.
+ *
+ * Guarded by an explicit confirm string rather than a bare POST: undelivered
+ * passages are real warehouse events, and this is the one endpoint that can
+ * destroy them. A stray call from a dashboard bug must not be able to.
+ */
+app.post('/admin/wipe-local', (req, res) => {
+  if (req.body?.confirm !== 'wipe') {
+    return res.status(400).json({
+      ok: false,
+      error: 'refusing to wipe without confirmation',
+      hint: 'POST {"confirm":"wipe"} — this destroys the movement queue, the delivery cursor, dead letters and pallet numbering',
+    });
+  }
+  const outboxResult = outbox.wipeLocalState();
+  nexus.reset();
+  board.clearCache?.();
+  controller.log('LOCAL STATE WIPED by /admin/wipe-local — queue, cursor, dead letters, pallet numbering and live inventory are all gone.', 'warn');
+  // Reuse the EXISTING reset signal rather than inventing a second one. Every
+  // screen already drops its local credits on this (see useGateBoard), and a
+  // parallel message would mean two ways to say the same thing with only one of
+  // them handled — which is how a board ends up still showing counts for
+  // passages the bridge has forgotten.
+  broadcast({ type: 'receiving-reset', epcs: [], count: 0, reasons: ['local wipe'], timestamp: new Date().toISOString() });
+  res.json({ ok: true, ...outboxResult, note: 'catalogue and printer settings kept — neither is receiving state' });
+});
+
 app.post('/nexus/reset', (_req, res) => {
   nexus.reset();
   res.json({ ok: true, ...nexus.summary() });
@@ -922,11 +1122,54 @@ function broadcast(msg) {
   }
 }
 
+/**
+ * Is the gate ARMED — i.e. should a read become a movement?
+ *
+ * Not the same question as "is a read arriving", which is why this exists.
+ *
+ *   manual/ir : the SDK inventory loop is the only source, so `reading` says it.
+ *   hw        : the reader is armed to fire on its own GPI trigger and push over
+ *               UDP. `reading` is deliberately FALSE in that mode (the bridge is
+ *               not polling anything), so the mode itself is the answer.
+ *
+ * The case this closes: a reader left in HW mode keeps pushing UDP datagrams to
+ * this process long after someone "stopped the gate" in the UI. The bridge went
+ * on turning each one into a receipt — cartons detected, a pallet opened, stock
+ * credited in Nexus — with the operator watching a stopped reader. A datagram
+ * arriving while the bridge is in manual mode and not reading is a leftover from
+ * a previous arming, not a carton crossing a doorway.
+ *
+ * Reads are still broadcast either way: the engineering console must keep
+ * showing raw RF whatever the gate is doing. Only the MOVEMENT decision is
+ * gated.
+ */
+function gateArmed() {
+  return controller.mode === 'hw' ? true : Boolean(controller.reading);
+}
+
+let ignoredReads = 0;
+let ignoredNotedAt = 0;
 controller.on('message', (msg) => {
   broadcast(msg);
   if (msg.type === 'tag') {
     forwardToSupabase(msg);
-    nexus.tagSeen(msg); // warehouse check-in (dedup + catalog inside)
+    if (gateArmed()) {
+      nexus.tagSeen(msg); // warehouse check-in (dedup + catalog inside)
+    } else {
+      // Rate-limited: a stuck reader can push hundreds a second, and the point
+      // is that this is VISIBLE, not that every frame is logged.
+      ignoredReads += 1;
+      if (Date.now() - ignoredNotedAt > 10_000) {
+        ignoredNotedAt = Date.now();
+        controller.log(
+          `[passage] ${ignoredReads} read(s) ignored — the gate is not armed ` +
+            `(mode=${controller.mode}, reading=${controller.reading}). A reader left in HW mode keeps ` +
+            `pushing UDP; those are not movements.`,
+          'warn'
+        );
+        ignoredReads = 0;
+      }
+    }
   }
   if (msg.type === 'passage-end') outbox.flushPassage(msg.passageId);
 });
@@ -1001,6 +1244,20 @@ server.listen(PORT, () => {
   outbox.start();
   outbox.emitPendingBatches();
   board.start(); // warm the document cache so the first kiosk paint is instant
+
+  // ...and keep it warm on the BRIDGE's own clock. Until now the board only
+  // refreshed inside get(), i.e. only when a kiosk asked for it — fine while the
+  // cache was just something to paint, but the gate now uses it to decide
+  // whether an arriving carton has an open receiving batch (expectsInbound).
+  // Hanging a safety check off "is a browser open somewhere" is wrong: on a
+  // TV-only doorway nothing calls /board/documents at all, the board would age
+  // past expectMaxAgeMs, and the check would quietly go back to passing
+  // everything. This interval is what makes the verdict independent of the
+  // screens.
+  const BOARD_REFRESH_MS = Number(process.env.BOARD_REFRESH_MS || 60_000);
+  if (BOARD_REFRESH_MS > 0) {
+    setInterval(() => void board.load(), BOARD_REFRESH_MS).unref();
+  }
 
   // Refresh the catalog from the live tag registry (falls back to the cached
   // data/catalog.json already loaded by the constructor).

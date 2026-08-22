@@ -32,7 +32,7 @@
  * ─────────────────────────────────────────────────────────────────────────
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { EntryRow } from './types';
+import type { EntryRow, MovementFault } from './types';
 import { BRIDGE_HTTP } from './api';
 
 export type Direction = 'in' | 'out';
@@ -229,6 +229,22 @@ export const docTitle = (doc: GateDoc) => doc.title || doc.id;
 export const activeDocs = (docs: GateDoc[], dir: Direction) =>
   docs.filter((d) => d.dir === dir && d.due <= 0).sort((a, b) => (a.due < 0 ? 0 : 1) - (b.due < 0 ? 0 : 1));
 
+/**
+ * Documents a passage may be credited against — WIDER than activeDocs.
+ *
+ * activeDocs answers "what belongs on today's screen". This answers "does this
+ * carton have a home", which is not the same question: goods turn up early, and
+ * a delivery that arrives ahead of its date is still that delivery. Refusing it
+ * because of the calendar filed a real, expected carton as an exception and
+ * left the batch looking short — the paperwork was right and the board argued
+ * with it.
+ *
+ * Order is `due` ascending, so overdue still fills before due-today, and
+ * due-today before anything scheduled later. Only the fallback changed, not the
+ * priority.
+ */
+export const receivableDocs = (docs: GateDoc[], dir: Direction) => docs.filter((d) => d.dir === dir).sort((a, b) => a.due - b.due);
+
 /* --------------------------------------------------------------- storage */
 
 /**
@@ -264,7 +280,12 @@ const MAX_DEFERRED = 200;
 // docId-keyed credit map to a retiring `pending` list. v1 state is incompatible
 // (its credits strand on the old batch id), so the bump discards it rather than
 // migrating a half-day of counts.
-const STORAGE_KEY = 'gateBoard.v2';
+// v3: `counted` entries are now PASSAGE-scoped (`in:EPC:passageId`), so a v2
+// board's day-scoped `in:EPC` keys would go on blocking every re-read of a
+// carton counted earlier today. They cannot be migrated — the passage they
+// belonged to is not recorded — so the bump discards them, which is also the
+// repair for any kiosk still holding a stale v2 board right now.
+const STORAGE_KEY = 'gateBoard.v3';
 const today = () => new Date().toISOString().slice(0, 10);
 
 /**
@@ -318,10 +339,29 @@ function mergeFeed(prev: BoardState, docs: GateDoc[], pool: GateDoc[], feed: Fee
   // If ANY is unmet the entry stays, so an undelivered passage keeps showing.
   // Erring toward keeping it means a brief over-count at worst; dropping it
   // early would make a real carton vanish from the board.
-  const delivered = feed.delivery && feed.delivery.queueDepth === 0 ? Date.parse(feed.delivery.lastPushAt ?? '') : NaN;
+  const drained = feed.delivery?.queueDepth === 0;
+  const delivered = drained ? Date.parse(feed.delivery?.lastPushAt ?? '') : NaN;
   const snapshot = feed.fetchedAt ? Date.parse(feed.fetchedAt) : NaN;
-  const absorbed = (c: PendingCredit) =>
-    Number.isFinite(delivered) && Number.isFinite(snapshot) && delivered >= c.at && snapshot >= delivered;
+  //
+  // Two ways an entry can retire, and the second one is why this had to change.
+  //
+  //  1. PROVEN — the outbox is empty, it pushed after we counted, and the
+  //     server snapshot was taken after that push. Airtight when available.
+  //
+  //  2. DRAINED — the outbox is empty and the snapshot is newer than the credit.
+  //     `lastPushAt` is a PER-PROCESS counter: it is null again after every
+  //     bridge restart, even though the cursor proves the events went. So proof
+  //     (1) becomes permanently unavailable to any credit taken before a
+  //     restart, the entry strands, and the board adds it to Nexus's own figure
+  //     FOREVER — one real carton showing as two, which is exactly what this
+  //     produced. An empty queue at a moment after we counted means nothing we
+  //     counted is still waiting.
+  //
+  const absorbed = (c: PendingCredit) => {
+    if (!Number.isFinite(snapshot)) return false;
+    if (Number.isFinite(delivered) && delivered >= c.at && snapshot >= delivered) return true;
+    return drained && snapshot > c.at;
+  };
 
   const pending = prev.pending.filter((c) => !absorbed(c));
 
@@ -357,11 +397,27 @@ const hhmm = () => {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
 
+/** What the board writes in the exceptions list for each fault the bridge stamps. */
+const FAULT_NOTE: Record<MovementFault, string> = {
+  'no-open-batch': 'Entered the warehouse with no open receiving batch',
+  'not-received': 'Left the warehouse but was never received in',
+  'already-shipped': 'Left the warehouse but is already marked shipped',
+};
+
 export type CountOutcome =
   | { kind: 'counted'; docId: string; dir: Direction; sku: string; name: string }
+  /** A contested passage: filed as an exception, credited to nothing. */
+  | { kind: 'fault'; tag: string; fault: MovementFault; message: string }
   | { kind: 'duplicate'; message: string }
   | { kind: 'complete'; message: string }
-  | { kind: 'unknown'; tag: string };
+  | { kind: 'unknown'; tag: string }
+  /**
+   * A tag that resolves to nothing at all. Not filed, not flashed, not counted
+   * — the board behaves as though it never passed. Distinct from 'unknown',
+   * which is a REAL product that simply is not on an open batch, and still
+   * deserves to be surfaced.
+   */
+  | { kind: 'ignored'; tag: string };
 
 /**
  * Credit one gate movement to the best-matching open receiving batch line.
@@ -377,12 +433,45 @@ export function applyMovement(state: BoardState, entry: EntryRow): { state: Boar
   const dir: Direction = entry.direction;
   // The direction stays in the key for the stored board's sake (see
   // BoardState.counted); on a receiving-only gate it is always 'in'.
-  const countedKey = `${dir}:${epc}`;
+  // Scoped to the PASSAGE, not the day.
+  //
+  // This used to be `${dir}:${epc}` — one credit per carton per day — which made
+  // a legitimate re-arrival impossible: a carton received, then un-received in
+  // Nexus, then walked back through could never be counted again until midnight,
+  // and every read came back "already received today" while the pallet and the
+  // print showed it perfectly. The bridge ALREADY guarantees one event per tag
+  // per physical passage (`_lastEventPassage`), so all this guard has to catch
+  // is a replay of the same passage — banning the EPC for the rest of the day
+  // was never what made it safe.
+  //
+  // Movements with no passage id keep the day-scoped key: they have no other
+  // dedupe behind them, so the coarse guard is the only one they get.
+  const countedKey = entry.passageId != null ? `${dir}:${epc}:${entry.passageId}` : `${dir}:${epc}`;
 
   const file = (tag: string, note: string): BoardState => ({
     ...state,
     exceptions: [{ id: Date.now() + Math.floor(Math.random() * 1000), tag, note, at: hhmm() }, ...state.exceptions].slice(0, 100),
   });
+
+  // CONTESTED PASSAGE, checked before anything else.
+  //
+  // The bridge has already asked Nexus whether any live receiving batch is
+  // waiting for this product, and been told no. That verdict outranks this
+  // board because this board can be OUT OF DATE in a way the bridge is not:
+  // `docs` is persisted to localStorage for the whole day, so a batch deleted
+  // or archived in Nexus at noon is still sitting in a kiosk's stored board at
+  // four — and a carton would be credited against a document that no longer
+  // exists. The bridge re-reads the live feed every few seconds; it wins.
+  //
+  // Checked ahead of the duplicate guard for the same reason as ever: `counted`
+  // exists to stop double-crediting, and letting it swallow a fault would mean
+  // the second carton through the door went unremarked.
+  const fault = entry.unexpected;
+  if (fault) {
+    const sku = resolveSku(entry);
+    const tag = sku ? `${epc} · ${sku}` : epc;
+    return { state: file(tag, FAULT_NOTE[fault]), outcome: { kind: 'fault', tag, fault, message: FAULT_NOTE[fault] } };
+  }
 
   if (state.counted.includes(countedKey)) {
     const sku = resolveSku(entry);
@@ -391,11 +480,15 @@ export function applyMovement(state: BoardState, entry: EntryRow): { state: Boar
 
   const sku = resolveSku(entry);
   if (!sku) {
-    return { state: file(epc, 'No matching receiving batch on today’s board'), outcome: { kind: 'unknown', tag: epc } };
+    // An EPC the catalogue cannot name. At a doorway this is mostly traffic
+    // rather than stock — pallet wrap, returnable crates, a badge in someone's
+    // pocket — so the board ignores it completely instead of raising a banner
+    // and an exception nobody will reconcile. `state` is returned untouched.
+    return { state, outcome: { kind: 'ignored', tag: epc } };
   }
 
-  // Overdue documents get filled first, then due-today, in board order.
-  const candidates = activeDocs(state.docs, dir);
+  // Overdue first, then due-today, then future — see receivableDocs.
+  const candidates = receivableDocs(state.docs, dir);
   const target = candidates.find((d) => d.lines.some((l) => l.sku === sku && l.received < l.expected));
 
   if (!target) {
@@ -403,9 +496,10 @@ export function applyMovement(state: BoardState, entry: EntryRow): { state: Boar
     if (onBoard) {
       return { state: { ...state, counted: [...state.counted, countedKey] }, outcome: { kind: 'complete', message: `${sku} · every open line already complete` } };
     }
+    // No open document at all now means exactly that — not merely "not today".
     const tag = `${epc} · ${sku}`;
     return {
-      state: file(tag, `${sku} is not expected inbound today`),
+      state: file(tag, `${sku} is not on any open receiving batch`),
       outcome: { kind: 'unknown', tag },
     };
   }
@@ -416,6 +510,12 @@ export function applyMovement(state: BoardState, entry: EntryRow): { state: Boar
     let done = false;
     return {
       ...d,
+      // Receiving against a future-dated document promotes it to today. The
+      // board only renders due <= 0, so without this the carton would be
+      // counted onto a document the operator cannot see — a number moving
+      // somewhere off screen, which is worse than not counting it.
+      due: d.due > 0 ? 0 : d.due,
+      meta: d.due > 0 ? `Received early · ${hhmm()}` : d.meta,
       lines: d.lines.map((l) => {
         if (done || l.sku !== sku || l.received >= l.expected) return l;
         done = true;
@@ -449,8 +549,6 @@ export interface GateBoardApi {
    * document but no particular line to point at.
    */
   lastCounted: { docId: string; sku: string | null; name: string | null; dir: Direction; seq: number } | null;
-  /** Unknown tag banner text, cleared automatically. */
-  flashTag: string | null;
   /** "Already counted" toast text, cleared automatically. */
   dupMsg: string | null;
   addFromPool: (docId: string) => void;
@@ -464,10 +562,25 @@ export interface GateBoardApi {
 }
 
 /** Drives today's board off the bridge's entry/exit stream. */
-export function useGateBoard(entries: EntryRow[]): GateBoardApi {
+/**
+ * @param onOutcome Fired for every movement the board resolves, with what it
+ *   decided. The audio lives at the call site rather than here because only
+ *   this hook knows whether a passage was actually credited to a document —
+ *   `known` (the bridge catalogue) is a different question, and chiming on it
+ *   meant every stray tag in the building made a noise.
+ */
+/**
+ * @param receivingResetAt Bridge timestamp of the last receiving reset in Nexus
+ *   (see BridgeState.receivingResetAt). When it CHANGES, this board drops the
+ *   credits it is holding — see the effect below.
+ */
+export function useGateBoard(
+  entries: EntryRow[],
+  onOutcome?: (outcome: CountOutcome) => void,
+  receivingResetAt?: string | null
+): GateBoardApi {
   const [board, setBoard] = useState<BoardState>(loadBoard);
   const [lastCounted, setLastCounted] = useState<GateBoardApi['lastCounted']>(null);
-  const [flashTag, setFlashTag] = useState<string | null>(null);
   const [dupMsg, setDupMsg] = useState<string | null>(null);
   const [feed, setFeed] = useState<FeedState>({ status: 'loading', fetchedAt: null, error: null });
 
@@ -490,11 +603,29 @@ export function useGateBoard(entries: EntryRow[]): GateBoardApi {
   useEffect(() => saveBoard(board), [board]);
 
   /** Surface what a batch of movements did — the toast, the flash, the follow. */
+  // Held in a ref so `announce` keeps its empty dep list — a caller passing an
+  // inline arrow must not rebuild the whole movement pipeline on every render.
+  const onOutcomeRef = useRef(onOutcome);
+  onOutcomeRef.current = onOutcome;
+
   const announce = useCallback((outcomes: CountOutcome[]) => {
     for (const outcome of outcomes) {
+      onOutcomeRef.current?.(outcome);
       if (outcome.kind === 'counted') setLastCounted({ docId: outcome.docId, sku: outcome.sku, name: outcome.name, dir: outcome.dir, seq: ++seq.current });
-      else if (outcome.kind === 'unknown') setFlashTag(outcome.tag);
-      else setDupMsg(outcome.message);
+      else if (outcome.kind === 'duplicate' || outcome.kind === 'complete') setDupMsg(outcome.message);
+      // 'ignored', 'unknown' and 'fault' show NOTHING on this board, on purpose.
+      //
+      // This board is the list of work someone is standing there doing, and the
+      // only thing that belongs on it is a carton that lands on a document. The
+      // three silent cases are all "not that", and all common: unnameable tags
+      // are doorway traffic (pallet wrap, returnable crates, a badge in a
+      // pocket), and a product on no open batch is stock nobody here booked.
+      // Each used to throw a full-screen red flash, which made the board cry
+      // wolf all day over things no operator at the door can act on.
+      //
+      // They are not lost. Every one is journaled by the bridge and delivered to
+      // Nexus, filed into `exceptions` here, logged by the bridge, and a
+      // contested passage is still stamped on the TV wallboard — see TvBoard.
     }
   }, []);
 
@@ -564,12 +695,6 @@ export function useGateBoard(entries: EntryRow[]): GateBoardApi {
   }, [releaseDeferred]);
 
   useEffect(() => {
-    if (!flashTag) return;
-    const t = setTimeout(() => setFlashTag(null), 2600);
-    return () => clearTimeout(t);
-  }, [flashTag]);
-
-  useEffect(() => {
     if (!dupMsg) return;
     const t = setTimeout(() => setDupMsg(null), 2400);
     return () => clearTimeout(t);
@@ -604,11 +729,16 @@ export function useGateBoard(entries: EntryRow[]): GateBoardApi {
       if (inFlight.current) return; // never let polls stack up behind a slow bridge
       inFlight.current = true;
       if (!silent) setFeed((f) => ({ ...f, status: 'loading' }));
+      // Clear FIRST, before the network. "Reset day" is the button someone
+      // presses precisely when things are wrong — which is exactly when the
+      // bridge may also be unreachable — and this used to live after the fetch,
+      // inside the try, so a failed request left every count in place and the
+      // button silently did nothing.
+      if (!keepCredits) commit({ ...current.current, counted: [], exceptions: [], pending: [] });
       try {
         const res = await fetchDocuments();
         indexSimSkus(res.docs, res.pool);
-        const base = keepCredits ? current.current : { ...current.current, counted: [], exceptions: [], pending: [] };
-        commit(mergeFeed(base, res.docs, res.pool, res));
+        commit(mergeFeed(current.current, res.docs, res.pool, res));
         setFeed({
           status: res.ok ? (res.stale ? 'stale' : 'live') : 'error',
           fetchedAt: res.fetchedAt,
@@ -645,14 +775,33 @@ export function useGateBoard(entries: EntryRow[]): GateBoardApi {
     return () => clearInterval(t);
   }, [load]);
 
+  // Nexus reset the receiving, so this board's counts are about cartons Nexus
+  // no longer considers received. Drop them and re-pull.
+  //
+  // The document poll cannot discover this on its own: it sees `received` fall
+  // to 0 and simply re-applies the local overlay on top, so the board keeps
+  // showing counts for a batch that was emptied — and every carton walked back
+  // through answers "already received today". The bridge is the only party that
+  // notices the withdrawal, which is why this arrives as a signal rather than a
+  // number.
+  //
+  // Skips the first run: a null-to-value change on mount is just the socket
+  // reporting the last reset, not a new one.
+  const seenReset = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    const previous = seenReset.current;
+    seenReset.current = receivingResetAt ?? null;
+    if (previous === undefined || !receivingResetAt || previous === receivingResetAt) return;
+    void load({ keepCredits: false });
+  }, [receivingResetAt, load]);
+
   const refresh = useCallback(() => void load(), [load]);
 
   const resetDay = useCallback(() => {
     setLastCounted(null);
-    setFlashTag(null);
     setDupMsg(null);
     void load({ keepCredits: false });
   }, [load]);
 
-  return { board, lastCounted, flashTag, dupMsg, addFromPool, clearExceptions, refresh, resetDay, feed };
+  return { board, lastCounted, dupMsg, addFromPool, clearExceptions, refresh, resetDay, feed };
 }

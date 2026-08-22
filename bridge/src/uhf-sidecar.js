@@ -39,13 +39,56 @@ async function call(method, pathname, params = {}) {
   return res.json();
 }
 
-/** Spawn the Java sidecar if nothing is listening yet. Idempotent. */
-async function ensureSidecar() {
+/**
+ * Is the thing on the port actually driving a reader?
+ *
+ * /status alone is NOT enough, and trusting it cost a shift of downtime: a
+ * sidecar left over from a previous bridge kept answering {ok:true,
+ * connected:true} long after it had lost the reader, so every hardware call
+ * failed while the bridge cheerfully reported "reading..." and the antenna
+ * lights were dark. A hardware call is the only honest probe.
+ */
+async function sidecarIsHealthy() {
   try {
-    await call('GET', '/status');
-    return; // already up
+    const status = await call('GET', '/status');
+    if (!status?.ok) return false;
+    // A sidecar that has not been asked to connect yet is perfectly healthy —
+    // it simply has no reader handle, and its hardware calls fail for that
+    // reason alone. This is the normal state at boot, BEFORE POST /connect.
+    if (!status.connected) return true;
+    // It claims a live reader, so make it prove it. The stale-orphan signature
+    // is exactly this contradiction: connected:true while every hardware call
+    // returns ok:false. That is what kept the antenna lights dark while the
+    // bridge logged "reading..." for hours.
+    const probe = await call('GET', '/antennas');
+    return probe?.ok === true;
   } catch (_) {
-    /* not running — spawn it */
+    return false;
+  }
+}
+
+/** Spawn the Java sidecar if nothing healthy is listening yet. Idempotent. */
+async function ensureSidecar() {
+  if (await sidecarIsHealthy()) return; // already up AND working
+
+  // Something may still be holding the port without being usable — an orphan
+  // from a bridge that exited without taking its child with it. We cannot
+  // adopt it and we cannot bind over it, so say precisely what to do rather
+  // than failing later with a symptom ("no tags") far from the cause.
+  let occupied = false;
+  try {
+    const status = await call('GET', '/status');
+    // Only a CONNECTED-but-broken sidecar is unusable. One that answers and
+    // admits it holds no reader is just waiting for /connect.
+    occupied = Boolean(status?.connected);
+  } catch (_) {
+    /* genuinely nothing listening — the normal path */
+  }
+  if (occupied) {
+    throw new Error(
+      `a sidecar is listening on ${SIDECAR_URL} but its reader calls fail — it is a stale process from an earlier bridge. ` +
+        `Stop it and start the bridge again:  pkill -f UhfSidecar`
+    );
   }
   if (!SIDECAR_IS_LOCAL) {
     throw new Error(
@@ -63,6 +106,28 @@ async function ensureSidecar() {
     console.error(`[sidecar] exited with code ${code}`);
     child = null;
   });
+  // The sidecar is supposed to live and die with the bridge. It did not: a
+  // killed bridge left it running, systemd adopted it, and the next bridge
+  // attached to a corpse. Tie the lifetimes together explicitly.
+  if (!ensureSidecar._exitHooked) {
+    ensureSidecar._exitHooked = true;
+    const stopChild = () => {
+      if (child && !child.killed) {
+        try {
+          child.kill('SIGTERM');
+        } catch (_) {
+          /* already gone */
+        }
+      }
+    };
+    process.on('exit', stopChild);
+    for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+      process.on(sig, () => {
+        stopChild();
+        process.exit(0);
+      });
+    }
+  }
   // wait for it to come up
   for (let i = 0; i < 20; i++) {
     await new Promise((r) => setTimeout(r, 250));
@@ -160,6 +225,36 @@ async function setPower(dBm, save = true) {
   // not persist); the Java sidecar ignores unknown params, unchanged there.
   const r = await call('POST', '/power', { dbm: dBm, ants: ants.join(','), save: save ? 1 : 0 });
   return r.ok ? 0 : -1;
+}
+
+/**
+ * Set power on ONE antenna port. The sidecar's /power already takes an `ants`
+ * list — setPower above just happens to pass every enabled port at once — so
+ * per-port control needs no new sidecar endpoint, only a narrower call.
+ *
+ * This matters at a gate because the ports are not equivalent: one antenna
+ * covers the doorway, another reaches down the aisle, and running both at the
+ * same dBm is what drags distant stock into the read zone while the carton
+ * actually passing reads no better.
+ */
+async function setAntennaPower(port, dBm, save = true) {
+  const r = await call('POST', '/power', { dbm: dBm, ants: String(port), save: save ? 1 : 0 });
+  return r.ok ? 0 : -1;
+}
+
+/** Power per antenna. @returns {{[port:number]:{read:number,write:number}}|null} */
+async function getAntennaPower() {
+  const r = await call('GET', '/power');
+  if (!r.ok || !Array.isArray(r.power)) return null;
+  const out = {};
+  for (const e of r.power) {
+    // The sidecar has carried more than one key name for the port over time;
+    // accept any of them rather than silently returning an empty map.
+    const port = e?.ant ?? e?.antenna ?? e?.port;
+    if (port == null || e?.dbm == null) continue;
+    out[port] = { read: e.dbm, write: e.dbm };
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 async function getAntennas() {
@@ -288,6 +383,8 @@ module.exports = {
   drainTags,
   getGpi,
   getPower,
+  setAntennaPower,
+  getAntennaPower,
   setPower,
   getAntennas,
   setAntennas,

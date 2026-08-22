@@ -696,6 +696,27 @@ function setPower(dBm, save = true) {
   return 0;
 }
 
+/**
+ * Set output power on ONE antenna port.
+ *
+ * The global setPower above writes the same dBm to every enabled port, which is
+ * the wrong tool when the ports are not equivalent — a gate typically has one
+ * antenna covering the doorway and another reaching further, and they want
+ * different power. This is the per-port form of the same SDK call.
+ *
+ * Note UHFGetAntennaPower returns non-zero on this firmware, so a value written
+ * here cannot be read back; the bridge remembers what it set instead.
+ *
+ * @returns {number} 0 on success.
+ */
+function setAntennaPower(port, dBm, save = true) {
+  const f = load();
+  const p = Number(port) & 0xff;
+  if (p < 1 || p > 16) throw new Error(`setAntennaPower: bad port ${port}`);
+  const v = Number(dBm) & 0xff;
+  return f.UHFSetAntennaPower(save ? 1 : 0, p, v, v);
+}
+
 /** Read power per enabled antenna. @returns {{[port:number]:{read:number,write:number}}|null} */
 function getAntennaPower() {
   const f = load();
@@ -996,6 +1017,7 @@ const NEEDS_LINK = [
   'getWorkTime',
   'setWorkTime',
   'setAntennas',
+  'setAntennaPower',
   'getAntennas',
   'getAntennaLink',
   'readIOStatus',
@@ -1065,6 +1087,7 @@ module.exports = guardExports({
   getProtocolType,
   getRFLink,
   getAntennaPower,
+  setAntennaPower,
   getWorkTime,
   setWorkTime,
   setAntennas,

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
-import type { EntryRow, GpiState, OutboundFault } from './types';
+import type { EntryRow, GpiState, MovementFault } from './types';
 import { BRIDGE_HTTP } from './api';
-import { chime, playClip } from './sound';
+import { playClip } from './sound';
 
 /**
  * How long both beams must stay clear before the tally is read out. A pallet
@@ -21,6 +21,20 @@ const GATE_CLEAR_SETTLE_MS = 800;
  */
 const FLUSH_FALLBACK_MS = 12000;
 
+/**
+ * Whether the board speaks at all.
+ *
+ * OFF — every case, routine and warning alike. On a gate that runs all day the
+ * readout is constant talking, and a board that talks constantly is one people
+ * stop listening to; the chime and the screen already carry the information.
+ *
+ * Everything below is kept intact and simply not reached: tally() still groups
+ * a passage into per-product totals, phrases() still holds the English and
+ * Mandarin wording, and the per-case suppression guards in the flush still
+ * apply. Setting this true restores the whole thing as it was.
+ */
+const SPEECH_ENABLED = false;
+
 /** One line of the announcement: a product, and how many of it went through. */
 interface Tally {
   kind: 'entry' | 'exit';
@@ -28,8 +42,8 @@ interface Tally {
   isPallet: boolean;
   name: string;
   count: number;
-  /** Set when the bridge found this exit contradicted Nexus's own records. */
-  fault: OutboundFault | null;
+  /** Set when the bridge found this passage contradicted Nexus's own records. */
+  fault: MovementFault | null;
 }
 
 /**
@@ -50,11 +64,11 @@ function tally(entries: EntryRow[]): Tally[] {
   for (const e of entries) {
     const isPallet = e.item?.kind === 'pallet';
     const name = e.known ? e.item.name : '';
-    // Contested exits group SEPARATELY from clean ones, by fault. Folding them
-    // together would average a warning into a confirmation: three cartons out,
-    // one of which should not have left, must not be read as "three cartons
-    // checked out".
-    const fault = (e.kind === 'exit' && e.unexpected) || null;
+    // Contested passages group SEPARATELY from clean ones, by fault. Folding
+    // them together would average a warning into a confirmation: three cartons
+    // through the door, one of which is on no open batch, must not be read as
+    // "three cartons arrived".
+    const fault = e.unexpected || null;
     const key = `${e.kind}|${fault ?? '-'}|${e.known ? (isPallet ? 'p' : 'c') + ':' + name : 'unknown'}`;
     const hit = index.get(key);
     if (hit) {
@@ -88,6 +102,12 @@ function phrases(t: Tally) {
   // the door could hear was a confirmation.
   if (t.fault) {
     const cartons = `${t.count} ${t.count === 1 ? 'carton' : 'cartons'} of ${t.name}`;
+    if (t.fault === 'no-open-batch') {
+      return {
+        en: `Warning: ${cartons} arrived with no open receiving batch`,
+        zh: `警告：${t.name} ${t.count} 箱到达，但没有对应的收货批次`,
+      };
+    }
     if (t.fault === 'already-shipped') {
       return {
         en: `Warning: ${cartons} left the warehouse but is already shipped`,
@@ -246,8 +266,10 @@ export function useVoice(entries: EntryRow[], enabled: boolean, gpi: GpiState) {
   flush.current = () => {
     clearTimers();
     const batch = pending.current;
+    // Drained even when muted, so the buffer cannot grow without bound.
     pending.current = [];
     if (!batch.length) return;
+    if (!SPEECH_ENABLED) return;
 
     const say = (text: string, lang: 'en' | 'zh', pitch: number) => {
       queue.current = queue.current
@@ -270,17 +292,16 @@ export function useVoice(entries: EntryRow[], enabled: boolean, gpi: GpiState) {
       // background noise — and a voice that cries wolf all day is worse than
       // silence, because the genuine warnings (a contested exit) stop landing.
       //
-      // They are NOT ignored: the alert chime still fires below, and the board
-      // still shows the UNKNOWN TAG banner and logs the exception. This
-      // suppresses the speech only. Delete this guard to bring it back —
-      // phrases() still has the wording.
+      // They are NOT ignored: the board still shows the UNKNOWN TAG banner and
+      // logs the exception. This suppresses the speech only. Delete this guard
+      // to bring it back — phrases() still has the wording.
       if (!t.known) continue;
 
       // Same reasoning for "left but was never received in". A carton only has
       // a warehouse record once someone received it in, so anything that left
       // without ever being booked in trips this — which on a site still filling
-      // in its inbound history is most of them. It stays a board exception and
-      // an alert chime; it just no longer says so out loud.
+      // in its inbound history is most of them. It stays a board exception; it
+      // just no longer says so out loud.
       //
       // 'already-shipped' is deliberately still spoken: that one means Nexus
       // thinks the carton is gone already, which is a genuine contradiction
@@ -306,9 +327,8 @@ export function useVoice(entries: EntryRow[], enabled: boolean, gpi: GpiState) {
 
   useEffect(() => clearTimers, []);
 
-  // Collect. The chime still fires per movement — it is the live feedback that
-  // a tag was actually caught, and waiting for the gate to clear before making
-  // any sound at all would leave the operator with nothing to go on.
+  // Collect the passage. Audio for the movement itself is the board's job now
+  // (App.tsx onOutcome); this hook only buffers for the spoken readout.
   useEffect(() => {
     if (!enabled || entries.length === 0) return;
     const newest = entries[0];
@@ -316,10 +336,11 @@ export function useVoice(entries: EntryRow[], enabled: boolean, gpi: GpiState) {
     const fresh = entries.filter((e) => e.id > lastSeenId.current).reverse();
     lastSeenId.current = newest.id;
 
-    // The tone is the operator's immediate feedback, so a contested exit gets
-    // the alert tone at the moment it happens rather than only in the readout
-    // that follows the passage.
-    for (const e of fresh) chime(e.known && !e.unexpected ? 'ok' : 'alert');
+    // The chime is NOT fired here any more. This hook only sees the raw passage,
+    // so the best it could do was chime on `known` — which is "the bridge has a
+    // catalogue row", not "this belongs to a document today". That made every
+    // stray tag beep. It now fires from the board's own verdict; see the
+    // onOutcome handler in App.tsx.
     pending.current.push(...fresh);
 
     // Re-arm on every movement: the fallback measures silence at the gate, not

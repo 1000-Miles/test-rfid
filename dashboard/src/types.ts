@@ -105,10 +105,14 @@ export interface NexusItem {
 }
 
 /**
- * Why an outbound passage contradicts Nexus's record of the carton. Decided by
- * the bridge (passage.js `_outboundCheck`), null on every ordinary passage.
+ * Why a passage contradicts what Nexus knows. Decided by the bridge
+ * (passage.js `_movementCheck`), null on every ordinary passage.
+ *
+ *   'no-open-batch'   inbound: no live receiving batch expects this product
+ *   'not-received'    outbound: the carton was never taken in
+ *   'already-shipped' outbound: the carton has already left
  */
-export type OutboundFault = 'not-received' | 'already-shipped';
+export type MovementFault = 'no-open-batch' | 'not-received' | 'already-shipped';
 
 export interface EntryMsg {
   type: 'entry' | 'exit';
@@ -128,17 +132,29 @@ export interface EntryMsg {
   palletCode?: string | null;
   eventId?: string | null;
   /**
-   * Set only on a contested exit. The movement is real and was reported anyway;
-   * this says it must not be treated as a dispatch. Optional because a bridge
-   * older than this field simply omits it.
+   * Set only on a contested passage. The movement is real and was reported
+   * anyway; this says it must not be treated as a receipt or a dispatch.
+   * Optional because a bridge older than this field simply omits it.
    */
-  unexpected?: OutboundFault | null;
+  unexpected?: MovementFault | null;
   /**
    * Toggle mode only: WHY the direction was inferred — 'local-flip',
    * 'state-never-received', 'state-in-building', 'state-shipped-return' or
    * 'default-first-seen'. null/absent on observed (IR) passages.
    */
   basis?: string | null;
+  timestamp: string;
+}
+
+/**
+ * Nexus withdrew some cartons — a receiving reset, or a batch deleted. The gate
+ * has already corrected its own direction state; the boards use this to drop the
+ * credits they are holding, which no document poll would ever tell them to do.
+ */
+export interface ReceivingResetMsg {
+  type: 'receiving-reset';
+  epcs: string[];
+  count: number;
   timestamp: string;
 }
 
@@ -174,6 +190,15 @@ export interface PalletWorkflowMsg {
   requestId: string;
   passageId: string | number;
   palletCode: string;
+  /**
+   * Receiving batch this pallet was assigned to.
+   *
+   * Absent until Nexus accepts the passage and assigns one, so it is null for
+   * the whole time the pallet is open at the gate — and stays null while
+   * delivery is failing. The UI must say "not assigned yet" rather than
+   * substituting the pallet code, which would read as a batch it is not.
+   */
+  batchRef?: string | null;
   cartonCount: number;
   /** Absent on a reprint or a hand-keyed label, which have no cartons behind them. */
   products?: PalletProduct[];
@@ -186,7 +211,7 @@ export interface PalletWorkflowMsg {
   closeReason?: string;
 }
 
-export type WsMsg = TagMsg | GpiMsg | TriggerMsg | StatusMsg | LogMsg | UdpMsg | EntryMsg | PingMsg | PassageCompleteMsg | PalletWorkflowMsg;
+export type WsMsg = TagMsg | GpiMsg | TriggerMsg | StatusMsg | LogMsg | UdpMsg | EntryMsg | PingMsg | PassageCompleteMsg | PalletWorkflowMsg | ReceivingResetMsg;
 
 export interface EntryRow extends Omit<EntryMsg, 'type'> {
   id: number;

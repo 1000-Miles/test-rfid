@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useBridge } from './useBridge';
 import { useVoice } from './useVoice';
 import { useAudioGate } from './useAudioGate';
-import { useGateBoard } from './documents';
+import { useGateBoard, type CountOutcome } from './documents';
 import GateBoard from './GateBoard';
+import { chime } from './sound';
 import ControlDrawer from './ControlDrawer';
 import TvBoard from './TvBoard';
 import PalletPrintingPage from './PalletPrintingPage';
@@ -40,7 +41,6 @@ const readLocation = () => ({
 
 export default function App() {
   const bridge = useBridge();
-  const board = useGateBoard(bridge.entries);
   const [controlsOpen, setControlsOpen] = useState(false);
 
   // --- routing ---
@@ -89,6 +89,25 @@ export default function App() {
     });
   useVoice(bridge.entries, voiceOn, bridge.gpi);
   const sound = useAudioGate(voiceOn);
+
+  // Audio for a movement, decided by what the BOARD made of it rather than by
+  // the raw passage:
+  //
+  //   counted — it belongs to a document today. The ONLY case that makes a
+  //             sound, so a beep means "that one landed on the board" and
+  //             nothing else has to be interpreted.
+  //   everything else — silent, including contested exits and unrecognised
+  //             tags. At a doorway those are the common case (pallet wrap,
+  //             returnable crates, staff walking through), and a board that
+  //             reacts to all of them is a board people stop hearing.
+  const onOutcome = useCallback(
+    (outcome: CountOutcome) => {
+      if (!voiceOn) return;
+      if (outcome.kind === 'counted') chime('ok');
+    },
+    [voiceOn]
+  );
+  const board = useGateBoard(bridge.entries, onOutcome, bridge.receivingResetAt);
 
   if (route === 'tv') return <TvBoard bridge={bridge} onExit={() => navigate(ROUTES.gate)} />;
   if (route === 'printing') return <PalletPrintingPage bridge={bridge} />;
