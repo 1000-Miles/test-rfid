@@ -13,6 +13,16 @@ type PalletPrint = {
   prints: number;
 };
 
+/** The pallet-printer settings a test label will be produced on. */
+type PalletPrinterInfo = {
+  palletPrinterName: string;
+  palletWidthMm: number;
+  palletHeightMm: number;
+  palletDpi: number;
+  ready: boolean;
+  detail: string | null;
+};
+
 export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) {
   const workflow = bridge.palletWorkflow;
   const synced = Boolean(workflow && bridge.passageComplete?.passageId === workflow.passageId);
@@ -23,6 +33,11 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const [testing, setTesting] = useState(false);
+  const [testNotice, setTestNotice] = useState<Notice>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [printerCfg, setPrinterCfg] = useState<PalletPrinterInfo | null>(null);
+  const [cfgError, setCfgError] = useState<string | null>(null);
 
   useEffect(() => {
     if (workflow?.type !== 'pallet-open') return;
@@ -45,6 +60,63 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
   useEffect(() => {
     void loadHistory();
   }, [loadHistory]);
+
+  const loadPrinterCfg = useCallback(async () => {
+    try {
+      const result = await readJson(await fetch(`${BRIDGE_HTTP}/printer/status`));
+      const cfg = result.config ?? {};
+      setPrinterCfg({
+        palletPrinterName: cfg.palletPrinterName ?? '',
+        palletWidthMm: cfg.palletWidthMm ?? 0,
+        palletHeightMm: cfg.palletHeightMm ?? 0,
+        palletDpi: cfg.palletDpi ?? 0,
+        ready: Boolean(result.palletReady),
+        detail: result.palletDetail ?? null,
+      });
+      setCfgError(null);
+    } catch (error) {
+      setPrinterCfg(null);
+      setCfgError(error instanceof Error ? error.message : 'Could not read the printer settings.');
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadPrinterCfg();
+  }, [loadPrinterCfg]);
+
+  // Escape closes the dialog. Bound only while it is open so the page does not
+  // keep a listener for a dialog nobody is looking at.
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setSettingsOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [settingsOpen]);
+
+  /** One sample label on the current settings — the bench check for a printer
+   *  that was just re-mediaed or moved. Its own endpoint, not print-pallet-tag:
+   *  a test label is not a pallet that exists, so it must never be able to
+   *  claim a real pallet code's jobId in the durable print log. */
+  const printTest = async () => {
+    setTesting(true);
+    setTestNotice(null);
+    try {
+      const result = await readJson(await fetch(`${BRIDGE_HTTP}/printer/pallet-test-tag`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      }));
+      setTestNotice({ kind: 'success', text: `Test label ${result.palletCode ?? ''} sent to ${result.target ?? 'the pallet printer'}.` });
+      void loadHistory();
+      void loadPrinterCfg();
+    } catch (error) {
+      setTestNotice({ kind: 'error', text: error instanceof Error ? error.message : 'Test print failed.' });
+    } finally {
+      setTesting(false);
+    }
+  };
 
   // Every pallet tag that prints — from this page or straight off the gate —
   // broadcasts a pallet-print message, so refetching on it keeps the list live
@@ -154,12 +226,20 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
   return (
     <main className="gate-operator min-h-full bg-[#f5f5f5] p-6 text-[#0a0a0a] md:p-10">
       <div className="mx-auto max-w-5xl">
-        <header className="mb-8">
+        <header className="mb-8 flex items-start justify-between gap-4">
           <div>
             <div className="text-sm font-extrabold tracking-[0.18em] text-[#008A9C]">WAREHOUSE OPERATIONS</div>
             <h1 className="mt-1 text-3xl font-extrabold md:text-4xl">Pallet label printing</h1>
             <p className="mt-2 font-medium text-[#737373]">Print and reprint pallet labels without touching the GateBoard TV.</p>
           </div>
+          <button
+            onClick={() => { setSettingsOpen(true); void loadPrinterCfg(); }}
+            title="Printer settings and test print"
+            aria-label="Printer settings and test print"
+            className="shrink-0 rounded-xl border border-[#e5e5e5] bg-white p-3 text-[#737373] shadow-sm hover:border-[#00BCD4] hover:text-[#008A9C]"
+          >
+            <GearIcon />
+          </button>
         </header>
 
         <section className="overflow-hidden rounded-2xl border border-[#e5e5e5] bg-white shadow-sm">
@@ -232,7 +312,74 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
           <span>Printing stays local when Nexus or the internet is unavailable.</span>
         </footer>
       </div>
+
+      {settingsOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setSettingsOpen(false)} />
+          <div role="dialog" aria-modal="true" aria-label="Printer settings and test print" className="relative max-h-full w-full max-w-2xl overflow-y-auto rounded-2xl border border-[#e5e5e5] bg-white shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-[#e5e5e5] px-6 py-5 md:px-8">
+              <div>
+                <h2 className="text-xl font-extrabold">Printer settings</h2>
+                <p className="mt-1 text-sm font-medium text-[#737373]">The settings every pallet label is printed on.</p>
+              </div>
+              <button
+                onClick={() => setSettingsOpen(false)}
+                aria-label="Close"
+                className="shrink-0 rounded-xl border border-[#e5e5e5] bg-white px-3 py-2 text-lg font-extrabold leading-none text-[#737373] hover:border-[#00BCD4] hover:text-[#008A9C]"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="p-6 md:p-8">
+              {/* Shown beside the test button because a wrong queue or media size
+                  is the usual reason a test label comes out wrong, and hunting it
+                  down in another screen wastes stock. */}
+              {printerCfg ? (
+                <div className="grid grid-cols-2 gap-4">
+                  <Metric label="Printer" value={printerCfg.palletPrinterName || '— none —'} />
+                  <Metric label="Label size" value={`${printerCfg.palletWidthMm}×${printerCfg.palletHeightMm} mm`} />
+                  <Metric label="Density" value={`${printerCfg.palletDpi} dpi`} />
+                  <Metric label="Status" value={printerCfg.ready ? 'Ready' : 'Not ready'} />
+                </div>
+              ) : (
+                <div className="font-bold text-[#737373]">{cfgError ?? 'Reading printer settings…'}</div>
+              )}
+
+              {printerCfg && !printerCfg.ready && printerCfg.detail && (
+                <div className="mt-4 rounded-xl border border-[#f0a1a2] bg-[#fef2f2] px-4 py-3 font-bold text-[#b41c1e]">{printerCfg.detail}</div>
+              )}
+
+              <div className="mt-6 border-t border-[#e5e5e5] pt-6">
+                <h3 className="text-lg font-extrabold">Test print</h3>
+                <p className="mt-1 text-sm font-medium text-[#737373]">
+                  Prints one sample label on the settings above. Use it after changing media or moving the printer.
+                </p>
+                <button
+                  disabled={testing || !printerCfg}
+                  onClick={() => void printTest()}
+                  className="mt-4 min-h-14 w-full rounded-xl border border-[#008A9C] bg-[#00BCD4] px-7 text-lg font-extrabold text-white shadow-sm hover:bg-[#008A9C] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {testing ? 'Printing…' : 'Print test label'}
+                </button>
+                {testNotice && (
+                  <div className={`mt-4 rounded-xl border px-4 py-3 font-bold ${testNotice.kind === 'success' ? 'border-[#86d49f] bg-[#f0fdf4] text-[#15803d]' : 'border-[#f0a1a2] bg-[#fef2f2] text-[#b41c1e]'}`}>{testNotice.text}</div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
+  );
+}
+
+function GearIcon() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
   );
 }
 
