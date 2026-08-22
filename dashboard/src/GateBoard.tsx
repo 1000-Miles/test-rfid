@@ -15,9 +15,13 @@ import type { EntryRow } from './types';
  * just credited (see `focus`). The drill-in screens survive for a panel that
  * does happen to have touch, and unwind themselves after IDLE_TIMEOUT_MS:
  *
- *   Overview      — both directions, each split three ways by progress
- *   DirectionView — every item from every PO / shipment in one grid
+ *   Overview      — the live receiving reading, split by progress
+ *   DirectionView — every item from every PO in one grid
  *   DocumentView  — one document, opened from a tile
+ *
+ * RECEIVING ONLY. Shipping is out of scope for this gate, so nothing outbound
+ * is fetched (bridge/src/board.js), counted (documents.ts) or drawn here: an
+ * outbound passage leaves the board exactly as it was.
  *
  * Layout is a port of warehousePrototypeLayout/, expressed in the fluid unit
  * `--u` (see .gate in index.css): one design pixel. Landscape inverts which
@@ -34,13 +38,16 @@ const FOCUS_MS = 9_000;
 export default function GateBoard(props: { board: GateBoardApi; entries: EntryRow[]; onOpenControls: () => void }) {
   const { board } = props;
   const { docs } = board.board;
-  const latestEntry = props.entries[0] ?? null;
+  // Receiving-only: the board follows the latest INBOUND passage. A pallet
+  // leaving the building doesn't blank the panel or relabel it SHIPPING — it
+  // simply isn't this board's business, so the last arrival stays up.
+  const inboundEntries = useMemo(() => props.entries.filter((entry) => entry.direction === 'in'), [props.entries]);
+  const latestEntry = inboundEntries[0] ?? null;
   const liveBatchId = latestEntry ? String(latestEntry.passageId ?? latestEntry.eventId ?? latestEntry.id) : null;
   const liveEntries = useMemo(
-    () => liveBatchId == null ? [] : props.entries.filter((entry) => String(entry.passageId ?? entry.eventId ?? entry.id) === liveBatchId),
-    [props.entries, liveBatchId]
+    () => liveBatchId == null ? [] : inboundEntries.filter((entry) => String(entry.passageId ?? entry.eventId ?? entry.id) === liveBatchId),
+    [inboundEntries, liveBatchId]
   );
-  const liveDirection: Direction = latestEntry?.direction ?? 'in';
   const liveDocs = useMemo<GateDoc[]>(() => {
     if (!latestEntry || !liveBatchId) return [];
     const counts = new Map<string, { count: number; entry: EntryRow }>();
@@ -62,8 +69,8 @@ export default function GateBoard(props: { board: GateBoardApi; entries: EntryRo
         unitsPerCarton: catalog?.unitsPerCarton ?? null,
       };
     });
-    return [{ id: liveBatchId, title: latestEntry.palletCode || `BATCH ${liveBatchId}`, dir: liveDirection, party: 'Current gate reading', meta: `${liveEntries.length} cartons read`, due: 0, lines }];
-  }, [docs, latestEntry, liveBatchId, liveDirection, liveEntries]);
+    return [{ id: liveBatchId, title: latestEntry.palletCode || `BATCH ${liveBatchId}`, dir: 'in', party: 'Current gate reading', meta: `${liveEntries.length} cartons read`, due: 0, lines }];
+  }, [docs, latestEntry, liveBatchId, liveEntries]);
   const liveTotals = useMemo(() => sumTotals(liveDocs), [liveDocs]);
   const liveFocus = latestEntry && liveDocs[0] ? `${liveDocs[0].id}-${latestEntry.item?.sku || latestEntry.epc}` : null;
 
@@ -113,11 +120,9 @@ export default function GateBoard(props: { board: GateBoardApi; entries: EntryRo
   }, [mode]);
 
   const inDocs = useMemo(() => activeDocs(docs, 'in'), [docs]);
-  const outDocs = useMemo(() => activeDocs(docs, 'out'), [docs]);
   const inTotals = useMemo(() => sumTotals(inDocs), [inDocs]);
-  const outTotals = useMemo(() => sumTotals(outDocs), [outDocs]);
 
-  const dirDocs = dir === 'in' ? inDocs : outDocs;
+  const dirDocs = inDocs;
   const activeDoc = activeId ? (dirDocs.find((d) => d.id === activeId) ?? null) : null;
 
   const open = (nextDir: Direction, id: string | null) => {
@@ -144,7 +149,7 @@ export default function GateBoard(props: { board: GateBoardApi; entries: EntryRo
 
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
         <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', padding: `${u(18)} ${u(28)}` }}>
-          <DirectionSection dir={liveDirection} docs={liveDocs} totals={liveTotals} focus={liveFocus} onOpen={() => {}} />
+          <DirectionSection dir="in" docs={liveDocs} totals={liveTotals} focus={liveFocus} onOpen={() => {}} />
         </div>
 
         {board.dupMsg && <DupToast message={board.dupMsg} />}
@@ -261,7 +266,7 @@ function FeedChip(props: { feed: FeedState; onRefresh: () => void }) {
   return (
     <div
       onClick={props.onRefresh}
-      title="Reload today's receiving and shipping documents from Nexus"
+      title="Reload today's receiving documents from Nexus"
       style={{ display: 'flex', alignItems: 'center', gap: u(12), padding: `${u(12)} ${u(22)}`, borderRadius: u(26), background: look.bg, border: `1px solid ${look.edge}`, cursor: 'pointer' }}
     >
       <div style={{ fontSize: u(15), fontWeight: 800, letterSpacing: '0.12em', color: look.fg }}>{look.label}</div>
@@ -293,24 +298,24 @@ const bucketOf = (line: DocLine): (typeof BUCKETS)[number]['key'] =>
   line.received >= line.expected ? 'done' : line.received > 0 ? 'part' : 'todo';
 
 /**
- * One direction — a slim totals strip over the three status boxes.
+ * Receiving — a slim totals strip over the status boxes.
  *
- * The big progress ring is gone: with both directions stacked and each split
- * three ways, a 140u ring cost more height than the boxes could spare, and the
- * same fact reads fine as a bar. Height is the whole design constraint in this
- * section — two of these have to fit in ~790u.
+ * The big progress ring is gone: split three ways, a 140u ring cost more height
+ * than the boxes could spare, and the same fact reads fine as a bar. `dir` is
+ * still a prop because the tiles take their accent from it, but only 'in' is
+ * ever passed — there is no shipping side of this board.
  */
 function DirectionSection(props: { dir: Direction; docs: GateDoc[]; totals: { received: number; expected: number }; focus: string | null; onOpen: (id: string) => void }) {
   const a = accent(props.dir);
   const p = pct(props.totals.received, props.totals.expected);
-  const noun = props.dir === 'in' ? 'POs' : 'shipments';
+  const noun = 'POs';
   const late = props.docs.filter((d) => d.due < 0).length;
   const dueToday = props.docs.filter((d) => d.due === 0).length;
   const docLabel = [`${dueToday} ${noun} due today`, ...(late ? [`${late} overdue`] : [])].join(' · ');
   // What staff actually recognise at a glance is the PRODUCT crossing the
   // door, not the paperwork it rides on — so the board shows one tile per SKU
-  // line (photo, name, progress) rather than one row per PO/shipment. The
-  // owning document still travels with each tile as its label strip.
+  // line (photo, name, progress) rather than one row per PO. The owning batch
+  // still travels with each tile as its label strip.
   const items: BoardItem[] = props.docs.flatMap((doc) => doc.lines.map((line) => ({ line, doc })));
 
   const tone = {
@@ -319,24 +324,21 @@ function DirectionSection(props: { dir: Direction; docs: GateDoc[]; totals: { re
     done: { fill: C.green, text: C.greenDk, soft: C.greenBg, edge: '#a7e3bd' },
   };
 
-  // A direction with no work collapses to its totals strip rather than holding
-  // half the screen for three empty boxes — on a morning with nothing going
-  // out, that hands the whole board to receiving, which is the difference
-  // between one row of tiles and three. Deliberately keyed on has-work /
+  // With no work at all the section collapses to its totals strip rather than
+  // holding the screen for empty boxes. Deliberately keyed on has-work /
   // has-no-work, not on the counts, so the layout doesn't reshuffle under a
   // forklift driver every time a carton moves between buckets.
   const empty = items.length === 0;
-  // The TV is for live progress, not the future backlog: unstarted inbound
-  // products remain represented in the total above, while the canvas focuses
-  // on cartons actively arriving or already completed. Shipping keeps all
-  // three stages because "to load" is actionable work at the outbound gate.
-  const visibleBuckets = props.dir === 'in' ? BUCKETS.filter((bucket) => bucket.key !== 'todo') : BUCKETS;
+  // The TV is for live progress, not the future backlog: unstarted products
+  // remain represented in the total above, while the canvas focuses on cartons
+  // actively arriving or already received.
+  const visibleBuckets = BUCKETS.filter((bucket) => bucket.key !== 'todo');
 
   return (
     <div style={{ flex: empty ? '0 0 auto' : 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: u(10) }}>
       <div style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: u(18) }}>
         <div style={{ fontSize: u(15), fontWeight: 800, letterSpacing: '0.18em', color: a.text, flex: '0 0 auto' }}>
-          {props.dir === 'in' ? '· EXPECTED ARRIVAL' : '· SHIPPING'}
+          · EXPECTED ARRIVAL
         </div>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: u(10), flex: '0 0 auto' }}>
           <div style={{ fontSize: u(46), fontWeight: 800, lineHeight: 1, letterSpacing: u(-2), fontVariantNumeric: 'tabular-nums' }}>{props.totals.received}</div>
@@ -353,7 +355,7 @@ function DirectionSection(props: { dir: Direction; docs: GateDoc[]; totals: { re
 
       {empty ? (
         <div style={{ flex: '0 0 auto', padding: `${u(16)} ${u(18)}`, borderRadius: u(16), border: `1px dashed ${C.border}`, background: C.surface, fontSize: u(17), fontWeight: 600, color: C.faint }}>
-          Nothing {props.dir === 'in' ? 'inbound' : 'outbound'} on today’s board.
+          Nothing inbound on today’s board.
         </div>
       ) : (
         <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: u(14) }}>
@@ -367,7 +369,7 @@ function DirectionSection(props: { dir: Direction; docs: GateDoc[]; totals: { re
               items={items.filter(({ line }) => bucketOf(line) === b.key)}
               focus={props.focus}
               onOpen={props.onOpen}
-              roomy={props.dir === 'in'}
+              roomy
             />
           ))}
         </div>
@@ -442,7 +444,7 @@ function DocumentView(props: { dir: Direction; doc: GateDoc; focus: string | nul
                 ‹ Overview
               </div>
               <div onClick={props.onAll} style={{ padding: `${u(8)} ${u(18)}`, borderRadius: u(26), fontSize: u(15), fontWeight: 800, letterSpacing: '0.16em', background: a.soft, color: a.text, cursor: 'pointer' }}>
-                {props.dir === 'in' ? 'ALL RECEIVING' : 'ALL SHIPPING'}
+                ALL RECEIVING
               </div>
               <div style={{ padding: `${u(8)} ${u(18)}`, borderRadius: u(26), fontSize: u(15), fontWeight: 800, letterSpacing: '0.12em', background: due.bg, color: due.fg, border: `1px solid ${due.edge}` }}>{due.label}</div>
               <div style={{ fontSize: u(16), fontWeight: 600, letterSpacing: '0.08em', color: C.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{doc.meta}</div>

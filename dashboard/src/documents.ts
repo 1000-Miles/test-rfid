@@ -1,12 +1,19 @@
 /**
- * Gate board document model — receiving batches (inbound) and shipments
- * (outbound) with expected vs. received carton counts.
+ * Gate board document model — receiving batches (inbound) with expected vs.
+ * received carton counts.
+ *
+ * RECEIVING ONLY. Shipping is out of scope for this gate: the bridge does not
+ * fetch shipments (see bridge/src/board.js), nothing outbound is rendered, and
+ * an outbound passage is not counted here. `Direction` survives because the
+ * bridge still STAMPS a direction on every passage — the board simply only
+ * deals with the inbound half. Every filter that enforces that is marked
+ * "receiving-only".
  *
  * ─────────────────────────────────────────────────────────────────────────
  * THE SEAM IS NOW WIRED. Today's board comes from real Nexus documents via
  * the bridge (`GET /board/documents`, see bridge/src/board.js), which proxies
- * the receiving-batch and shipment feeds and caches the last good response so
- * a doorway with no WAN still shows a board.
+ * the receiving-batch feed and caches the last good response so a doorway with
+ * no WAN still shows a board.
  *
  * Inbound documents are RECEIVING BATCHES, not POs. Cartons have no foreign
  * key to a purchase order in Nexus, so the batch is the only document a carton
@@ -25,7 +32,7 @@
  * ─────────────────────────────────────────────────────────────────────────
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { EntryRow, OutboundFault } from './types';
+import type { EntryRow } from './types';
 import { BRIDGE_HTTP } from './api';
 
 export type Direction = 'in' | 'out';
@@ -48,13 +55,12 @@ export const lineUnits = (line: DocLine): { received: number; expected: number }
   line.unitsPerCarton ? { received: line.received * line.unitsPerCarton, expected: line.expected * line.unitsPerCarton } : null;
 
 export interface GateDoc {
-  /** Stable key — the receiving batch ref or shipment ref. Never displayed. */
+  /** Stable key — the receiving batch ref. Never displayed. */
   id: string;
   /**
-   * What the board shows as the document's name. For inbound this is the PO
-   * reference, which is what staff and suppliers recognise; the batch ref it
-   * belongs to moves into `meta`. Absent on documents whose id is already the
-   * right label (shipments).
+   * What the board shows as the document's name — the PO reference, which is
+   * what staff and suppliers recognise; the batch ref it belongs to moves into
+   * `meta`. Absent when the id is already the right label.
    */
   title?: string;
   dir: Direction;
@@ -73,16 +79,16 @@ export interface GateException {
 }
 
 export interface BoardState {
-  /** Documents on today's board (both directions). */
+  /** Documents on today's board — inbound only; see the receiving-only note above. */
   docs: GateDoc[];
   /** Draft receiving batches not yet on today's board — the manual-add pool. */
   pool: GateDoc[];
   exceptions: GateException[];
   /**
-   * `${direction}:${epc}` for every passage already credited today, so one
-   * carton counts once per direction. Keyed WITH the direction because a carton
-   * received this morning and shipped this afternoon is two real events — an
-   * EPC-only key would silently swallow the second.
+   * `in:${epc}` for every passage already credited today, so one carton counts
+   * once. The direction stays in the key even though only 'in' is ever written:
+   * it is the stored shape of the v2 board, and dropping it would strand the
+   * counts of any kiosk that reloads mid-shift.
    */
   counted: string[];
   /**
@@ -137,7 +143,16 @@ interface FeedResponse {
 export async function fetchDocuments(): Promise<FeedResponse> {
   const res = await fetch(`${BRIDGE_HTTP}/board/documents`);
   if (!res.ok) throw new Error(`bridge /board/documents -> HTTP ${res.status}`);
-  return res.json();
+  const feed: FeedResponse = await res.json();
+  // Receiving-only: the bridge already asks Nexus for batches alone, and this is
+  // the belt to that braces. One choke point means no view downstream has to
+  // remember the rule — including a kiosk still talking to an older bridge, or
+  // one serving a disk cache written when shipments were still fetched.
+  return {
+    ...feed,
+    docs: (feed.docs ?? []).filter((d) => d.dir === 'in'),
+    pool: (feed.pool ?? []).filter((d) => d.dir === 'in'),
+  };
 }
 
 /* -------------------------------------------------------- EPC resolution */
@@ -264,8 +279,9 @@ function loadBoard(): BoardState {
       const saved = JSON.parse(raw) as BoardState & { date: string };
       if (saved.date === today() && Array.isArray(saved.docs)) {
         return {
-          docs: saved.docs,
-          pool: saved.pool ?? [],
+          // Receiving-only: yesterday's build may have stored outbound docs.
+          docs: saved.docs.filter((d) => d.dir === 'in'),
+          pool: (saved.pool ?? []).filter((d) => d.dir === 'in'),
           exceptions: saved.exceptions ?? [],
           counted: saved.counted ?? [],
           pending: saved.pending ?? [],
@@ -345,26 +361,22 @@ export type CountOutcome =
   | { kind: 'counted'; docId: string; dir: Direction; sku: string; name: string }
   | { kind: 'duplicate'; message: string }
   | { kind: 'complete'; message: string }
-  | { kind: 'unknown'; tag: string }
-  /** A contested exit: reported, filed as an exception, credited to nothing. */
-  | { kind: 'fault'; tag: string; fault: OutboundFault; message: string };
-
-/** What the board writes in the exceptions list for each outbound fault. */
-const FAULT_NOTE: Record<OutboundFault, string> = {
-  'not-received': 'Left the warehouse but was never received in',
-  'already-shipped': 'Left the warehouse but is already marked shipped',
-};
+  | { kind: 'unknown'; tag: string };
 
 /**
- * Credit one gate movement to the best-matching open document line.
+ * Credit one gate movement to the best-matching open receiving batch line.
  * Pure: returns the next board plus what happened, so the UI can react.
+ *
+ * INBOUND ONLY — the caller filters outbound passages out (see useGateBoard).
+ * An outbound entry reaching here would be credited against nothing and filed
+ * as an exception, which is exactly the shipping noise a receiving-only board
+ * must not show.
  */
 export function applyMovement(state: BoardState, entry: EntryRow): { state: BoardState; outcome: CountOutcome } {
   const epc = entry.epc.toUpperCase();
   const dir: Direction = entry.direction;
-  // Direction is part of the key: the same carton legitimately passes IN in the
-  // morning and OUT in the afternoon, and an EPC-only key would drop the second
-  // as a duplicate.
+  // The direction stays in the key for the stored board's sake (see
+  // BoardState.counted); on a receiving-only gate it is always 'in'.
   const countedKey = `${dir}:${epc}`;
 
   const file = (tag: string, note: string): BoardState => ({
@@ -372,33 +384,14 @@ export function applyMovement(state: BoardState, entry: EntryRow): { state: Boar
     exceptions: [{ id: Date.now() + Math.floor(Math.random() * 1000), tag, note, at: hhmm() }, ...state.exceptions].slice(0, 100),
   });
 
-  // CONTESTED EXIT, checked before anything else.
-  //
-  // The bridge has already compared this carton against Nexus's own records and
-  // found that it never came in, or that it has already shipped. No document
-  // may be credited for it whatever else is true — in particular not because
-  // some open shipment happens to list the same SKU, which is all the matching
-  // below can actually establish.
-  //
-  // It is also deliberately checked ahead of the duplicate guard: `counted`
-  // exists to stop double-crediting, and letting it swallow a fault would mean
-  // the second time a shipped carton walked out the door, nobody heard about it.
-  const fault = dir === 'out' ? entry.unexpected : null;
-  if (fault) {
-    const sku = resolveSku(entry);
-    const tag = sku ? `${epc} · ${sku}` : epc;
-    return { state: file(tag, FAULT_NOTE[fault]), outcome: { kind: 'fault', tag, fault, message: FAULT_NOTE[fault] } };
-  }
-
   if (state.counted.includes(countedKey)) {
     const sku = resolveSku(entry);
-    const what = dir === 'in' ? 'received' : 'shipped';
-    return { state, outcome: { kind: 'duplicate', message: sku ? `${sku} · already ${what} today` : `${epc} · already ${what} today` } };
+    return { state, outcome: { kind: 'duplicate', message: sku ? `${sku} · already received today` : `${epc} · already received today` } };
   }
 
   const sku = resolveSku(entry);
   if (!sku) {
-    return { state: file(epc, 'No matching PO or shipment on today’s board'), outcome: { kind: 'unknown', tag: epc } };
+    return { state: file(epc, 'No matching receiving batch on today’s board'), outcome: { kind: 'unknown', tag: epc } };
   }
 
   // Overdue documents get filled first, then due-today, in board order.
@@ -412,7 +405,7 @@ export function applyMovement(state: BoardState, entry: EntryRow): { state: Boar
     }
     const tag = `${epc} · ${sku}`;
     return {
-      state: file(tag, `${sku} is not expected ${dir === 'in' ? 'inbound' : 'outbound'} today`),
+      state: file(tag, `${sku} is not expected inbound today`),
       outcome: { kind: 'unknown', tag },
     };
   }
@@ -500,10 +493,7 @@ export function useGateBoard(entries: EntryRow[]): GateBoardApi {
   const announce = useCallback((outcomes: CountOutcome[]) => {
     for (const outcome of outcomes) {
       if (outcome.kind === 'counted') setLastCounted({ docId: outcome.docId, sku: outcome.sku, name: outcome.name, dir: outcome.dir, seq: ++seq.current });
-      // A fault takes the same banner as an unrecognised tag, not the toast: it
-      // is the loud path, and a contested exit is exactly as urgent as a tag
-      // nobody can identify.
-      else if (outcome.kind === 'unknown' || outcome.kind === 'fault') setFlashTag(outcome.tag);
+      else if (outcome.kind === 'unknown') setFlashTag(outcome.tag);
       else setDupMsg(outcome.message);
     }
   }, []);
@@ -535,9 +525,14 @@ export function useGateBoard(entries: EntryRow[]): GateBoardApi {
   useEffect(() => {
     const fresh = entries.filter((e) => e.id > appliedTo.current);
     if (fresh.length === 0) return;
+    // The high-water mark advances over outbound passages too, so skipping one
+    // is final rather than a movement that gets reconsidered on every render.
     appliedTo.current = Math.max(...fresh.map((e) => e.id));
-    // entries arrive newest-first; replay them in the order they happened
-    const ordered = [...fresh].reverse();
+    // entries arrive newest-first; replay them in the order they happened.
+    // Receiving-only: an outbound passage is still stamped, journalled and
+    // pushed to Nexus by the bridge — the board just takes no part in it.
+    const ordered = [...fresh].reverse().filter((e) => e.direction === 'in');
+    if (ordered.length === 0) return;
 
     // COLD START. With no documents yet there is no line to credit, so a
     // movement here would be filed as "not expected today" and stay that way —

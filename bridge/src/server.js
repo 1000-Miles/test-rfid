@@ -203,7 +203,7 @@ outbox.on('batch-ready', (batch) => {
     .catch((error) => broadcast({ type: 'pallet-print', ok: false, ...batch, error: error.message }));
 });
 
-// --- Board feed (real receiving / shipping documents for the kiosk) ------------
+// --- Board feed (real receiving documents for the kiosk) ----------------------
 // Base URL defaults to NEXUS_URL with the /api/... path stripped, so a single
 // setting covers both the movement push and the document reads.
 const { BoardFeed } = require('./board');
@@ -784,8 +784,9 @@ app.post('/nexus/catalog/reload', async (_req, res) => {
   res.json({ ok: true, source: nexus.catalogSource, count: Object.keys(catalog).length, catalog });
 });
 // --- Board documents ----------------------------------------------------------
-// Today's real receiving batches and open shipments, already mapped into the
-// kiosk's document shape. Serves a disk-cached copy when Nexus is unreachable,
+// Today's real receiving batches, already mapped into the kiosk's document
+// shape. Receiving only — the shipping feed is deliberately not called; see
+// bridge/src/board.js. Serves a disk-cached copy when Nexus is unreachable,
 // flagged `stale` so the UI can say so rather than silently showing old counts.
 // `delivery` rides along so the kiosk can tell whether Nexus has already
 // absorbed the passages it counted locally. Without it the board cannot know

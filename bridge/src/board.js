@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Board feed — today's real receiving and shipping documents for the gate board.
+ * Board feed — today's real receiving documents for the gate board.
  *
  * The kiosk used to run on hardcoded demo POs. This module replaces that seam
  * with the live Nexus documents:
@@ -10,7 +10,12 @@
  *               (an open RECEIVING BATCH is the document a carton is credited
  *               against — cartons have no FK to a PO, so the batch, not the PO,
  *               is the real unit of work; its po_refs are shown as metadata.)
- *   outbound <- GET /api/operations/handheld/shipping/shipments
+ *
+ * RECEIVING ONLY, deliberately. The shipping feed
+ * (GET /api/operations/handheld/shipping/shipments) is not called and no
+ * outbound document is produced: the gate is being run as a receiving gate for
+ * now, and the board must not show shipping. The outbound mapper lives in git
+ * history if that changes — nothing else here assumes one direction.
  *
  * It proxies rather than letting the browser call Nexus directly, for two
  * reasons: the device token stays server-side, and the last good response is
@@ -54,7 +59,15 @@ class BoardFeed {
 
   _readCache() {
     try {
-      return JSON.parse(fs.readFileSync(CACHE_PATH, 'utf8'));
+      const cached = JSON.parse(fs.readFileSync(CACHE_PATH, 'utf8'));
+      // A cache written while the shipping feed was still wired would otherwise
+      // put outbound documents back on a receiving-only board — the disk copy
+      // outlives the code change, so it is filtered on the way in.
+      return {
+        ...cached,
+        docs: (cached.docs || []).filter((d) => d.dir === 'in'),
+        pool: (cached.pool || []).filter((d) => d.dir === 'in'),
+      };
     } catch {
       return null;
     }
@@ -124,15 +137,9 @@ class BoardFeed {
       return { ok: false, stale: true, source: 'unconfigured', error: 'NEXUS_BASE_URL is not set', ...emptyBoard() };
     }
     try {
-      const [batches, shipments] = await Promise.all([
-        this._get('/api/operations/handheld/receiving/batches'),
-        this._get('/api/operations/handheld/shipping/shipments'),
-      ]);
+      const batches = await this._get('/api/operations/handheld/receiving/batches');
 
-      const docs = [
-        ...batches.filter((b) => b.status === 'receiving').map(batchToDoc),
-        ...shipments.filter((s) => s.status === 'open').map(shipmentToDoc),
-      ];
+      const docs = batches.filter((b) => b.status === 'receiving').map(batchToDoc);
       // The manual-add pool is draft batches: real documents that exist but are
       // not being received yet. Open POs are deliberately NOT used here — the
       // PO endpoint carries no per-line received counts, so a PO added to the
@@ -200,31 +207,6 @@ function batchToDoc(batch) {
       // Total UNITS, not cartons — Nexus gives units-per-carton per line, not a
       // pre-multiplied total, so the kiosk derives it the same way for every
       // line rather than trusting a second source of truth.
-      unitsPerCarton: l.unitsPerCarton ?? null,
-    })),
-  };
-}
-
-/** A shipment becomes an outbound document; destinations are the counterparty. */
-function shipmentToDoc(shipment) {
-  const dests = shipment.destinations || [];
-  const party = dests.length
-    ? dests.map((d) => d.city || d.shipperName || d.code).filter(Boolean).join(' · ') || 'Unnamed destination'
-    : 'No destination';
-  const etd = dests.find((d) => d.etd)?.etd;
-  return {
-    id: shipment.ref,
-    dir: 'out',
-    party,
-    meta: [shipment.planRef, etd ? `ETD ${String(etd).slice(0, 10)}` : null].filter(Boolean).join(' · ') || 'No plan reference',
-    due: 0,
-    lines: (shipment.lines || []).map((l) => ({
-      sku: l.productCode,
-      name: l.productName || l.productCode,
-      expected: l.cartons ?? 0,
-      received: l.shippedCartons ?? 0,
-      photoUrl: l.imageUrl || null,
-      emoji: l.emoji || null,
       unitsPerCarton: l.unitsPerCarton ?? null,
     })),
   };

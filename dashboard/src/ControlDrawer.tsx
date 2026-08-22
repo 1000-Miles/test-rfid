@@ -555,10 +555,10 @@ function GateSimulator(props: { board: GateBoardApi }) {
       return;
     }
     setAutoplay(true);
+    // Receiving-only gate: there is no outbound document to burst against, so
+    // an 'out' leg here would fire nothing and just make autoplay look stalled.
     const step = () => {
-      const r = Math.random();
-      if (r < 0.45) burst('in');
-      else if (r < 0.85) burst('out');
+      if (Math.random() < 0.85) burst('in');
       else fireUnknown();
     };
     step();
@@ -579,9 +579,6 @@ function GateSimulator(props: { board: GateBoardApi }) {
         </SimButton>
         <SimButton onClick={() => burst('in')} tone="cyan">
           Inbound pallet burst
-        </SimButton>
-        <SimButton onClick={() => burst('out')} tone="amber">
-          Outbound pallet burst
         </SimButton>
         <SimButton onClick={fireUnknown} tone="rose">
           Unknown tag
