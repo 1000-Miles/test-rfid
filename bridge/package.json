@@ -12,6 +12,7 @@
     "print": "node test/print-test.js",
     "dev": "node src/server.js",
     "sidecar": "node src/sidecar-server.js",
+    "printer-sidecar": "node src/printer-sidecar.js",
     "reader": "node src/server-reader.js"
   },
   "dependencies": {

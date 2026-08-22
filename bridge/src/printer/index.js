@@ -73,6 +73,18 @@ const DEFAULT_CONFIG = {
   // TSC desktops; 300 for the 300 dpi models. Confirm per unit by running
   // SELFTEST on the printer and reading the dpi off its config label.
   palletDpi: Number(process.env.PALLET_DPI || 203),
+  // Print through a printer sidecar on ANOTHER PC instead of this machine's own
+  // spooler — for the common warehouse layout where the gate bridge (reader +
+  // GPIO) and the label printer are on different computers. Empty = print
+  // locally, which stays the default.
+  //
+  // The bridge can only ever reach a queue its OWN OS can see, so without this
+  // a remote printer meant sharing it over SMB and installing it as a local
+  // queue: two OS configs, stored credentials, and a failure mode that looks
+  // like a dead printer. The sidecar replaces all of that with an HTTP POST of
+  // the finished TSPL bytes to the machine the printer is plugged into.
+  // e.g. http://192.168.1.112:3011
+  palletSidecarUrl: process.env.PALLET_SIDECAR_URL || '',
 };
 
 const CONFIG_KEYS = Object.keys(DEFAULT_CONFIG);
@@ -356,6 +368,9 @@ class PrinterManager {
       // rescales every tag, and these are the only heads that exist on TSPL
       // hardware we'd use.
       else if (k === 'palletDpi') this.config.palletDpi = [203, 300, 600].includes(Number(partial[k])) ? Number(partial[k]) : DEFAULT_CONFIG.palletDpi;
+      // Normalised so the rest of the code can treat "" as "print locally" and
+      // concatenate paths without doubling the slash.
+      else if (k === 'palletSidecarUrl') this.config[k] = String(partial[k] ?? '').trim().replace(/\/+$/, '');
       else this.config[k] = String(partial[k]);
     }
     if (this.config.transport !== 'tcp') this.config.transport = 'usb';
@@ -406,17 +421,56 @@ class PrinterManager {
     return result;
   }
 
+  /** Where pallet tags go out: a printer sidecar on another PC when one is
+   *  configured, otherwise this machine's own spooler. One accessor so the
+   *  print, selftest and readiness paths can never disagree about the target —
+   *  a readiness probe of the local spooler while bytes go to a remote sidecar
+   *  would report "ready" for a printer nobody is printing to. */
+  get _palletSidecar() {
+    return this.config.palletSidecarUrl || null;
+  }
+
+  /** Send finished pallet bytes wherever the pallet printer actually lives.
+   *  Returns the same { bytes, jobId } shape for both paths. */
+  async _sendPalletRaw(data, docName) {
+    const sidecar = this._palletSidecar;
+    const queue = this.config.palletPrinterName;
+    if (!sidecar) {
+      return IS_WINDOWS
+        ? require('./winspool').sendRaw(queue, data, docName)
+        : await sendRawCups(queue, data);
+    }
+    // application/octet-stream, not JSON or base64: TSPL BITMAP payloads are
+    // binary and any text encoding on the way would corrupt them.
+    const res = await fetch(`${sidecar}/pallet/print?queue=${encodeURIComponent(queue)}&doc=${encodeURIComponent(docName)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: data,
+      signal: AbortSignal.timeout(20000),
+    }).catch((err) => {
+      throw new Error(`pallet sidecar ${sidecar} unreachable — ${err.message}`);
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || body.ok === false) {
+      throw new Error(`pallet sidecar refused the job — ${body.error || `HTTP ${res.status}`}`);
+    }
+    return { bytes: body.bytes ?? data.length, jobId: body.jobId ?? null };
+  }
+
   /** Same trust model as checkReady(), but for the pallet-tag printer's queue.
-   * Always a spooler/CUPS queue — the Gprinter has no TCP transport here. */
+   * Always a spooler/CUPS queue — the Gprinter has no TCP transport here. It
+   * just may be a queue on a DIFFERENT machine, reached through the sidecar. */
   async checkPalletReady() {
     const cache = this._palletReadyCache;
     if (cache && Date.now() - cache.at < 5000) return cache.result;
     const name = this.config.palletPrinterName;
     const result = !name
       ? { ready: false, detail: 'no pallet printer configured (palletPrinterName)' }
-      : IS_WINDOWS
-        ? await this._probeQueueWindows(name)
-        : await this._probeReadyCups(name);
+      : this._palletSidecar
+        ? await this._probeSidecar(name)
+        : IS_WINDOWS
+          ? await this._probeQueueWindows(name)
+          : await this._probeReadyCups(name);
     this._palletReadyCache = { at: Date.now(), result };
     return result;
   }
@@ -492,6 +546,31 @@ class PrinterManager {
         }
       );
     });
+  }
+
+  /**
+   * Readiness of a queue on the sidecar's machine. The sidecar runs the same
+   * probe locally and returns its verdict, so the answer means the same thing
+   * as the local paths — with one extra failure the local paths cannot have:
+   * the sidecar host being unreachable. That is reported as its own detail
+   * rather than a bare "not ready", because "the printer PC is off" and "the
+   * printer is jammed" need completely different things done about them.
+   */
+  async _probeSidecar(name) {
+    const sidecar = this._palletSidecar;
+    try {
+      const res = await fetch(`${sidecar}/pallet/ready?queue=${encodeURIComponent(name)}`, {
+        signal: AbortSignal.timeout(6000),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) return { ready: false, detail: `pallet sidecar ${sidecar} returned HTTP ${res.status}` };
+      return { ready: Boolean(body.ready), detail: body.detail ?? null };
+    } catch (err) {
+      return {
+        ready: false,
+        detail: `pallet sidecar ${sidecar} unreachable — ${err.message} (is the printer PC on, with "npm run printer-sidecar" running?)`,
+      };
+    }
   }
 
   /**
@@ -784,15 +863,25 @@ class PrinterManager {
       copies,
     });
     const queue = this.config.palletPrinterName;
-    const res = IS_WINDOWS
-      ? require('./winspool').sendRaw(queue, data, 'nexus-pallet-tag')
-      : await sendRawCups(queue, data);
+    const res = await this._sendPalletRaw(data, 'nexus-pallet-tag');
     const at = new Date().toISOString();
     this._appendLog({ kind: 'pallet', palletCode, batchRef: batchRef || null, jobId, at });
-    this.log(`printed pallet ${palletCode} (${layout} layout, ${this.config.palletDpi} dpi) -> queue "${queue}"`);
+    const via = this._palletSidecar ? ` via sidecar ${this._palletSidecar}` : '';
+    this.log(`printed pallet ${palletCode} (${layout} layout, ${this.config.palletDpi} dpi) -> queue "${queue}"${via}`);
     // res.jobId is the OS spooler's job number — kept under its own name so it
     // can never clobber the logical jobId the caller dedupes/broadcasts by.
-    return { palletCode, jobId, at, transport: 'usb', target: queue, bytes: res.bytes ?? null, spoolJobId: res.jobId ?? null, replayed: false };
+    // target names the MACHINE too when printing remotely: "which queue" is not
+    // enough to find a label once the queue can be on another PC.
+    return {
+      palletCode,
+      jobId,
+      at,
+      transport: this._palletSidecar ? 'sidecar' : 'usb',
+      target: this._palletSidecar ? `${this._palletSidecar} → ${queue}` : queue,
+      bytes: res.bytes ?? null,
+      spoolJobId: res.jobId ?? null,
+      replayed: false,
+    };
   }
 
   /**
@@ -810,9 +899,7 @@ class PrinterManager {
     if (!readiness.ready) throw new Error(`Pallet printer not ready — ${readiness.detail}`);
     const queue = this.config.palletPrinterName;
     const data = Buffer.from('SELFTEST\r\n', 'ascii');
-    const res = IS_WINDOWS
-      ? require('./winspool').sendRaw(queue, data, 'nexus-pallet-selftest')
-      : await sendRawCups(queue, data);
+    const res = await this._sendPalletRaw(data, 'nexus-pallet-selftest');
     this.log(`pallet SELFTEST config label sent -> queue "${queue}"`);
     return { queue, at: new Date().toISOString(), spoolJobId: res.jobId ?? null };
   }
@@ -825,8 +912,25 @@ class PrinterManager {
   }
 
   /** List OS print queue names (for the dashboard's USB queue picker):
-   *  Windows spooler queues, or CUPS destinations on Linux (`lpstat -e`). */
-  listQueues() {
+   *  Windows spooler queues, or CUPS destinations on Linux (`lpstat -e`).
+   *
+   *  With a pallet sidecar configured this lists the SIDECAR host's queues, not
+   *  this machine's: the picker exists to choose the pallet printer, and this
+   *  bridge's own queues are exactly the ones that cannot print a pallet tag
+   *  when the printer lives on another PC. Offering them is how you end up with
+   *  a configured queue that will never be ready. */
+  async listQueues() {
+    const sidecar = this._palletSidecar;
+    if (sidecar) {
+      try {
+        const res = await fetch(`${sidecar}/pallet/queues`, { signal: AbortSignal.timeout(8000) });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || body.ok === false) throw new Error(body.error || `HTTP ${res.status}`);
+        return Array.isArray(body.queues) ? body.queues : [];
+      } catch (err) {
+        throw new Error(`queue listing from pallet sidecar ${sidecar} failed: ${err.message}`);
+      }
+    }
     return new Promise((resolve, reject) => {
       const [cmd, args] = IS_WINDOWS
         ? ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-Printer | Select-Object -ExpandProperty Name']]
