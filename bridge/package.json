@@ -9,6 +9,7 @@
     "smoke": "node test/smoke.js",
     "test-toggle": "node test/passage-toggle.js",
     "test-outbox": "node test/outbox-offline.js",
+    "test-code128": "node test/code128.js",
     "print": "node test/print-test.js",
     "dev": "node src/server.js",
     "sidecar": "node src/sidecar-server.js",

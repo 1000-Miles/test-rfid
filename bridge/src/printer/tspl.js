@@ -77,6 +77,93 @@ function code128Modules(content) {
   return 11 * (content.length + 2) + 13;
 }
 
+/**
+ * Code 128 element widths for values 0..106, as bar/space/bar/space/bar/space.
+ * 106 (STOP) has a seventh element. Every row totals 11 modules; STOP totals 13.
+ *
+ * Needed because this printer's firmware SILENTLY DROPS a BARCODE command with a
+ * non-zero rotation — the label prints with the text present and the barcode
+ * simply absent, no error anywhere. Rather than depend on a firmware feature we
+ * cannot detect the absence of, the barcode is rasterised here and sent as a
+ * BITMAP like the text, which is known to work at any rotation.
+ */
+const C128 = [
+  '212222','222122','222221','121223','121322','131222','122213','122312','132212','221213',
+  '221312','231212','112232','122132','122231','113222','123122','123221','223211','221132',
+  '221231','213212','223112','312131','311222','321122','321221','312212','322112','322211',
+  '212123','212321','232121','111323','131123','131321','112313','132113','132311','211313',
+  '231113','231311','112133','112331','132131','113123','113321','133121','313121','211331',
+  '231131','213113','213311','213131','311123','311321','331121','312113','312311','332111',
+  '314111','221411','431111','111224','111422','121124','121421','141122','141221','112214',
+  '112412','122114','122411','142112','142211','241211','221114','413111','241112','134111',
+  '111242','121142','121241','114212','124112','124211','411212','421112','421211','212141',
+  '214121','412121','111143','111341','131141','114113','114311','411113','411311','113141',
+  '114131','311141','411131','211412','211214','211232','2331112',
+];
+
+// Structural self-check: a single mistyped digit produces a barcode that looks
+// perfect and never scans, which is the worst possible failure for a pallet
+// label. Module sums catch almost any such typo, so they are asserted at load
+// rather than trusted.
+for (let v = 0; v < C128.length; v++) {
+  const expect = v === 106 ? 13 : 11;
+  const sum = [...C128[v]].reduce((a, d) => a + Number(d), 0);
+  if (sum !== expect) throw new Error(`Code 128 pattern ${v} sums to ${sum}, expected ${expect}`);
+}
+
+/**
+ * Encode `text` as Code 128 code set B and return the element widths in order,
+ * starting with a bar and alternating. Set B covers ASCII 32..126, which is
+ * every character a pallet code uses; anything outside is replaced rather than
+ * silently truncating the code the barcode is supposed to carry.
+ */
+function code128bWidths(text) {
+  const values = [...String(text)].map((ch) => {
+    const v = ch.charCodeAt(0) - 32;
+    return v >= 0 && v <= 94 ? v : '?'.charCodeAt(0) - 32;
+  });
+  const START_B = 104;
+  // Checksum is START plus each value weighted by its 1-based position, mod 103.
+  let sum = START_B;
+  values.forEach((v, i) => { sum += v * (i + 1); });
+  const symbols = [START_B, ...values, sum % 103, 106];
+  const widths = [];
+  for (const s of symbols) for (const d of C128[s]) widths.push(Number(d));
+  return widths;
+}
+
+/**
+ * Rasterise a Code 128 to a 1-bit TSPL bitmap. Same packed shape and bit
+ * convention as textBitmap (0 = print), and the same quarter-turn handling, so
+ * the layout code treats a barcode and a text line identically.
+ */
+function barcodeBitmap(text, moduleDots, heightDots, rot90 = false) {
+  const widths = code128bWidths(text);
+  const w = widths.reduce((a, n) => a + n, 0) * moduleDots;
+  const h = Math.max(1, Math.round(heightDots));
+  // Column mask first: every row of a Code 128 is identical, so the bars are
+  // computed once instead of per scanline.
+  const dark = new Uint8Array(w);
+  let x = 0;
+  widths.forEach((units, i) => {
+    const run = units * moduleDots;
+    if (i % 2 === 0) for (let d = 0; d < run; d++) dark[x + d] = 1; // even index = bar
+    x += run;
+  });
+  const pw = rot90 ? h : w;
+  const ph = rot90 ? w : h;
+  const wBytes = Math.ceil(pw / 8);
+  const data = Buffer.alloc(wBytes * ph, 0xff);
+  for (let py = 0; py < ph; py++) {
+    for (let px = 0; px < pw; px++) {
+      // Quarter turn clockwise: emitted (px,py) reads logical (py, h-1-px).
+      const lx = rot90 ? py : px;
+      if (dark[lx]) data[py * wBytes + (px >> 3)] &= ~(0x80 >> (px & 7));
+    }
+  }
+  return { w: pw, h: ph, logicalW: w, logicalH: h, wBytes, data };
+}
+
 /** Largest narrow-module width (dots) that keeps the barcode inside maxDots,
  * never going below the physical MIN_MODULE_MM floor. */
 function pickModule(content, maxDots, dpm) {
@@ -173,7 +260,12 @@ function geometry(c) {
     W,
     H,
     ox: Math.round(oxMm * dpm),
-    margin: Math.round(2 * dpm),
+    // 4 mm, not 2. A thermal printer's first printable dot sits a few mm inside
+    // the media edge and that inset varies per unit, so a 2 mm design margin
+    // left nothing to absorb it — the outermost line lost its leading glyphs on
+    // this printer. 4 mm each side costs a little size and makes the tag
+    // tolerant of the alignment instead of exactly matching one machine.
+    margin: Math.round(4 * dpm),
     landscape,
     // The canvas the layout stacks into. In landscape it is the label turned on
     // its side; the emitter rotates every element back.
@@ -341,11 +433,14 @@ async function buildPalletTagJob(sharp, c) {
   emitBmp(titleBmp);
   emitBmp(refBmp);
 
-  // The barcode stays printer-native so its modules land on exact dot
-  // boundaries. TSPL rotates it about the same origin the bitmaps use, so the
-  // identical transform applies; rotation 90 makes the bars run down-feed.
-  const bp = place(centred(barW), ly, barW, barH);
-  parts.push(cmd(`BARCODE ${bp.x},${bp.y},"128",${barH},0,${landscape ? 90 : 0},${narrow},${narrow * 2},"${code}"`));
+  // Rasterised rather than printer-native. A native BARCODE is pixel-exact and
+  // was the better choice while tags were portrait, but this firmware silently
+  // drops a rotated one: the tag prints with its text and no barcode at all, and
+  // nothing reports it. Drawing it here is exact too — bars are whole multiples
+  // of a dot by construction — and works at any rotation.
+  const barBmp = barcodeBitmap(code, narrow, barH, landscape);
+  const bp = place(centred(barBmp.logicalW), ly, barBmp.logicalW, barBmp.logicalH);
+  parts.push(bitmapCmd(bp.x, bp.y, barBmp));
   ly += barH + Math.round(gap / 2);
 
   emitBmp(footerBmp);
@@ -382,4 +477,8 @@ async function buildPalletTag(content) {
   };
 }
 
-module.exports = { buildPalletTag, DEFAULT_PALLET_DPI };
+// code128bWidths and C128 are exported for test/code128.js only. The pattern
+// table is safety-critical — a single wrong digit prints a barcode that looks
+// perfect and never scans — so it is verified by a committed test, not just by
+// the module-sum assertion above.
+module.exports = { buildPalletTag, DEFAULT_PALLET_DPI, code128bWidths, C128 };
