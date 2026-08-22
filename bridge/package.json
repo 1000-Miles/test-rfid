@@ -13,7 +13,8 @@
     "dev": "node src/server.js",
     "sidecar": "node src/sidecar-server.js",
     "printer-sidecar": "node src/printer-sidecar.js",
-    "reader": "node src/server-reader.js"
+    "reader": "node src/server-reader.js",
+    "build-printer-dist": "node scripts/build-printer-dist.js"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

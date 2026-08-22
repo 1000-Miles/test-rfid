@@ -73,6 +73,13 @@ const DEFAULT_CONFIG = {
   // TSC desktops; 300 for the 300 dpi models. Confirm per unit by running
   // SELFTEST on the printer and reading the dpi off its config label.
   palletDpi: Number(process.env.PALLET_DPI || 203),
+  // 'portrait' reads across the label's short edge; 'landscape' turns the
+  // artwork a quarter turn so it reads along the long edge and fills it. The
+  // media is never redeclared — SIZE's width is a physical printhead limit —
+  // so this rotates the design, not the label. Landscape also gives the barcode
+  // the long axis, which is what lets a full-length pallet code print at a
+  // wider, more scannable module.
+  palletOrientation: process.env.PALLET_ORIENTATION === 'landscape' ? 'landscape' : 'portrait',
   // Print through a printer sidecar on ANOTHER PC instead of this machine's own
   // spooler — for the common warehouse layout where the gate bridge (reader +
   // GPIO) and the label printer are on different computers. Empty = print
@@ -371,6 +378,9 @@ class PrinterManager {
       // Normalised so the rest of the code can treat "" as "print locally" and
       // concatenate paths without doubling the slash.
       else if (k === 'palletSidecarUrl') this.config[k] = String(partial[k] ?? '').trim().replace(/\/+$/, '');
+      // Whitelisted: an unrecognised orientation must fall back to the layout
+      // that is known to fit, not print a tag at an angle nobody chose.
+      else if (k === 'palletOrientation') this.config[k] = partial[k] === 'landscape' ? 'landscape' : 'portrait';
       else this.config[k] = String(partial[k]);
     }
     if (this.config.transport !== 'tcp') this.config.transport = 'usb';
@@ -842,7 +852,7 @@ class PrinterManager {
    * two devices hold different media. Sizes are mm; per-request overrides win
    * over the stored pallet config. Idempotent by jobId so an offline restart or
    * operator retry cannot print a second label for an already-recorded job. */
-  async printPalletTag({ palletCode, palletLabel, batchRef, jobId, copies = 1, force = false, widthMm, heightMm, leftOffsetMm, dpi } = {}) {
+  async printPalletTag({ palletCode, palletLabel, batchRef, jobId, copies = 1, force = false, widthMm, heightMm, leftOffsetMm, dpi, orientation } = {}) {
     if (!palletCode) throw new Error('palletCode is required');
     palletCode = String(palletCode).trim();
     jobId = jobId || `pallet:${palletCode}`;
@@ -850,7 +860,7 @@ class PrinterManager {
     if (prior && !force) return { palletCode, jobId, replayed: true, at: prior.at };
     const readiness = await this.checkPalletReady().catch((e) => ({ ready: false, detail: e.message }));
     if (!readiness.ready) throw new Error(`Pallet printer not ready — ${readiness.detail}`);
-    const { data, layout } = await tspl.buildPalletTag({
+    const { data, layout, orientation: usedOrientation } = await tspl.buildPalletTag({
       palletCode,
       palletLabel,
       batchRef,
@@ -860,6 +870,7 @@ class PrinterManager {
       // Per-request dpi is for bench-testing a second printer without
       // repointing the bridge; the configured head is the normal path.
       dpi: Number(dpi) > 0 ? Number(dpi) : this.config.palletDpi,
+      orientation: orientation === 'landscape' || orientation === 'portrait' ? orientation : this.config.palletOrientation,
       copies,
     });
     const queue = this.config.palletPrinterName;
@@ -867,7 +878,7 @@ class PrinterManager {
     const at = new Date().toISOString();
     this._appendLog({ kind: 'pallet', palletCode, batchRef: batchRef || null, jobId, at });
     const via = this._palletSidecar ? ` via sidecar ${this._palletSidecar}` : '';
-    this.log(`printed pallet ${palletCode} (${layout} layout, ${this.config.palletDpi} dpi) -> queue "${queue}"${via}`);
+    this.log(`printed pallet ${palletCode} (${layout} layout, ${usedOrientation}, ${this.config.palletDpi} dpi) -> queue "${queue}"${via}`);
     // res.jobId is the OS spooler's job number — kept under its own name so it
     // can never clobber the logical jobId the caller dedupes/broadcasts by.
     // target names the MACHINE too when printing remotely: "which queue" is not

@@ -143,6 +143,15 @@ function geometry(c) {
   const copies = Math.max(1, Math.min(10, Number(c.copies) || 1));
   const dpi = Number(c.dpi) > 0 ? Number(c.dpi) : DEFAULT_PALLET_DPI;
   const dpm = dpi / 25.4; // dots per mm — 8 at 203 dpi, ~11.8 at 300
+  const W = Math.round(wMm * dpm);
+  const H = Math.round(hMm * dpm);
+  // Landscape turns the DESIGN, never the media: SIZE's first value is the
+  // width across the printhead, which is a physical limit (~104 mm on a 4"
+  // unit), so a 100x150 label cannot be redeclared as 150x100. The label stays
+  // as loaded and the artwork is rotated a quarter turn to read along its long
+  // edge — which also hands the barcode the 150 mm axis instead of the 100 mm
+  // one, so a long pallet code fits at a wider, more scannable module.
+  const landscape = c.orientation === 'landscape';
   return {
     wMm,
     hMm,
@@ -150,10 +159,15 @@ function geometry(c) {
     copies,
     dpi,
     dpm,
-    W: Math.round(wMm * dpm),
-    H: Math.round(hMm * dpm),
+    W,
+    H,
     ox: Math.round(oxMm * dpm),
     margin: Math.round(2 * dpm),
+    landscape,
+    // The canvas the layout stacks into. In landscape it is the label turned on
+    // its side; the emitter rotates every element back.
+    LW: landscape ? H : W,
+    LH: landscape ? W : H,
   };
 }
 
@@ -201,8 +215,15 @@ const pangoEscape = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 
 /** Rasterize one line of TTF text to a 1-bit TSPL bitmap, targetH dots tall
  * (shrunk proportionally if it would overflow maxW). TSPL BITMAP bit
- * convention: 0 = print (black), 1 = blank — so dark pixels clear bits. */
-async function textBitmap(sharp, text, fontfile, targetH, maxW, dpi) {
+ * convention: 0 = print (black), 1 = blank — so dark pixels clear bits.
+ *
+ * `rot90` packs the raster rotated a quarter turn clockwise, for the landscape
+ * layout. Done here, during packing, rather than by rotating the image with
+ * sharp: TSPL BITMAP has no rotation parameter of its own, and rotating the
+ * PACKED bits afterwards would mean unpacking and repacking a bit-per-pixel
+ * buffer. The measured logical size is returned alongside so the caller can
+ * keep laying out in unrotated space and only the emitted bytes are turned. */
+async function textBitmap(sharp, text, fontfile, targetH, maxW, dpi, rot90 = false) {
   const png = await sharp({
     text: {
       text: `<span foreground="black">${pangoEscape(text)}</span>`,
@@ -230,14 +251,20 @@ async function textBitmap(sharp, text, fontfile, targetH, maxW, dpi) {
     .threshold(160)
     .raw()
     .toBuffer();
-  const wBytes = Math.ceil(w / 8);
-  const data = Buffer.alloc(wBytes * h, 0xff);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      if (raw[y * w + x] < 128) data[y * wBytes + (x >> 3)] &= ~(0x80 >> (x & 7));
+  // Emitted (post-rotation) dimensions; logical w/h stay available for layout.
+  const pw = rot90 ? h : w;
+  const ph = rot90 ? w : h;
+  const wBytes = Math.ceil(pw / 8);
+  const data = Buffer.alloc(wBytes * ph, 0xff);
+  for (let py = 0; py < ph; py++) {
+    for (let px = 0; px < pw; px++) {
+      // Quarter turn clockwise: emitted (px,py) reads logical (py, h-1-px).
+      const lx = rot90 ? py : px;
+      const ly = rot90 ? h - 1 - px : py;
+      if (raw[ly * w + lx] < 128) data[py * wBytes + (px >> 3)] &= ~(0x80 >> (px & 7));
     }
   }
-  return { w, h, wBytes, data };
+  return { w: pw, h: ph, logicalW: w, logicalH: h, wBytes, data };
 }
 
 const cmd = (s) => Buffer.from(s + '\r\n', 'ascii');
@@ -248,34 +275,55 @@ const bitmapCmd = (x, y, b) =>
  * readable. Returns a Buffer — BITMAP payloads are binary and must never pass
  * through string newline rewriting. */
 async function buildPalletTagJob(sharp, c) {
-  const { wMm, hMm, oxMm, copies, dpi, dpm, W, H, ox, margin } = geometry(c);
-  const usable = W - margin * 2;
+  const g = geometry(c);
+  const { wMm, hMm, oxMm, copies, dpi, dpm, W, ox, margin, landscape, LW, LH } = g;
+  const usable = LW - margin * 2;
   const code = esc(c.palletCode);
   const title = palletCaption(c, code);
   const reference = palletReference(c, code);
-  const gap = Math.max(8, Math.round(H * 0.025));
-  const centerBmp = (b) => ox + Math.max(margin, Math.round((W - b.w) / 2));
+  const gap = Math.max(8, Math.round(LH * 0.025));
 
+  // Everything below is laid out in the LOGICAL canvas (LW across, LH down),
+  // which in landscape is the label turned on its side. `place` is the only
+  // place that knows about rotation.
   const [titleBmp, refBmp, footerBmp] = await Promise.all([
-    textBitmap(sharp, title, FONT_BOLD, Math.max(28, Math.round(H * 0.2)), usable, dpi),
-    textBitmap(sharp, reference, FONT_BOLD, Math.max(18, Math.round(H * 0.09)), usable, dpi),
-    textBitmap(sharp, title, FONT_MEDIUM, Math.max(14, Math.round(H * 0.065)), usable, dpi),
+    textBitmap(sharp, title, FONT_BOLD, Math.max(28, Math.round(LH * 0.2)), usable, dpi, landscape),
+    textBitmap(sharp, reference, FONT_BOLD, Math.max(18, Math.round(LH * 0.09)), usable, dpi, landscape),
+    textBitmap(sharp, title, FONT_MEDIUM, Math.max(14, Math.round(LH * 0.065)), usable, dpi, landscape),
   ]);
 
   const narrow = pickModule(code, usable, dpm);
-  const bx = ox + Math.max(margin, Math.round((W - code128Modules(code) * narrow) / 2));
-  const fixedH = titleBmp.h + gap + refBmp.h + gap + Math.round(gap / 2) + footerBmp.h;
-  const barH = Math.min(Math.round(H * 0.42), Math.max(40, H - margin * 2 - fixedH));
-  let y = margin + Math.max(0, Math.round((H - margin * 2 - fixedH - barH) / 2));
+  const barW = code128Modules(code) * narrow;
+  const fixedH = titleBmp.logicalH + gap + refBmp.logicalH + gap + Math.round(gap / 2) + footerBmp.logicalH;
+  const barH = Math.min(Math.round(LH * 0.42), Math.max(40, LH - margin * 2 - fixedH));
 
+  /** Logical (x,y) of an element sized lw x lh -> emitted top-left.
+   *  A quarter turn clockwise sends the logical TOP edge to the physical RIGHT
+   *  edge, so x becomes the down-feed coordinate and y is measured back from
+   *  the label's across-head width. Portrait passes straight through. */
+  const place = (x, y, lw, lh) => (landscape ? { x: ox + (W - y - lh), y: x } : { x: ox + x, y });
+  const centred = (lw) => Math.max(margin, Math.round((LW - lw) / 2));
+
+  let ly = margin + Math.max(0, Math.round((LH - margin * 2 - fixedH - barH) / 2));
   const parts = [cmd(`SIZE ${wMm + oxMm} mm,${hMm} mm`), cmd(`GAP ${GAP_MM} mm,0 mm`), cmd('DIRECTION 1'), cmd('CLS')];
-  parts.push(bitmapCmd(centerBmp(titleBmp), y, titleBmp));
-  y += titleBmp.h + gap;
-  parts.push(bitmapCmd(centerBmp(refBmp), y, refBmp));
-  y += refBmp.h + gap;
-  parts.push(cmd(`BARCODE ${bx},${y},"128",${barH},0,0,${narrow},${narrow * 2},"${code}"`));
-  y += barH + Math.round(gap / 2);
-  parts.push(bitmapCmd(centerBmp(footerBmp), y, footerBmp));
+
+  const emitBmp = (bmp) => {
+    const p = place(centred(bmp.logicalW), ly, bmp.logicalW, bmp.logicalH);
+    parts.push(bitmapCmd(p.x, p.y, bmp));
+    ly += bmp.logicalH + gap;
+  };
+
+  emitBmp(titleBmp);
+  emitBmp(refBmp);
+
+  // The barcode stays printer-native so its modules land on exact dot
+  // boundaries. TSPL rotates it about the same origin the bitmaps use, so the
+  // identical transform applies; rotation 90 makes the bars run down-feed.
+  const bp = place(centred(barW), ly, barW, barH);
+  parts.push(cmd(`BARCODE ${bp.x},${bp.y},"128",${barH},0,${landscape ? 90 : 0},${narrow},${narrow * 2},"${code}"`));
+  ly += barH + Math.round(gap / 2);
+
+  emitBmp(footerBmp);
   parts.push(cmd(`PRINT ${copies},1`));
   return Buffer.concat(parts);
 }
@@ -288,12 +336,25 @@ async function buildPalletTagJob(sharp, c) {
  */
 async function buildPalletTag(content) {
   const sharp = getSharp();
-  const { dpi } = geometry(content);
+  const { dpi, landscape } = geometry(content);
   if (sharp && existsSync(FONT_BOLD) && existsSync(FONT_MEDIUM)) {
-    return { data: await buildPalletTagJob(sharp, content), layout: 'montserrat', dpi };
+    return {
+      data: await buildPalletTagJob(sharp, content),
+      layout: 'montserrat',
+      dpi,
+      orientation: landscape ? 'landscape' : 'portrait',
+    };
   }
+  // The built-in-font fallback has no rotation, so it reports the orientation it
+  // actually produced rather than the one asked for — a caller that logs the
+  // requested value would claim a landscape tag that printed portrait.
   const text = palletTagTspl(content);
-  return { data: Buffer.from(text.replace(/\n/g, '\r\n') + '\r\n', 'ascii'), layout: 'builtin', dpi };
+  return {
+    data: Buffer.from(text.replace(/\n/g, '\r\n') + '\r\n', 'ascii'),
+    layout: 'builtin',
+    dpi,
+    orientation: 'portrait',
+  };
 }
 
 module.exports = { buildPalletTag, DEFAULT_PALLET_DPI };
