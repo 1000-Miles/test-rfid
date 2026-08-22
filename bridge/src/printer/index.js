@@ -310,6 +310,31 @@ class PrinterManager {
     return out;
   }
 
+  /** Recent pallet tags that PHYSICALLY printed, newest first — the reprint
+   *  picker's source. Collapsed to one row per pallet code (a pallet reprinted
+   *  three times is still one pallet), carrying that pallet's newest batchRef so
+   *  a reprint reproduces the label the operator actually held. Read straight
+   *  off the durable log, so it survives a bridge restart. */
+  recentPalletPrints({ limit = 12 } = {}) {
+    const byCode = new Map();
+    for (const e of this.readPrintLog()) {
+      if (e.kind !== 'pallet' || !e.palletCode) continue;
+      const prior = byCode.get(e.palletCode);
+      // Re-inserting keeps a Map key in its ORIGINAL slot, so delete first —
+      // otherwise a reprinted pallet keeps the position of its first print and
+      // never rises to the top of the list.
+      byCode.delete(e.palletCode);
+      // The log is append-ordered, so a later line is always the newer print.
+      byCode.set(e.palletCode, {
+        palletCode: e.palletCode,
+        batchRef: e.batchRef ?? prior?.batchRef ?? null,
+        at: e.at ?? prior?.at ?? null,
+        prints: (prior?.prints ?? 0) + 1,
+      });
+    }
+    return [...byCode.values()].reverse().slice(0, Math.max(1, Number(limit) || 12));
+  }
+
   setConfig(partial = {}) {
     for (const k of CONFIG_KEYS) {
       if (partial[k] === undefined) continue;
@@ -763,7 +788,7 @@ class PrinterManager {
       ? require('./winspool').sendRaw(queue, data, 'nexus-pallet-tag')
       : await sendRawCups(queue, data);
     const at = new Date().toISOString();
-    this._appendLog({ kind: 'pallet', palletCode, jobId, at });
+    this._appendLog({ kind: 'pallet', palletCode, batchRef: batchRef || null, jobId, at });
     this.log(`printed pallet ${palletCode} (${layout} layout, ${this.config.palletDpi} dpi) -> queue "${queue}"`);
     // res.jobId is the OS spooler's job number — kept under its own name so it
     // can never clobber the logical jobId the caller dedupes/broadcasts by.

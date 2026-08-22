@@ -237,6 +237,11 @@ class PassageDetector extends EventEmitter {
       // last write wins and the newest row is the tag's current life. Any other
       // order could resurrect a carton that has already left.
       const withState = new Set(); // distinct tags, not rows — a tag can own several
+      // Kept for the withdrawal diff below: only a pass that actually READ the
+      // state can tell a withdrawn carton from a failed fetch.
+      const prevCatalog = this.catalog;
+      const hadState = Boolean(this._cartonStateAt);
+      let stateOk = false;
       try {
         const stateUrl =
           `${base}/rest/v1/warehouse_carton` +
@@ -256,12 +261,15 @@ class PassageDetector extends EventEmitter {
           withState.add(tag);
         }
         this._cartonStateAt = Date.now();
+        stateOk = true;
       } catch (err) {
         // Non-fatal, same stance as the pallet registry: without state the gate
         // reports passages exactly as it did before, just without a verdict.
         this._cartonStateAt = null;
         this.emit('log', `carton state load failed (${err.message}) — outbound passages will not be checked`);
       }
+
+      if (stateOk && hadState) this._forgetWithdrawn(prevCatalog, map);
 
       this.catalog = map;
       this.catalogSource = 'supabase';
@@ -281,6 +289,62 @@ class PassageDetector extends EventEmitter {
       this.emit('log', `Supabase catalog load failed (${err.message}) — keeping ${Object.keys(this.catalog).length} cached entries`);
       return null;
     }
+  }
+
+  /**
+   * Cartons Nexus has WITHDRAWN since the last catalog pass — the tag had a
+   * warehouse_carton row and now has none.
+   *
+   * That disappearance is how a receiving RESET reaches the gate. Nexus soft-
+   * deletes the cartons a reset undoes, so the row vanishes from the state read
+   * and the goods are, as far as the records go, no longer in the building. They
+   * have to roll back through the doorway to be received again.
+   *
+   * Without this the gate would fight itself for a while. _inferToggleDirection
+   * prefers the LOCAL flip — the tag came in, so it must be going out — and only
+   * lets the snapshot win once the snapshot is decisively newer than the local
+   * move (two minutes). Inside that window a reset pallet rolling back in would
+   * be read as a dispatch, stamped unexpected, and never counted as arriving.
+   * So a withdrawal clears the local claim instead of waiting to be outvoted:
+   * the record goes OUTSIDE with no move anchor, and the next passage decides
+   * from state alone — 'state-never-received' — which is an entry.
+   *
+   * Only ever called after a state read that actually SUCCEEDED, and only when
+   * the previous pass had state too. A failed fetch leaves every entry without
+   * state, which is indistinguishable from every carton being withdrawn at once,
+   * and acting on that would empty the building on one bad request.
+   *
+   * The event dedupe is cleared with it so a pallet re-rolled straight after the
+   * reset isn't swallowed by toggleDedupMs. The absence gate (_lastReadAt) is
+   * deliberately NOT cleared: it is what stops a pallet parked in the read zone
+   * from firing on its own, and a reset is not a movement.
+   */
+  _forgetWithdrawn(prevCatalog, nextCatalog) {
+    const withdrawn = [];
+    for (const [tag, prev] of Object.entries(prevCatalog || {})) {
+      if (!prev || prev.kind !== 'carton') continue;
+      if (!prev.state && !prev.receivedAt) continue; // never had a row — nothing to lose
+      const next = nextCatalog[tag];
+      if (next && (next.state || next.receivedAt)) continue; // still on the books
+      withdrawn.push(tag);
+    }
+    if (withdrawn.length === 0) return;
+
+    let cleared = 0;
+    for (const tag of withdrawn) {
+      this._lastEventAt.delete(tag);
+      this._lastEventPassage.delete(tag);
+      const rec = this.inventory.get(tag);
+      if (!rec) continue;
+      rec.status = 'OUTSIDE';
+      rec.lastMoveAt = 0; // drop the recency anchor _inferToggleDirection reads
+      cleared++;
+    }
+    this.emit(
+      'log',
+      `${withdrawn.length} carton tag(s) withdrawn in Nexus (receiving reset or delete) — ` +
+        `${cleared} local record(s) set OUTSIDE; they now read as ARRIVING at the gate`
+    );
   }
 
   /**

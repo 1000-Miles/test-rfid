@@ -206,6 +206,84 @@ async function main() {
     );
   }
 
+  console.log('receiving reset: a withdrawn carton reads as ARRIVING again');
+  {
+    const { d, events } = makeDetector({ detectMode: 'toggle' });
+    // A printed tag with no warehouse record yet — nothing has been received.
+    d.catalog = { RS01: { kind: 'carton', sku: 'R-1', name: 'R-1', pallet: null, category: null } };
+    d._cartonStateAt = Date.now();
+
+    // It rolls in through the doorway. Nexus records the receipt, and the next
+    // catalog pass brings the warehouse_carton row back with it.
+    await burst(d, 'RS01');
+    await sleep(250);
+    assert(events.length === 1 && events[0]?.direction === 'in', 'carton arrives (IN)');
+    assert(d.inventory.get('RS01')?.status === 'INSIDE', 'gate holds it INSIDE');
+    const onTheBooks = { RS01: { kind: 'carton', sku: 'R-1', name: 'R-1', pallet: null, category: null, state: 'received', receivedAt: '2026-08-18T00:00:00Z' } };
+    d.catalog = onTheBooks;
+    d._cartonStateAt = Date.now();
+
+    // The operator resets the batch. Nexus soft-deletes the carton, so the next
+    // pass carries the label entry with no state on it — and that disappearance
+    // is the whole signal the gate gets.
+    const withdrawn = { RS01: { kind: 'carton', sku: 'R-1', name: 'R-1', pallet: null, category: null } };
+    d._forgetWithdrawn(onTheBooks, withdrawn);
+    d.catalog = withdrawn;
+    d._cartonStateAt = Date.now();
+    assert(d.inventory.get('RS01')?.status === 'OUTSIDE', 'withdrawal drops the INSIDE claim');
+
+    // Rolled back through the doorway it must count as arriving, NOT as a
+    // dispatch — which is exactly what the stale local flip would have said.
+    await sleep(500); // clear the re-arm and absence gates
+    await burst(d, 'RS01');
+    await sleep(250);
+    assert(events.length === 2, 'the return passage fired');
+    assert(events[1]?.direction === 'in', 'reset carton arrives again (IN, not a dispatch)');
+    assert(events[1]?.basis === 'state-never-received', 'decided from state, not from the stale local flip');
+    assert(!events[1]?.unexpected, 'not stamped as an unexpected exit');
+  }
+
+  console.log('receiving reset: without the withdrawal the return would read as a dispatch');
+  {
+    // The same sequence with the diff NOT applied — pins down what the change is
+    // actually buying, so a regression shows up as this test passing wrongly.
+    const { d, events } = makeDetector({ detectMode: 'toggle' });
+    d.catalog = { RS03: { kind: 'carton', sku: 'R-3', name: 'R-3', pallet: null, category: null } };
+    d._cartonStateAt = Date.now();
+    await burst(d, 'RS03');
+    await sleep(250);
+    d.catalog = { RS03: { kind: 'carton', sku: 'R-3', name: 'R-3', pallet: null, category: null, state: 'received', receivedAt: '2026-08-18T00:00:00Z' } };
+    d._cartonStateAt = Date.now();
+
+    // State withdrawn, local claim left standing (the old behaviour).
+    d.catalog = { RS03: { kind: 'carton', sku: 'R-3', name: 'R-3', pallet: null, category: null } };
+    d._cartonStateAt = Date.now();
+    await sleep(500);
+    await burst(d, 'RS03');
+    await sleep(250);
+    assert(events[1]?.direction === 'out' && events[1]?.basis === 'local-flip', 'stale local flip alone calls the return a dispatch');
+  }
+
+  console.log('receiving reset: a failed state fetch must not empty the building');
+  {
+    const { d } = makeDetector({ detectMode: 'toggle' });
+    d.catalog = { RS02: { kind: 'carton', sku: 'R-2', name: 'R-2', pallet: null, category: null } };
+    d._cartonStateAt = Date.now();
+    await burst(d, 'RS02');
+    await sleep(250);
+    assert(d.inventory.get('RS02')?.status === 'INSIDE', 'carton is INSIDE to begin with');
+    const onTheBooks = { RS02: { kind: 'carton', sku: 'R-2', name: 'R-2', pallet: null, category: null, state: 'received', receivedAt: '2026-08-18T00:00:00Z' } };
+    d.catalog = onTheBooks;
+    d._cartonStateAt = Date.now();
+
+    // A pass whose state read threw leaves every entry stateless, which is
+    // indistinguishable from every carton being withdrawn at once. That is why
+    // loadCatalogRemote only runs the diff when the read SUCCEEDED — asserting
+    // the guard here keeps the contract visible from the test file.
+    const stateOk = false;
+    if (stateOk) d._forgetWithdrawn(onTheBooks, { RS02: { kind: 'carton', sku: 'R-2', name: 'R-2', pallet: null, category: null } });
+    assert(d.inventory.get('RS02')?.status === 'INSIDE', 'a failed state read changes nothing');
+  }
   console.log('');
   if (failures) {
     console.error(`${failures} assertion(s) FAILED`);

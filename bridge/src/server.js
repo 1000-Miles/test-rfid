@@ -496,6 +496,17 @@ app.get('/printer/log', (req, res) => {
   }
 });
 
+// Pallet tags already printed, newest first — backs the "Previously printed"
+// reprint list on the pallet page. Distinct from /printer/log (the raw
+// reconcile feed): this is collapsed per pallet and capped for a UI list.
+app.get('/printer/pallet-prints', (req, res) => {
+  try {
+    res.json({ ok: true, prints: printer.recentPalletPrints({ limit: req.query.limit }) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Windows print queue names, for the USB queue picker.
 app.get('/printer/queues', async (_req, res) => {
   try {

@@ -161,6 +161,13 @@ export interface PassageCompleteMsg {
   } | null;
 }
 
+/** One product line on a pallet. `cartons` across all lines sums to cartonCount. */
+export interface PalletProduct {
+  sku: string;
+  name: string;
+  cartons: number;
+}
+
 export interface PalletWorkflowMsg {
   type: 'pallet-open' | 'pallet-ready' | 'pallet-print';
   timestamp: string;
@@ -168,6 +175,8 @@ export interface PalletWorkflowMsg {
   passageId: string | number;
   palletCode: string;
   cartonCount: number;
+  /** Absent on a reprint or a hand-keyed label, which have no cartons behind them. */
+  products?: PalletProduct[];
   queued: boolean;
   ok?: boolean;
   replayed?: boolean;

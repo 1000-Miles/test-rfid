@@ -43,6 +43,29 @@ const DEFAULT_DATA_DIR = path.join(__dirname, '..', 'data');
 // undelivered events are still in the file so an archive can never hold one.
 const MAX_LOG_BYTES = 4 * 1024 * 1024;
 
+/**
+ * Per-product carton counts for one pallet's queued entries.
+ *
+ * Grouped by SKU rather than name: the SKU is the identity Nexus reconciles on,
+ * and two products can legitimately share a display name. The name rides along
+ * for display only. Unregistered tags already carry a synthetic sku from
+ * passage.js, so they group as their own visible line instead of silently
+ * dropping out — the counts here must always sum to cartonCount, or the card
+ * would tell an operator a pallet holds fewer cartons than it does.
+ */
+function productBreakdown(entries) {
+  const bySku = new Map();
+  for (const entry of entries) {
+    const item = entry.event?.item;
+    const sku = item?.sku || 'UNKNOWN-SKU';
+    const seen = bySku.get(sku);
+    if (seen) seen.cartons += 1;
+    else bySku.set(sku, { sku, name: item?.name || 'Unregistered item', cartons: 1 });
+  }
+  // Biggest line first — an operator eyeballing a pallet checks the bulk SKUs.
+  return [...bySku.values()].sort((a, b) => b.cartons - a.cartons || a.sku.localeCompare(b.sku));
+}
+
 class Outbox extends EventEmitter {
   constructor(opts = {}) {
     super();
@@ -428,6 +451,7 @@ class Outbox extends EventEmitter {
       palletCode: first.palletCode,
       direction: first.direction,
       cartonCount: entries.length,
+      products: productBreakdown(entries),
       openedAt: this._togglePassage.openedAt,
       closesAt: this._togglePassage.closesAt,
       queued: Boolean(this.lastError || !this.batchUrl),
@@ -472,6 +496,7 @@ class Outbox extends EventEmitter {
       palletCode: first.palletCode,
       direction: first.direction,
       cartonCount: entries.length,
+      products: productBreakdown(entries),
       queued: Boolean(this.lastError || !this.batchUrl),
       closeReason,
       timestamp: new Date().toISOString(),

@@ -251,8 +251,18 @@ export function useBridge(): BridgeState {
             break;
           case 'pallet-open':
           case 'pallet-ready':
-          case 'pallet-print':
             setPalletWorkflow(msg);
+            break;
+          case 'pallet-print':
+            // The gate card tracks ONE thing: the pallet currently coming
+            // through the gate. A reprint of an old label, or a code typed in
+            // by hand, is not that — it carries no passage, no carton count and
+            // no products, so letting it through replaced a live pallet with a
+            // stale row reading "Cartons 0". Those prints still reach the page
+            // (it refetches the history itself); they just no longer own the
+            // card. Guarded by passageId, not by type, so a genuine gate print
+            // still advances the card to PRINTED.
+            if (msg.passageId !== 'reprint' && msg.passageId !== 'manual') setPalletWorkflow(msg);
             break;
           case 'status':
             setStatus({

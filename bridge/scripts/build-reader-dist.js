@@ -352,6 +352,15 @@ if ($ok) {
   Write-Host ""
   Write-Host "OK - reader bridge is answering on http://localhost:$Port" -ForegroundColor Green
   Write-Host "In Nexus, set the Reader bridge field to: http://localhost:$Port"
+  Write-Host ""
+  # Called out here because the bridge working is NOT sufficient, and the failure
+  # it produces ("Can't reach the reader bridge") is indistinguishable from the
+  # bridge being down. See README.
+  Write-Host "STILL TO DO IN THE BROWSER - Chrome blocks HTTPS sites from reaching localhost:" -ForegroundColor Yellow
+  Write-Host "  Click the icon left of the address bar on the Nexus page, then turn on"
+  Write-Host "  'Apps on device'   (Chrome 145+, this is the localhost one)"
+  Write-Host "  'Local network'    (Chrome 142-144)"
+  Write-Host "  ...then reload the page. Fleet-wide: LocalNetworkAccessAllowedForUrls policy."
 } else {
   Write-Host ""
   Write-Host "FAILED - no answer on http://localhost:$Port" -ForegroundColor Red
@@ -440,6 +449,32 @@ http://localhost:3001
 \`\`\`
 
 Leave the printer setting alone.
+
+## One-time browser permission (REQUIRED — do this on every PC)
+
+Chrome blocks a public HTTPS site from reaching \`localhost\` until the user
+allows it. Without this the Nexus Test button fails with
+"Can't reach the reader bridge", and the console shows
+*"Permission was denied for this request to access the \`loopback\` address space"*
+— which looks exactly like the bridge not running, so it wastes a lot of time.
+
+Click the icon left of the address bar, then:
+
+| Chrome version | Turn on |
+|---|---|
+| 145 and newer | **Apps on device** (this is the loopback one — the one you need) |
+| 142 - 144 | **Local network** |
+
+Then reload the page.
+
+On 145+, "Local network" alone is NOT enough: it covers LAN addresses
+(192.168.x.x), while \`localhost\` and \`127.0.0.1\` sit in the separate loopback
+space that "Apps on device" governs. Chrome shows it as
+"Automatically blocked" by default.
+
+No server change can grant this — it is a user permission, not a CORS header.
+For a fleet, push it centrally instead of visiting desks, via the Chrome/Edge
+policy \`LocalNetworkAccessAllowedForUrls\` set to your Nexus origin.
 
 ## Check it
 
