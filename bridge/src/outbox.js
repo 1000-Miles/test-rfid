@@ -1034,6 +1034,14 @@ class Outbox extends EventEmitter {
       },
     };
   }
+
+  /** IDs Nexus permanently rejected. Used by the board to keep those local
+   * credits visible instead of mistaking "not pending" for "delivered". */
+  deadEventIds() {
+    return readJsonl(this._deadPath)
+      .map((entry) => entry.event?.eventId)
+      .filter(Boolean);
+  }
 }
 
 function readJsonl(file) {

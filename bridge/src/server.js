@@ -1441,7 +1441,18 @@ app.post('/nexus/catalog/reload', async (_req, res) => {
 app.get('/board/documents', async (_req, res) => {
   const doc = await board.get();
   const ob = outbox.status();
-  res.json({ ...doc, delivery: { queueDepth: ob.queueDepth, lastPushAt: ob.lastPushAt } });
+  // Event IDs make the browser overlay deterministic. Queue depth alone could
+  // only say "everything drained"; it could not prove which passage drained,
+  // and one rejected event made every local credit ambiguous.
+  res.json({
+    ...doc,
+    delivery: {
+      queueDepth: ob.queueDepth,
+      lastPushAt: ob.lastPushAt,
+      pendingEventIds: outbox.pending.map((entry) => entry.event?.eventId).filter(Boolean),
+      deadEventIds: outbox.deadEventIds(),
+    },
+  });
 });
 
 app.get('/board/status', (_req, res) => res.json({ ok: true, ...board.status() }));

@@ -53,6 +53,20 @@ export interface Status {
   udp?: UdpState;
 }
 
+export interface MovementStatus {
+  configured: boolean;
+  queueDepth: number;
+  oldestPendingAt: string | null;
+  deadLetters: number;
+  lastError: string | null;
+  journal: {
+    healthy: boolean;
+    corrupt: boolean;
+    enqueueFailures: number;
+    lastEnqueueError: string | null;
+  };
+}
+
 export interface TagMsg {
   type: 'tag';
   epc: string;

@@ -108,6 +108,8 @@ export interface PendingCredit {
   epc: string;
   docId: string;
   sku: string;
+  /** Permanent bridge identity used for exact delivery reconciliation. */
+  eventId?: string | null;
   /** ms epoch when the gate counted it — compared against the feed's snapshot. */
   at: number;
 }
@@ -132,7 +134,12 @@ interface FeedResponse {
   pool: GateDoc[];
   fetchedAt: string | null;
   /** Outbox state at fetch time — how the overlay knows what Nexus has. */
-  delivery?: { queueDepth: number; lastPushAt: string | null };
+  delivery?: {
+    queueDepth: number;
+    lastPushAt: string | null;
+    pendingEventIds?: string[];
+    deadEventIds?: string[];
+  };
 }
 
 /**
@@ -342,6 +349,8 @@ function mergeFeed(prev: BoardState, docs: GateDoc[], pool: GateDoc[], feed: Fee
   const drained = feed.delivery?.queueDepth === 0;
   const delivered = drained ? Date.parse(feed.delivery?.lastPushAt ?? '') : NaN;
   const snapshot = feed.fetchedAt ? Date.parse(feed.fetchedAt) : NaN;
+  const pendingIds = new Set(feed.delivery?.pendingEventIds ?? []);
+  const deadIds = new Set(feed.delivery?.deadEventIds ?? []);
   //
   // Two ways an entry can retire, and the second one is why this had to change.
   //
@@ -359,6 +368,10 @@ function mergeFeed(prev: BoardState, docs: GateDoc[], pool: GateDoc[], feed: Fee
   //
   const absorbed = (c: PendingCredit) => {
     if (!Number.isFinite(snapshot)) return false;
+    if (c.eventId && feed.delivery?.pendingEventIds) {
+      if (pendingIds.has(c.eventId) || deadIds.has(c.eventId)) return false;
+      return snapshot > c.at;
+    }
     if (Number.isFinite(delivered) && delivered >= c.at && snapshot >= delivered) return true;
     return drained && snapshot > c.at;
   };
@@ -533,7 +546,7 @@ export function applyMovement(state: BoardState, entry: EntryRow): { state: Boar
       // Records the increment as PROVISIONAL. It keeps the board correct across
       // refreshes while the outbox is still delivering, and retires itself once
       // Nexus's own figure includes this passage (see mergeFeed).
-      pending: [...state.pending, { epc, docId: target.id, sku, at: Date.now() }],
+      pending: [...state.pending, { epc, docId: target.id, sku, eventId: entry.eventId, at: Date.now() }],
     },
     outcome: { kind: 'counted', docId: target.id, dir, sku, name: creditedName },
   };

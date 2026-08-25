@@ -41,15 +41,15 @@ async function main() {
     freshScratch();
     let o = makeOutbox();
     const r = o.enqueue({ epc: 'AA01', direction: 'in', timestamp: '2026-08-19T00:00:00.000Z' });
-    assert(r.seq === 1 && r.eventId === 'test-gate:1', 'enqueue returns seq + eventId');
+    assert(r.seq === 1 && r.eventId === 'test-gate:g1:1', 'enqueue returns seq + eventId');
     o.stop();
 
     o = makeOutbox(); // "restart"
     assert(o.pending.length === 1, 'offline enqueue survives restart');
-    assert(o.pending[0].event.eventId === 'test-gate:1', 'eventId in the restored entry is byte-identical');
+    assert(o.pending[0].event.eventId === 'test-gate:g1:1', 'eventId in the restored entry is byte-identical');
     assert(o.pending[0].event.gateId === 'test-gate' && o.pending[0].event.seq === 1, 'gateId and seq persisted');
     const r2 = o.enqueue({ epc: 'AA02', direction: 'out', timestamp: '2026-08-19T00:01:00.000Z' });
-    assert(r2.eventId === 'test-gate:2', 'seq continues after restart, no reuse');
+    assert(r2.eventId === 'test-gate:g1:2', 'seq continues after restart, no reuse');
     o.stop();
   }
 
@@ -68,7 +68,7 @@ async function main() {
     assert(o.pending.length === 1 && o.pending[0].event.epc === 'BB01', 'valid record survived the repair');
     assert(o.nextSeq === 2, 'nextSeq derived from valid records only');
     const r = o.enqueue({ epc: 'BB02', direction: 'out', timestamp: '2026-08-19T00:02:00.000Z' });
-    assert(r.eventId === 'test-gate:2', 'post-repair append reuses the quarantined seq cleanly');
+    assert(r.eventId === 'test-gate:g1:2', 'post-repair append reuses the quarantined seq cleanly');
     o.stop();
 
     o = makeOutbox(); // second restart: the glued-append bug would bite HERE
@@ -156,11 +156,11 @@ async function main() {
     o._backoff = 10;
     await o._pump();
     o.stop();
-    assert(delivered[0] === 'test-gate:1', 'strict order: seq 1 sent first');
+    assert(delivered[0] === 'test-gate:g1:1', 'strict order: seq 1 sent first');
     assert(o.cursor === 1, 'cursor advanced only past the delivered event');
 
     o = makeOutbox();
-    assert(o.pending.length === 1 && o.pending[0].event.eventId === 'test-gate:2', 'restart resumes at the undelivered event, same id');
+    assert(o.pending.length === 1 && o.pending[0].event.eventId === 'test-gate:g1:2', 'restart resumes at the undelivered event, same id');
     o.stop();
   }
 

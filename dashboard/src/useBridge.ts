@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { BRIDGE_WS } from './api';
-import type { EntryRow, GpiState, PalletWorkflowMsg, PassageCompleteMsg, Status, TagRow, UdpFrameRow, WsMsg } from './types';
+import { BRIDGE_HTTP, BRIDGE_WS } from './api';
+import type { EntryRow, GpiState, MovementStatus, PalletWorkflowMsg, PassageCompleteMsg, Status, TagRow, UdpFrameRow, WsMsg } from './types';
 
 const MAX_ROWS = 100;
 const MAX_UDP_ROWS = 50;
@@ -58,6 +58,7 @@ export interface BridgeState {
    */
   receivingResetAt: string | null;
   palletWorkflow: PalletWorkflowMsg | null;
+  movement: MovementStatus | null;
   clear: () => void;
 }
 
@@ -86,6 +87,7 @@ export function useBridge(): BridgeState {
   const [passageComplete, setPassageComplete] = useState<PassageCompleteMsg | null>(null);
   const [receivingResetAt, setReceivingResetAt] = useState<string | null>(null);
   const [palletWorkflow, setPalletWorkflow] = useState<PalletWorkflowMsg | null>(null);
+  const [movement, setMovement] = useState<MovementStatus | null>(null);
 
   const idRef = useRef(0);
   const seenRef = useRef<Set<string>>(new Set());
@@ -115,6 +117,23 @@ export function useBridge(): BridgeState {
   // Drain the telemetry buffers. Each branch is guarded so an idle gate does no
   // state work at all — an unconditional setState here would reintroduce the
   // very re-render storm the buffering exists to stop.
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const res = await fetch(`${BRIDGE_HTTP}/status`, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const body = await res.json();
+        if (alive) setMovement(body.movement ?? null);
+      } catch {
+        if (alive) setMovement(null);
+      }
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), 15_000);
+    return () => { alive = false; clearInterval(timer); };
+  }, []);
+
   useEffect(() => {
     const t = setInterval(() => {
       if (pendingTags.current.length) {
@@ -339,6 +358,7 @@ export function useBridge(): BridgeState {
     passageComplete,
     receivingResetAt,
     palletWorkflow,
+    movement,
     clear,
   };
 }

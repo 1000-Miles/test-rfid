@@ -140,6 +140,7 @@ export default function App() {
 
   return (
     <>
+      <DeliveryAlarm movement={bridge.movement} />
       <GateBoard board={board} entries={bridge.entries} sound={sound} onOpenControls={() => setControlsOpen(true)} />
       <ControlDrawer
         open={controlsOpen}
@@ -152,5 +153,26 @@ export default function App() {
         onOpenPrinting={() => navigate(ROUTES.printing)}
       />
     </>
+  );
+}
+
+function DeliveryAlarm({ movement }: { movement: ReturnType<typeof useBridge>['movement'] }) {
+  if (!movement) return null;
+  const age = movement.oldestPendingAt ? Date.now() - Date.parse(movement.oldestPendingAt) : 0;
+  const journalBad = !movement.journal.healthy;
+  const rejected = movement.deadLetters > 0;
+  const critical = journalBad || rejected || age >= 30 * 60_000;
+  const warning = movement.queueDepth > 0 && age >= 5 * 60_000;
+  if (!critical && !warning) return null;
+  const minutes = Math.max(1, Math.floor(age / 60_000));
+  const detail = journalBad
+    ? `Local saving failed: ${movement.journal.lastEnqueueError ?? 'electronic recording is unavailable'} — switch to the manual outage log now; keep unloading in arrival order and call IT`
+    : rejected
+      ? `${movement.deadLetters} movement event${movement.deadLetters === 1 ? '' : 's'} rejected — set aside the affected goods for supervisor review; continue receiving all other goods`
+      : `${movement.queueDepth} movement event${movement.queueDepth === 1 ? '' : 's'} waiting ${minutes} minutes for Nexus — keep receiving; notify the supervisor and escalate to IT if the connection remains unavailable`;
+  return (
+    <div role="alert" aria-live="assertive" style={{ position: 'fixed', zIndex: 10000, top: 12, left: '50%', transform: 'translateX(-50%)', width: 'min(94vw, 1100px)', padding: '16px 22px', borderRadius: 14, background: critical ? '#991b1b' : '#92400e', color: 'white', boxShadow: '0 8px 30px rgba(0,0,0,.3)', fontWeight: 800, textAlign: 'center' }}>
+      {journalBad ? 'MANUAL FALLBACK REQUIRED' : critical ? 'ACTION REQUIRED — WORK CONTINUES' : 'NEXUS OFFLINE — RECEIVING IS SAVED LOCALLY'} · {detail}
+    </div>
   );
 }
