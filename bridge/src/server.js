@@ -122,7 +122,17 @@ async function forwardMovementToSupabase(event) {
 }
 
 // --- Controller ---------------------------------------------------------------
-const controller = new Controller();
+// READ_MIN_RSSI shrinks the read zone in software: any read weaker than this is
+// dropped in the controller, so it never becomes a tag event, a board row, a
+// movement, or a database row. Blank = off. Negative dBm; -70..-55 is the usual
+// range for a doorway. Also settable live via POST /read-filter.
+//
+// This is the blunt, global version of the floor. NEXUS_MIN_RSSI below is a
+// second, narrower one that only applies to NO-IR toggle decisions — the two
+// stack, and this one runs first.
+const controller = new Controller({
+  minRssi: process.env.READ_MIN_RSSI ? Number(process.env.READ_MIN_RSSI) : null,
+});
 
 // --- Printers: carton labels on the Chainway CP30 (ZPL, main config) and
 // --- barcode-only pallet tags on the dedicated Gprinter (TSPL, palletPrinterName)
@@ -812,11 +822,113 @@ app.post('/power', async (req, res) => {
   }
 });
 
+/**
+ * Run a config read/write with inventory paused, then put the gate back.
+ *
+ * The reader ignores config commands mid-inventory AND lies when questioned:
+ * questioned while reading, it reports enabled=[1] no matter how many ports are
+ * really on. The gate reads essentially all the time, so an un-paused caller
+ * gets that lie every time — which is how the console came to grey out ANT 2-4
+ * and refuse every per-port power change on a reader that had all four.
+ *
+ * Resuming is not optional: the operator asked to change a setting, not to end
+ * the shift.
+ */
+async function withInventoryPaused(what, fn) {
+  const wasReading = controller.reading;
+  if (wasReading) await controller.stopReading();
+  try {
+    return await controller._withLock(fn);
+  } finally {
+    if (wasReading) {
+      try {
+        await controller.startReading();
+      } catch (err) {
+        controller.log(`could not resume reading after ${what}: ${err.message}`, 'warn');
+      }
+    }
+  }
+}
+
+/**
+ * Reader buzzer. GET reads it, POST { on: false } silences it.
+ *
+ * The UR4 chirps once per tag read out of the box. At a gate that reads
+ * continuously that is not a chirp, it is a siren for the whole shift — and
+ * turning it off has nothing to do with the software's own sounds (the board's
+ * voice announcements are separate, in the dashboard).
+ *
+ * The setting persists inside the reader, so this is a one-time press, not
+ * something the bridge re-applies on every connect.
+ */
+app.post('/beep', async (req, res) => {
+  try {
+    const uhf = require('./driver');
+    if (!uhf.setBeep) {
+      return res.status(501).json({ ok: false, error: 'the active driver does not implement beeper control' });
+    }
+    if (!req.body || !('on' in req.body)) return res.status(400).json({ ok: false, error: 'on: boolean required' });
+    const on = Boolean(req.body.on);
+    const result = await withInventoryPaused('beeper change', async () => ({
+      rc: await uhf.setBeep(on),
+      on: uhf.getBeep ? await uhf.getBeep() : null,
+    }));
+    if (result.rc !== 0) {
+      return res.status(502).json({ ok: false, error: 'the reader refused the change', rc: result.rc });
+    }
+    controller.log(`Reader beeper ${on ? 'ON' : 'OFF (silent)'}.`);
+    res.json({ ok: true, on: result.on ?? on });
+  } catch (err) {
+    // An old sidecar build has no /beep route. That is a rebuild, not a fault.
+    const stale = /404|not found/i.test(err.message);
+    res.status(stale ? 501 : 500).json({
+      ok: false,
+      error: stale ? 'this sidecar build has no /beep route — rebuild it (see bridge/sidecar/README)' : err.message,
+    });
+  }
+});
+
+app.get('/beep', async (_req, res) => {
+  try {
+    const uhf = require('./driver');
+    if (!uhf.getBeep) return res.status(501).json({ ok: false, error: 'the active driver does not implement beeper control' });
+    const on = await withInventoryPaused('beeper read', () => uhf.getBeep());
+    res.json({ ok: on != null, on });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * Read-zone floor: POST { minRssi: -65 } to drop weaker reads entirely, or
+ * { minRssi: null } to keep everything.
+ *
+ * Deliberately NOT part of /power: turning the transmitter down shrinks the
+ * physical field (and weakens the read you WANT), while this leaves the field
+ * alone and discards what comes back too faint. At a gate you usually want
+ * both — enough power to read the carton passing, plus a floor that throws away
+ * the shelf stock that same power reaches.
+ */
+app.post('/read-filter', (req, res) => {
+  try {
+    // An absent key is a malformed request, NOT "turn the floor off" — a stray
+    // POST {} would otherwise silently reopen the read zone mid-shift.
+    if (!req.body || !('minRssi' in req.body)) {
+      return res.status(400).json({ ok: false, error: 'minRssi required (negative dBm, or null to turn the floor off)' });
+    }
+    const raw = req.body.minRssi;
+    const status = controller.setMinRssi(raw === null || raw === '' ? null : raw);
+    res.json({ ok: true, minRssi: status.minRssi, weakDropped: status.weakDropped });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
 // Antenna config: which ports are enabled + physically connected.
 app.get('/antennas', async (_req, res) => {
   try {
     const uhf = require('./driver');
-    const info = await controller._withLock(async () => ({
+    const info = await withInventoryPaused('antenna read', async () => ({
       enabled: await uhf.getAntennas(),
       connected: await uhf.getAntennaLink(),
     }));
@@ -831,10 +943,11 @@ app.post('/antennas', async (req, res) => {
     const uhf = require('./driver');
     const ports = req.body?.ports;
     if (!Array.isArray(ports) || ports.length === 0) return res.status(400).json({ ok: false, error: 'ports: number[] required' });
-    const result = await controller._withLock(async () => {
+    const result = await withInventoryPaused('antenna change', async () => {
       const rc = await uhf.setAntennas(ports, true);
       return { rc, enabled: await uhf.getAntennas() };
     });
+    controller.log(`Antennas enabled: ${(result.enabled || ports).join(', ')} (rc=${result.rc}).`);
     res.json({ ok: result.rc === 0, ...result });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });

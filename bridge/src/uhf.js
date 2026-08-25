@@ -135,6 +135,12 @@ function load() {
     // --- work mode / hardware trigger (doc 2038-2073) ---
     // NOTE: mode 2 (trigger) outputs tags over serial/UDP only, NOT TCP, so we do
     // NOT use it for reading. Bound here for diagnostics / experimentation.
+    // Reader buzzer. Signature mirrors UHFSetWorkMode (the DLL's other
+    // single-byte mode setter) — INFERRED, not from a datasheet, and unverified
+    // on hardware because the live gate runs the sidecar driver, not this one.
+    // Both symbols are exported by UHFAPI.dll.
+    UHFSetBeep: lib.func('int UHFSetBeep(uint8_t mode)'),
+    UHFGetBeep: lib.func('int UHFGetBeep(uint8_t *mode)'),
     UHFSetWorkMode: lib.func('int UHFSetWorkMode(uint8_t mode)'),
     UHFGetWorkMode: lib.func('int UHFGetWorkMode(uint8_t *mode)'),
     UHFSetWorkModePara: lib.func('int UHFSetWorkModePara(uint8_t *param)'),
@@ -731,6 +737,23 @@ function getAntennaPower() {
   return out;
 }
 
+/**
+ * Reader buzzer on/off. The UR4 chirps on every tag read by default, which at a
+ * gate reading continuously is one long tone all shift. Persists in the reader.
+ * @returns {number} 0 on success.
+ */
+function setBeep(on) {
+  const f = load();
+  return f.UHFSetBeep(on ? 1 : 0);
+}
+
+/** @returns {boolean|null} null = the reader would not say. */
+function getBeep() {
+  const f = load();
+  const buf = Buffer.alloc(4);
+  return f.UHFGetBeep(buf) === 0 ? buf[0] !== 0 : null;
+}
+
 /** Enable a set of antenna ports, e.g. setAntennas([1,2]). @returns 0 on success. */
 function setAntennas(ports, save = true) {
   let mask = 0;
@@ -1018,6 +1041,8 @@ const NEEDS_LINK = [
   'setWorkTime',
   'setAntennas',
   'setAntennaPower',
+  'setBeep',
+  'getBeep',
   'getAntennas',
   'getAntennaLink',
   'readIOStatus',
@@ -1088,6 +1113,8 @@ module.exports = guardExports({
   getRFLink,
   getAntennaPower,
   setAntennaPower,
+  setBeep,
+  getBeep,
   getWorkTime,
   setWorkTime,
   setAntennas,
