@@ -208,9 +208,19 @@ const outbox = new Outbox({
   // Short code printed into every pallet code (PALLET-G1-001). MUST differ
   // between gates — see _nextPalletCode.
   gateShort: process.env.GATE_SHORT || 'G1',
+  // 'short' mints PALLET-G1-001; 'long' (default) mints
+  // PLT-YIWU-MAIN-GATE-00000526. Nexus validates this field and currently
+  // rejects the short form, so switching before its pattern is relaxed
+  // dead-letters every carton. See NEXUS-HANDOFF.md item 3.
+  palletCodeFormat: process.env.PALLET_CODE_FORMAT === 'short' ? 'short' : 'long',
   batchSettleMs: Number(process.env.MOVEMENT_BATCH_SETTLE_MS || 500),
   toggleBatchQuietMs: Number(process.env.MOVEMENT_TOGGLE_BATCH_QUIET_MS || 1_500),
-  togglePalletWindowMs: Number(process.env.MOVEMENT_TOGGLE_PALLET_WINDOW_MS || 120_000),
+  // How long a pallet stays open for. 60s, not the old 120s: with no beams this
+  // window is the ONLY thing separating one pallet from the next, so anything
+  // arriving inside it joins the same pallet code and the same printed label.
+  // Two minutes merged pallets that arrived back to back whenever nobody reached
+  // the Close & print button in time. Adjustable live from the console.
+  togglePalletWindowMs: Number(process.env.MOVEMENT_TOGGLE_PALLET_WINDOW_MS || 60_000),
   log: (text, level) => controller.log(`[outbox] ${text}`, level),
 });
 outbox.on('batch-sent', (reply) => {
@@ -1655,6 +1665,27 @@ app.post('/printer/pallet-test-tag', async (req, res) => {
 server.listen(PORT, () => {
   controller.log(`Bridge listening on http://localhost:${PORT}  (WS: ws://localhost:${PORT}/ws)`);
   controller.log(`Reader defaults: ${DEFAULT_IP}:${DEFAULT_PORT}. Supabase forwarding: ${SB_ENABLED ? 'ON' : 'off'}.`);
+  if (outbox.palletCodeFormat === 'short') {
+    controller.log(
+      'Pallet codes: SHORT form (PALLET-G1-001). Nexus must accept this pattern — if cartons start dead-lettering, ' +
+        'set PALLET_CODE_FORMAT=long and restart.',
+      'warn'
+    );
+  } else {
+    controller.log('Pallet codes: long form (PLT-<GATE>-00000000). Set PALLET_CODE_FORMAT=short once Nexus accepts PALLET-G1-001.');
+  }
+  controller.log(
+    RESET_WEBHOOK_KEY
+      ? 'Reset webhook: POST /receiving/reset (bearer key required).'
+      : 'Reset webhook: POST /receiving/reset (NO key set — open on this LAN; set RESET_WEBHOOK_KEY to require one).'
+  );
+  // A floor silently discarding reads is the first thing to suspect when a gate
+  // "stops seeing tags", so it says so on every boot rather than only when set.
+  controller.log(
+    controller.minRssi == null
+      ? 'Read floor: off — every read is kept (set READ_MIN_RSSI or POST /read-filter to shrink the read zone).'
+      : `Read floor: ${controller.minRssi}dBm — weaker reads are dropped and never recorded.`
+  );
 
   const ob = outbox.status();
   if (!ob.configured) {

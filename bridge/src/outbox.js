@@ -111,6 +111,18 @@ class Outbox extends EventEmitter {
         .toUpperCase()
         .replace(/[^A-Z0-9]+/g, '')
         .slice(0, 4) || 'G1';
+    /**
+     * Wire format for palletCode: 'short' (PALLET-G1-001) or 'long'
+     * (PLT-YIWU-MAIN-GATE-00000526).
+     *
+     * A switch rather than a constant because the choice is NOT ours: Nexus
+     * validates this field and rejects the short form outright. The short form
+     * is the one people can actually read off a label and say over a radio, so
+     * it is where this should end up — but flipping it before Nexus accepts it
+     * dead-letters every carton that carries one. Defaults to 'long' so the
+     * unsafe option has to be chosen deliberately.
+     */
+    this.palletCodeFormat = opts.palletCodeFormat === 'short' ? 'short' : 'long';
     this._quarantinePath = `${this._logPath}.quarantine`;
 
     this.pending = []; // [{ seq, at, event }] — undelivered, oldest first
@@ -315,6 +327,11 @@ class Outbox extends EventEmitter {
       // Durability is the whole point, so a failed write must not be papered
       // over: the caller still gets a code, but the next boot may reuse it.
       this.log(`pallet counter write failed (${err.message}) — ${next} may be reissued after a restart`, 'warn');
+    }
+    if (this.palletCodeFormat === 'short') {
+      // What the label and the radio actually want. Uniqueness across gates
+      // rests entirely on gateShort here — the counter is local to this bridge.
+      return `PALLET-${this.gateShort}-${String(next).padStart(3, '0')}`;
     }
     const gate = this.gateId.toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 18) || 'GATE';
     return `PLT-${gate}-${String(next).padStart(8, '0')}`;
@@ -714,6 +731,19 @@ class Outbox extends EventEmitter {
     }
     this.deadCount += 1;
     this.log(`movement seq ${entry.seq} (${entry.event?.epc}) rejected permanently: ${reason}`, 'error');
+    // The one self-inflicted rejection this bridge can produce. Nexus answers a
+    // bad palletCode with a generic "invalid payload", so without naming the
+    // cause an operator sees only cartons vanishing into dead letters — which is
+    // exactly how the last attempt at the short format was diagnosed the hard
+    // way. Only fires while the short format is selected, so it can never
+    // mislead about an unrelated 400.
+    if (this.palletCodeFormat === 'short' && /palletCode/i.test(String(reason))) {
+      this.log(
+        `Nexus is rejecting the short pallet code "${entry.event?.palletCode}". ` +
+          'Set PALLET_CODE_FORMAT=long and restart — every carton is being dead-lettered until you do.',
+        'error'
+      );
+    }
   }
 
   /**
