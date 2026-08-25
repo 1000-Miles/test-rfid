@@ -90,6 +90,14 @@ WantedBy=multi-user.target
 sudo systemctl enable --now rfid-bridge
 ```
 
+Or install the same restart-on-crash service from this checkout and verify its
+local health endpoint in one command:
+
+```bash
+chmod +x scripts/install-systemd.sh
+sudo scripts/install-systemd.sh
+```
+
 The sidecar is a child process of the bridge — it lives and dies with the
 service; no separate unit needed.
 
