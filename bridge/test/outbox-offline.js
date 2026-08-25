@@ -47,6 +47,7 @@ async function main() {
     o = makeOutbox(); // "restart"
     assert(o.pending.length === 1, 'offline enqueue survives restart');
     assert(o.pending[0].event.eventId === 'test-gate:g1:1', 'eventId in the restored entry is byte-identical');
+    assert(o.status().lastAccepted?.eventId === 'test-gate:g1:1' && o.status().lastAccepted?.pending === true, 'restart reports the last durably accepted event');
     assert(o.pending[0].event.gateId === 'test-gate' && o.pending[0].event.seq === 1, 'gateId and seq persisted');
     const r2 = o.enqueue({ epc: 'AA02', direction: 'out', timestamp: '2026-08-19T00:01:00.000Z' });
     assert(r2.eventId === 'test-gate:g1:2', 'seq continues after restart, no reuse');

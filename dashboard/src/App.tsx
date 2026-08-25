@@ -144,6 +144,7 @@ export default function App() {
     <>
       <DeliveryAlarm movement={bridge.movement} />
       <GateBoard board={board} entries={bridge.entries} sound={sound} onOpenControls={() => setControlsOpen(true)} />
+      <LastSaved movement={bridge.movement} />
       <ControlDrawer
         open={controlsOpen}
         onClose={() => setControlsOpen(false)}
@@ -155,6 +156,21 @@ export default function App() {
         onOpenPrinting={() => navigate(ROUTES.printing)}
       />
     </>
+  );
+}
+
+function LastSaved({ movement }: { movement: ReturnType<typeof useBridge>['movement'] }) {
+  const saved = movement?.lastAccepted;
+  if (!saved) return null;
+  const time = new Date(saved.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const identity = saved.palletCode ? `Pallet ${saved.palletCode}` : saved.epc ? `EPC ${saved.epc}` : 'Movement';
+  const state = saved.unexpected ? 'SET ASIDE — NOT CREDITED' : saved.pending ? 'SAVED LOCALLY — NEXUS PENDING' : 'SAVED — NEXUS DELIVERED';
+  return (
+    <div role="status" style={{ position: 'fixed', zIndex: 9000, right: 18, bottom: 18, maxWidth: 620, borderRadius: 12, border: '1px solid #cbd5e1', background: '#fff', padding: '10px 14px', boxShadow: '0 6px 24px rgba(15,23,42,.14)', fontSize: 13, fontWeight: 700 }}>
+      <span style={{ color: '#64748b', marginRight: 8 }}>LAST SAVED</span>
+      {identity} · {time} · <span style={{ color: saved.unexpected ? '#b91c1c' : saved.pending ? '#b45309' : '#047857' }}>{state}</span>
+      {saved.eventId && <span title={saved.eventId} style={{ display: 'block', marginTop: 3, color: '#94a3b8', fontFamily: 'monospace', fontSize: 10 }}>{saved.eventId}</span>}
+    </div>
   );
 }
 

@@ -56,10 +56,15 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const [physicalCount, setPhysicalCount] = useState('');
   const [testing, setTesting] = useState(false);
   const [testNotice, setTestNotice] = useState<Notice>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [printerCfg, setPrinterCfg] = useState<PalletPrinterInfo | null>(null);
+
+  useEffect(() => {
+    setPhysicalCount('');
+  }, [workflow?.requestId]);
   const [cfgError, setCfgError] = useState<string | null>(null);
   const [photos, setPhotos] = useState<Record<string, ProductArt>>({});
 
@@ -218,6 +223,15 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
 
   const closeAndPrint = async () => {
     if (!workflow || workflow.type !== 'pallet-open') return;
+    const checked = Math.floor(Number(physicalCount));
+    if (!Number.isFinite(checked) || checked < 1) {
+      setNotice({ kind: 'error', text: 'Count the physical cartons and enter the total before confirming.' });
+      return;
+    }
+    if (checked !== workflow.cartonCount) {
+      setNotice({ kind: 'error', text: `Count mismatch: ${checked} physical, ${workflow.cartonCount} read by RFID. Keep receiving: re-run the pallet slowly or use Manual Receive for the missing cartons.` });
+      return;
+    }
     setPrinting(true);
     setNotice(null);
     try {
@@ -347,8 +361,8 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
                       {workflow.batchRef ? `Batch ${workflow.batchRef}` : 'Batch not assigned yet'}
                     </div>
                   </div>
-                  <button disabled={printing} onClick={() => void (workflow.type === 'pallet-open' ? closeAndPrint() : printCurrent())} className="min-h-16 w-full rounded-xl border border-[#008A9C] bg-[#00BCD4] px-8 py-4 text-lg font-extrabold text-white shadow-sm hover:bg-[#008A9C] disabled:cursor-wait disabled:opacity-60 md:w-auto">
-                    {printing ? 'Working…' : workflow.type === 'pallet-open' ? 'Confirm and print' : workflow.type === 'pallet-print' ? (workflow.ok === false ? 'Retry print' : 'Print again') : 'Print label'}
+                  <button disabled={printing || (workflow.type === 'pallet-open' && Number(physicalCount) !== workflow.cartonCount)} onClick={() => void (workflow.type === 'pallet-open' ? closeAndPrint() : printCurrent())} className="min-h-16 w-full rounded-xl border border-[#008A9C] bg-[#00BCD4] px-8 py-4 text-lg font-extrabold text-white shadow-sm hover:bg-[#008A9C] disabled:cursor-not-allowed disabled:opacity-60 md:w-auto">
+                    {printing ? 'Working…' : workflow.type === 'pallet-open' ? (Number(physicalCount) === workflow.cartonCount ? 'Confirm and print' : 'Verify carton count') : workflow.type === 'pallet-print' ? (workflow.ok === false ? 'Retry print' : 'Print again') : 'Print label'}
                   </button>
                 </div>
                 {/* No Location tile: the pallet has not been put away when this
@@ -358,6 +372,15 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
                   <Metric label="Cartons" value={String(workflow.cartonCount)} />
                   <Metric label={workflow.type === 'pallet-open' ? 'Auto close' : 'Nexus'} value={workflow.type === 'pallet-open' ? `${secondsLeft ?? 0}s` : synced ? 'Synced' : workflow.queued ? 'Queued' : 'Sending'} />
                 </div>
+                {workflow.type === 'pallet-open' && (
+                  <label className="mt-4 block rounded-xl border border-[#d97706]/40 bg-[#fffbeb] p-4">
+                    <span className="block text-sm font-extrabold text-[#92400e]">PHYSICAL CARTONS ON THIS PALLET</span>
+                    <span className="mt-1 block text-sm font-medium text-[#737373]">Count by eye. The number must match RFID before confirmation.</span>
+                    <input value={physicalCount} onChange={(e) => setPhysicalCount(e.target.value.replace(/[^0-9]/g, ''))} inputMode="numeric" placeholder="Enter physical count" className="mt-3 min-h-12 w-full rounded-lg border border-[#d97706] bg-white px-4 text-lg font-extrabold outline-none focus:ring-2 focus:ring-[#f59e0b]" />
+                    {physicalCount && Number(physicalCount) !== workflow.cartonCount && <span className="mt-2 block font-bold text-[#b41c1e]">Mismatch: RFID read {workflow.cartonCount}. Re-run slowly or manually receive the missing cartons; warehouse work continues.</span>}
+                    {Number(physicalCount) === workflow.cartonCount && <span className="mt-2 block font-bold text-[#15803d]">Count verified.</span>}
+                  </label>
+                )}
                 <ProductLines products={workflow.products} cartonCount={workflow.cartonCount} photos={photos} />
               </div>
             ) : (

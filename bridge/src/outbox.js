@@ -145,6 +145,7 @@ class Outbox extends EventEmitter {
     this._tornRecovered = 0;
     this._journalCorrupt = false;
     this._enqueueFailures = 0;
+    this._lastAccepted = null;
     this._lastEnqueueError = null;
     this._passageRequestIds = new Map();
     this._passagePalletCodes = new Map();
@@ -394,6 +395,7 @@ class Outbox extends EventEmitter {
     this._passagePalletCodes.clear();
     this._readyEmitted.clear();
     this._openPallet = null;
+    this._lastAccepted = null;
     this.log(`local state wiped: ${removed.join(', ') || 'nothing on disk'}; queue, cursor and pallet numbering reset`);
     return { removed, queueDepth: 0, cursor: 0, nextSeq: 1 };
   }
@@ -419,6 +421,7 @@ class Outbox extends EventEmitter {
       for (const entry of readJsonl(file)) {
         if (!Number.isFinite(entry.seq)) continue;
         if (entry.seq > maxSeq) maxSeq = entry.seq;
+        if (!this._lastAccepted || entry.seq > this._lastAccepted.seq) this._lastAccepted = entry;
         // Same rule as enqueue: contested passages are history, never traffic.
         // Skipping them here is also the repair path for a queue already jammed
         // by ones journaled before this rule existed.
@@ -511,6 +514,7 @@ class Outbox extends EventEmitter {
       throw err;
     }
     this.nextSeq = seq + 1;
+    this._lastAccepted = entry;
     // JOURNALED BUT NOT QUEUED. A contested passage is a local record, not
     // something Nexus is willing to take: the batch endpoint answers a passage
     // it cannot resolve with `503 passage resolved to 0 receiving batches`,
@@ -1019,6 +1023,16 @@ class Outbox extends EventEmitter {
       deadLetters: this.deadCount,
       lastPushAt: this.lastPushAt,
       lastError: this.lastError,
+      lastAccepted: this._lastAccepted ? {
+        eventId: this._lastAccepted.event?.eventId ?? null,
+        at: this._lastAccepted.at,
+        direction: this._lastAccepted.event?.direction ?? null,
+        epc: this._lastAccepted.event?.epc ?? null,
+        palletCode: this._lastAccepted.event?.palletCode ?? null,
+        passageId: this._lastAccepted.event?.passageId ?? null,
+        unexpected: this._lastAccepted.event?.unexpected ?? null,
+        pending: this.pending.some((entry) => entry.event?.eventId === this._lastAccepted.event?.eventId),
+      } : null,
       openPallet: this.openPallet(),
       togglePalletWindowMs: this.togglePalletWindowMs,
       // Journal health — the operational-visibility block. `healthy: false`

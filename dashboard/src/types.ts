@@ -59,6 +59,16 @@ export interface MovementStatus {
   oldestPendingAt: string | null;
   deadLetters: number;
   lastError: string | null;
+  lastAccepted: {
+    eventId: string | null;
+    at: string;
+    direction: 'in' | 'out' | null;
+    epc: string | null;
+    palletCode: string | null;
+    passageId: string | number | null;
+    unexpected: string | null;
+    pending: boolean;
+  } | null;
   journal: {
     healthy: boolean;
     corrupt: boolean;
