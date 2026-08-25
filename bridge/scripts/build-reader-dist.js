@@ -83,7 +83,7 @@ const SRC_FILES = collectSources(ENTRY);
 // UHFAPI.dll + the libusb it links against. Nothing else in lib/ is needed.
 const LIB_FILES = ['UHFAPI.dll', 'libusb-1.0.dll'];
 
-// Runtime deps only. Note msedge-tts (TTS) is deliberately not here.
+// Runtime deps only.
 const DEPS = { dotenv: '^16.4.7', express: '^4.21.2', koffi: '^2.10.0', ws: '^8.18.0' };
 
 // koffi ships prebuilds for every platform it supports; a Windows staff PC

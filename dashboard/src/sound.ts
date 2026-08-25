@@ -1,15 +1,17 @@
 /**
- * Alert tones, synthesized in the browser.
+ * Alert tones, synthesized in the browser. The board's only sound.
  *
- * Speech is the nice-to-have; THIS is the part that has to work. The gate's
- * display is a smart TV running TVBro, which is built on Android WebView — and
- * WebView ships no speech synthesis at all, so `speechSynthesis.speak()` there
- * is silence with no error. Web Audio it does have.
+ * There used to be a spoken readout on top of this — synthesised on the bridge
+ * and fetched as an MP3, because the gate's display is a smart TV running
+ * TVBro (Android WebView), which ships no speech engine and so made
+ * `speechSynthesis.speak()` silence with no error. That whole path is gone: the
+ * tone was always the part that did the work, and speech had been switched off
+ * in the board for long enough to prove the tone was enough on its own.
  *
- * A tone is also the better alert on its own merits here: it carries across a
+ * A tone is the better alert on its merits here anyway: it carries across a
  * noisy warehouse, it is recognised faster than a sentence, and it means the
- * same thing to English- and Mandarin-speaking staff. The spoken line still
- * plays on top wherever speech works, for the detail.
+ * same thing to English- and Mandarin-speaking staff — no announcement wording
+ * to translate and nothing that has to reach a synth service to be heard.
  *
  * No audio files: an oscillator needs no asset to fetch, no format negotiation,
  * and no decode — one less thing to fail on an unattended panel.
@@ -71,31 +73,6 @@ function tone(a: AudioContext, freq: number, start: number, dur: number, gain: n
  * `ok` — a normal counted carton: one short soft blip, easy to hear a hundred
  * times a shift without wearing anyone down.
  */
-/**
- * Decode and play one audio clip (the bridge's TTS MP3s) through the same
- * AudioContext the chimes use — so the one remote-button unlock covers speech
- * too. Resolves when playback finishes, which is what lets the caller queue
- * English-then-Mandarin without timers. Rejects if this browser has no Web
- * Audio or the data does not decode.
- */
-export async function playClip(data: ArrayBuffer): Promise<void> {
-  const a = audio();
-  if (!a) throw new Error('no Web Audio');
-  if (a.state === 'suspended') void a.resume(); // best effort; may be refused
-  // Callback form, not the promise form: old WebView/Chromium builds (the TV)
-  // implement only the original callback signature.
-  const buf = await new Promise<AudioBuffer>((resolve, reject) => {
-    a.decodeAudioData(data, resolve, (e) => reject(e || new Error('decodeAudioData failed')));
-  });
-  await new Promise<void>((resolve) => {
-    const src = a.createBufferSource();
-    src.buffer = buf;
-    src.connect(a.destination);
-    src.onended = () => resolve();
-    src.start();
-  });
-}
-
 export function chime(kind: 'ok' | 'alert') {
   const a = audio();
   if (!a) return;

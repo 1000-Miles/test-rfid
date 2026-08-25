@@ -151,9 +151,14 @@ const nexus = new PassageDetector({
   // "Is any live receiving batch waiting for this product?" — answered by the
   // board feed, which already holds exactly that list. Deliberately a closure
   // over `board` (declared below) rather than a value: it must answer with the
-  // board as it is at PASSAGE time, not as it was at boot. Only ever called
-  // from a movement decision, long after `board` is initialised.
-  expectsInbound: (sku) => board.expectsInbound(sku),
+  // board as it is at READ time, not as it was at boot. Only ever called from a
+  // receiving decision, long after `board` is initialised.
+  receivableSku: (sku) => board.receivableSku(sku),
+  // Shipping stays off until Nexus can name the cartons on an open shipment.
+  // Env-gated rather than hardcoded so the day that feed exists this is a config
+  // change — but it defaults OFF, and turning it on without that feed would put
+  // guessed dispatches back in the journal.
+  allowShipping: /^(1|true|yes|on)$/i.test(process.env.GATE_ALLOW_SHIPPING || ''),
 });
 
 // --- Outbox (durable push to Nexus POST /api/movement) -------------------------
@@ -585,19 +590,28 @@ app.get('/printer/queues', async (_req, res) => {
   }
 });
 
-// --- Text-to-speech for the gate board -------------------------------------------
-// TV browsers (Android WebView and friends) have no speechSynthesis, so the
-// board fetches its announcement audio from here instead. Cached on disk, so
-// repeat phrases work even when the synth service is unreachable.
-const { handleTtsRequest } = require('./tts');
-app.get('/tts', (req, res) => handleTtsRequest(req, res, (text, level) => controller.log(text, level)));
-
 // Client-side error reports from the board. The wallboard TV has no devtools,
-// so this log line is the only visibility into why IT went silent — the
-// dashboard posts here whenever speech fails on the display device.
+// so this log line is the only visibility into a fault that happens on the
+// display device itself — the dashboard's error boundary posts here when a
+// render throws, which would otherwise be a black screen and nothing else.
+//
+// Also appended to bridge/data/client-errors.log. The console line alone is
+// only readable by someone standing at the bridge terminal at the moment a
+// tablet somewhere else in the building fails — and the bridge is usually
+// running detached, so in practice that is nobody. A file can be read after
+// the fact, which is the only way a "it went black on the iPad" report ever
+// turns into a cause.
+const CLIENT_LOG_PATH = require('path').join(__dirname, '..', 'data', 'client-errors.log');
 app.post('/client-log', (req, res) => {
   const { source = 'client', stage = '?', message = '', ua = '' } = req.body || {};
-  controller.log(`[${source}] ${stage}: ${String(message).slice(0, 300)} (ua: ${String(ua).slice(0, 120)})`, 'warn');
+  const line = `[${source}] ${stage}: ${String(message).slice(0, 300)} (ua: ${String(ua).slice(0, 120)})`;
+  controller.log(line, 'warn');
+  try {
+    require('fs').appendFileSync(CLIENT_LOG_PATH, `[${new Date().toISOString()}] ${line}\n`);
+  } catch (err) {
+    // Diagnostics must never become their own failure — a full or read-only
+    // disk must not turn a client error report into a 500.
+  }
   res.json({ ok: true });
 });
 
@@ -1243,25 +1257,33 @@ server.listen(PORT, () => {
   reportClockOffset();
   outbox.start();
   outbox.emitPendingBatches();
-  board.start(); // warm the document cache so the first kiosk paint is instant
+  // The document cache is warmed below, before the reader starts — see the
+  // awaited block at the end of boot.
 
   // ...and keep it warm on the BRIDGE's own clock. Until now the board only
   // refreshed inside get(), i.e. only when a kiosk asked for it — fine while the
   // cache was just something to paint, but the gate now uses it to decide
-  // whether an arriving carton has an open receiving batch (expectsInbound).
+  // whether an arriving carton has an open receiving batch (receivableSku).
   // Hanging a safety check off "is a browser open somewhere" is wrong: on a
   // TV-only doorway nothing calls /board/documents at all, the board would age
   // past expectMaxAgeMs, and the check would quietly go back to passing
   // everything. This interval is what makes the verdict independent of the
   // screens.
+  // Reset marker: the gate asking Nexus, every few seconds, whether a receiving
+  // reset has happened. Unconfigured leaves the minute-late figure check as the
+  // only detector, so say so rather than letting it look wired up.
+  if (RESET_POLL_URL) {
+    controller.log(`Reset marker: polling ${RESET_POLL_URL} every ${RESET_POLL_MS}ms.`);
+    void pollResetMarker(); // take the baseline now, not one interval from now
+    setInterval(() => void pollResetMarker(), RESET_POLL_MS).unref();
+  } else {
+    controller.log('Reset marker: NEXUS_RESET_URL unset — resets are only noticed by the slower figure check.');
+  }
+
   const BOARD_REFRESH_MS = Number(process.env.BOARD_REFRESH_MS || 60_000);
   if (BOARD_REFRESH_MS > 0) {
     setInterval(() => void board.load(), BOARD_REFRESH_MS).unref();
   }
-
-  // Refresh the catalog from the live tag registry (falls back to the cached
-  // data/catalog.json already loaded by the constructor).
-  nexus.loadCatalogRemote();
 
   // ...and keep refreshing it. This used to be a boot-only load, which was fine
   // while the catalog was just EPC -> product name: a tag printed after boot
@@ -1280,11 +1302,28 @@ server.listen(PORT, () => {
   if (CATALOG_REFRESH_MS > 0) {
     setInterval(() => void nexus.loadCatalogRemote(), CATALOG_REFRESH_MS).unref();
   }
-  try {
-    controller.start();
-  } catch (err) {
-    controller.log(`Failed to start controller: ${err.message}`, 'error');
-  }
+  // The reader starts LAST, and only once the gate knows what it is allowed to
+  // receive.
+  //
+  // Both loads are what the receiving rule reads: the board says which products
+  // an open batch is waiting for, the catalog says which EPC is which carton and
+  // which have already been taken in. A read arriving before either lands can
+  // only be ignored ('unknown-tag' or 'no-batch-data'), and the absence gate
+  // then holds that tag for absenceMs — so a carton crossing in the first
+  // seconds of boot would be missed outright, silently. Waiting a beat is much
+  // cheaper than that.
+  //
+  // Neither load can hang the doorway: each falls back to its own disk cache and
+  // each carries its own request timeout, and allSettled means a failure starts
+  // the reader anyway rather than leaving a gate that never opens.
+  void (async () => {
+    await Promise.allSettled([board.load(), nexus.loadCatalogRemote()]);
+    try {
+      controller.start();
+    } catch (err) {
+      controller.log(`Failed to start controller: ${err.message}`, 'error');
+    }
+  })();
 });
 
 process.on('SIGINT', async () => {

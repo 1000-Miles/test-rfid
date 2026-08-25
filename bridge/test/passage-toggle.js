@@ -1,12 +1,20 @@
 'use strict';
 
 /**
- * Logic test for the NO-IR ("toggle") detection mode in src/passage.js.
- * No hardware needed: feeds synthetic reads and asserts on the movement
- * events. Run with:  node test/passage-toggle.js
+ * Logic test for the RECEIVING RULE in src/passage.js — the decision this gate
+ * actually makes now that there are no IR beams and no direction inference.
+ * No hardware needed: feeds synthetic reads and asserts on what comes out.
+ * Run with:  node test/passage-toggle.js
  *
  * Timings are shrunk (quiet 100ms, re-arm 400ms, absence 300ms) so the whole
  * suite runs in a few seconds; the ratios mirror the real defaults.
+ *
+ * What this file replaced: the old suite pinned down first-pass-in /
+ * next-pass-out direction inference, all of which has been deleted. It is worth
+ * knowing what those tests were protecting, because the new rule has to be at
+ * least as careful: a carton must still survive a restart, a receiving reset
+ * must still let it back in, and a tag parked in the read zone must still not
+ * fire twice. Those cases are all here — they just have different answers.
  */
 
 const { PassageDetector } = require('../src/passage');
@@ -23,7 +31,13 @@ function assert(cond, label) {
   }
 }
 
+/**
+ * @param opts.receivable  SKUs the board is currently waiting for. `null` stands
+ *                         for "no board data at all", which is a distinct case
+ *                         from "the board says no".
+ */
 function makeDetector(opts = {}) {
+  const { receivable = ['A-1'], boardSource = 'live', ...rest } = opts;
   const d = new PassageDetector({
     dedupMs: 100,
     quietMs: 100,
@@ -31,14 +45,31 @@ function makeDetector(opts = {}) {
     toggleDedupMs: 400,
     absenceMs: 300,
     toggleMinReads: 2,
-    ...opts,
+    detectMode: 'toggle',
+    receivableSku: receivable === null ? undefined : (sku) => ({ ok: receivable.includes(sku), source: boardSource }),
+    ...rest,
   });
   d.catalog = {}; // ignore whatever data/catalog.json holds on this machine
   const events = [];
+  const dropped = [];
   d.on('movement', (e) => events.push(e));
+  d.on('dropped', (e) => dropped.push(e));
   d.on('log', () => {}); // keep the console readable
-  return { d, events };
+  return { d, events, dropped };
 }
+
+/** A printed carton label with no warehouse record — never taken in. */
+const fresh = (sku = 'A-1', box = 'BOX-0001') => ({
+  kind: 'carton', sku, name: sku, pallet: box, category: 'printed',
+});
+/** The same label once Nexus has a warehouse_carton row for it. */
+const received = (sku = 'A-1', box = 'BOX-0001', state = 'received') => ({
+  ...fresh(sku, box), state, receivedAt: '2026-08-18T00:00:00Z', carton: `RB-2026-0005-${box}`,
+});
+
+/** How many reads reached a decision — a read suppressed by a gate never does. */
+const decisions = (d, events) => [...d._ignored.values()].reduce((a, b) => a + b, 0) + events.length;
+const why = (d) => Object.fromEntries(d._ignored);
 
 const read = (d, epc, extra = {}) => d.tagSeen({ epc, antenna: 1, rssi: -55, ...extra });
 const burst = async (d, epc, n = 3, extra = {}) => {
@@ -49,230 +80,252 @@ const burst = async (d, epc, n = 3, extra = {}) => {
 };
 
 async function main() {
-  console.log('IR mode: direction-less reads stay strays');
+  console.log('the rule: a carton on an open batch, never received, is RECEIVED');
   {
-    const { d, events } = makeDetector(); // detectMode defaults to 'ir'
+    const { d, events } = makeDetector();
+    d.catalog = { AA01: fresh() };
     await burst(d, 'AA01');
     await sleep(250);
-    assert(events.length === 0, 'no event without an IR direction');
+    assert(events.length === 1, 'one event');
+    assert(events[0]?.direction === 'in' && events[0]?.type === 'entry', 'it is a receipt');
+    assert(events[0]?.basis === 'on-open-batch', 'basis names the reason');
+    assert(events[0]?.unexpected === null, 'nothing questionable is ever emitted');
   }
 
-  console.log('toggle mode: first visit = IN, method/basis stamped');
+  console.log('the rule: an unknown tag is ignored completely');
   {
-    const { d, events } = makeDetector({ detectMode: 'toggle' });
+    const { d, events } = makeDetector();
+    await burst(d, 'ZZ99'); // not in the catalog at all
+    await sleep(250);
+    assert(events.length === 0, 'no event');
+    assert(why(d)['unknown-tag'] === 1, 'counted as unknown-tag');
+  }
+
+  console.log('the rule: a product on no open batch is ignored');
+  {
+    const { d, events } = makeDetector({ receivable: ['SOMETHING-ELSE'] });
+    d.catalog = { AA02: fresh() };
     await burst(d, 'AA02');
     await sleep(250);
-    assert(events.length === 1, 'one event per visit');
-    assert(events[0]?.direction === 'in', 'first pass is IN');
-    assert(events[0]?.method === 'toggle', "method is 'toggle'");
-    assert(events[0]?.basis === 'default-first-seen', 'basis is default-first-seen');
+    assert(events.length === 0, 'no event');
+    assert(why(d)['not-on-open-batch'] === 1, 'counted as not-on-open-batch');
   }
 
-  console.log('toggle mode: re-arm window suppresses an immediate second visit');
+  console.log('the rule: a carton Nexus already has is ignored');
   {
-    const { d, events } = makeDetector({ detectMode: 'toggle' });
+    const { d, events } = makeDetector();
+    d.catalog = { AA03: received(), AA04: received('A-1', 'BOX-0002', 'shipped') };
     await burst(d, 'AA03');
-    await sleep(250); // event fired
-    await burst(d, 'AA03'); // still inside the 400ms re-arm
-    await sleep(250);
-    assert(events.length === 1, 'second burst inside re-arm did not fire');
+    await burst(d, 'AA04');
+    await sleep(300);
+    assert(events.length === 0, 'neither fires');
+    assert(why(d)['already-received-nexus'] === 2, 'received AND shipped both count as taken in');
   }
 
-  console.log('toggle mode: after re-arm + absence, the flip fires OUT (local-flip)');
+  console.log("the rule: Nexus's row is the whole answer — no code-shape second-guessing");
   {
-    const { d, events } = makeDetector({ detectMode: 'toggle' });
-    await burst(d, 'AA04');
-    await sleep(250);
-    await sleep(500); // clears both the 400ms re-arm and the 300ms absence
-    await burst(d, 'AA04');
-    await sleep(250);
-    assert(events.length === 2, 'second visit fired');
-    assert(events[1]?.direction === 'out', 'second pass is OUT');
-    assert(events[1]?.basis === 'local-flip', 'basis is local-flip');
-  }
-
-  console.log('toggle mode: lingering tag does not flip-flop (absence gate)');
-  {
-    const { d, events } = makeDetector({ detectMode: 'toggle' });
+    // Labels are never re-used in this warehouse: one label, one carton, for its
+    // whole life. So a warehouse_carton row for this tag can only be THIS
+    // carton's, and the row existing is the entire answer.
+    //
+    // This replaces a suffix check that compared the carton code against the
+    // label's box id to spot a tag on its second life. With no re-use it
+    // guarded nothing, while any quirk in Nexus's own code formatting would read
+    // as "not received" and take an already-received carton in a second time —
+    // the expensive direction to be wrong in, given a carton row is inserted per
+    // passage. A mismatched code must still count as received.
+    const { d, events } = makeDetector();
+    d.catalog = { AA05: { ...received('A-1', 'BOX-0009'), pallet: 'BOX-0010' } };
     await burst(d, 'AA05');
-    await sleep(250); // event fired at ~t370
-    // keep the tag "parked in the field": a read every 100ms for 1.2s, well
-    // past the 400ms re-arm — the absence gate must hold.
+    await sleep(250);
+    assert(events.length === 0, 'a mismatched carton code is still already-received');
+    assert(why(d)['already-received-nexus'] === 1, 'and it is counted as such');
+  }
+
+  console.log('the rule: a pallet tag is not a carton and is ignored');
+  {
+    const { d, events } = makeDetector({ receivable: ['PALLET-G1-001'] });
+    d.catalog = { BA01: { kind: 'pallet', sku: 'PALLET-G1-001', name: 'PALLET-G1-001', pallet: 'PALLET-G1-001', category: null } };
+    await burst(d, 'BA01');
+    await sleep(250);
+    assert(events.length === 0 && why(d)['not-a-carton'] === 1, 'pallets have their own lifecycle');
+  }
+
+  console.log('shipping is off: an observed OUTBOUND read is ignored, never dispatched');
+  {
+    const { d, events } = makeDetector();
+    d.catalog = { CC01: received() };
+    read(d, 'CC01', { direction: 'out', passageId: 77 });
+    await sleep(50);
+    assert(events.length === 0, 'no exit event exists');
+    assert(why(d)['shipping-disabled'] === 1, 'counted as shipping-disabled');
+  }
+
+  console.log('the rule: the same carton is never received twice');
+  {
+    const { d, events } = makeDetector();
+    d.catalog = { AA06: fresh() };
+    await burst(d, 'AA06');
+    await sleep(250);
+    assert(events.length === 1, 'received once');
+    await sleep(500); // clear BOTH the re-arm and the absence gate
+    await burst(d, 'AA06'); // carried back through the doorway
+    await sleep(250);
+    assert(events.length === 1, 'a second pass produces nothing at all');
+    assert(why(d)['already-received-here'] === 1, 'local memory, not Nexus, caught it');
+  }
+
+  console.log('no batch data: ignored, but re-armed SHORT so it retries');
+  {
+    // A bridge that has just booted, or a board mid-load. Waiting the full
+    // re-arm here would silently drop cartons for a minute apiece.
+    // Real re-arm window here, not the shrunk one: the retry is a fixed 5s off
+    // the END of the window, so a 400ms test window has nothing to shorten.
+    const { d, events } = makeDetector({ receivable: null, toggleDedupMs: 60_000 });
+    d.catalog = { AA07: fresh() };
+    await burst(d, 'AA07');
+    await sleep(250);
+    assert(events.length === 0 && why(d)['no-batch-data'] === 1, 'nothing received without paperwork');
+    const remaining = d.toggleDedupMs - (Date.now() - d._lastEventAt.get('AA07'));
+    assert(remaining > 3_000 && remaining <= 5_000, `retries in ~5s, not 60s (got ${Math.round(remaining / 1000)}s)`);
+  }
+
+  console.log('a receipt decided on the CACHED board says so');
+  {
+    const { d, events } = makeDetector({ boardSource: 'cache' });
+    d.catalog = { AA08: fresh() };
+    await burst(d, 'AA08');
+    await sleep(250);
+    assert(events[0]?.basis === 'on-open-batch-cached', 'offline receipt is marked as such');
+  }
+
+  console.log('read grouping: re-arm window suppresses an immediate second visit');
+  {
+    const { d, events } = makeDetector({ receivable: [] }); // ignored either way
+    d.catalog = { AA09: fresh() };
+    await burst(d, 'AA09');
+    await sleep(250);
+    await burst(d, 'AA09'); // still inside the 400ms re-arm
+    await sleep(250);
+    assert(decisions(d, events) === 1, 'the second burst never reached a decision');
+  }
+
+  console.log('read grouping: a lingering tag does not re-decide (absence gate)');
+  {
+    const { d, events } = makeDetector({ receivable: [] });
+    d.catalog = { AA10: fresh() };
+    await burst(d, 'AA10');
+    await sleep(250);
+    // Parked in the field: a read every 100ms for 1.2s, well past the re-arm.
     for (let i = 0; i < 12; i++) {
-      read(d, 'AA05');
+      read(d, 'AA10');
       await sleep(100);
     }
     await sleep(250);
-    assert(events.length === 1, 'parked tag fired exactly once');
+    assert(decisions(d, events) === 1, 'parked tag decided exactly once');
   }
 
-  console.log('toggle mode: single ghost read is dropped as noise');
+  console.log('read grouping: a single ghost read is dropped as noise');
   {
-    const { d, events } = makeDetector({ detectMode: 'toggle' });
-    read(d, 'AA06');
+    const { d, events, dropped } = makeDetector();
+    d.catalog = { AA11: fresh() };
+    read(d, 'AA11');
     await sleep(250);
     assert(events.length === 0, '1 read < toggleMinReads never fires');
+    assert(dropped.length === 1, 'and the drop is reported, not silent');
   }
 
-  console.log('toggle mode: RSSI floor ignores weak reads entirely');
+  console.log('read grouping: the RSSI floor ignores weak reads entirely');
   {
-    const { d, events } = makeDetector({ detectMode: 'toggle', minRssi: -65 });
-    await burst(d, 'AA07', 3, { rssi: -80 });
+    const { d, events } = makeDetector({ minRssi: -65 });
+    d.catalog = { AA12: fresh() };
+    await burst(d, 'AA12', 3, { rssi: -80 });
     await sleep(250);
-    assert(events.length === 0, 'below-floor reads never fire');
-    await burst(d, 'AA07', 3, { rssi: -50 });
+    assert(events.length === 0 && decisions(d, events) === 0, 'below-floor reads never reach a decision');
+    await burst(d, 'AA12', 3, { rssi: -50 });
     await sleep(250);
-    assert(events.length === 1 && events[0]?.direction === 'in', 'strong reads fire normally right after');
+    assert(events.length === 1 && events[0]?.direction === 'in', 'strong reads receive normally right after');
   }
 
-  console.log('toggle mode: direction anchors to Nexus carton state');
+  console.log('restart: a carton received before the restart is not received again');
   {
-    const { d, events } = makeDetector({ detectMode: 'toggle' });
-    d.catalog = {
-      BB01: { kind: 'carton', sku: 'A-1', name: 'in building', pallet: null, category: null, state: 'received', receivedAt: '2026-08-18T00:00:00Z' },
-      BB02: { kind: 'carton', sku: 'A-2', name: 'never received', pallet: null, category: null },
-      BB03: { kind: 'carton', sku: 'A-3', name: 'already shipped', pallet: null, category: null, state: 'shipped', receivedAt: '2026-08-01T00:00:00Z' },
-    };
-    d._cartonStateAt = Date.now(); // state is fresh
-    await burst(d, 'BB01');
-    await burst(d, 'BB02');
-    await burst(d, 'BB03');
-    await sleep(300);
-    const by = (epc) => events.find((e) => e.epc === epc);
-    assert(by('BB01')?.direction === 'out' && by('BB01')?.basis === 'state-in-building', 'received carton -> OUT (state-in-building)');
-    assert(by('BB02')?.direction === 'in' && by('BB02')?.basis === 'state-never-received', 'never-received carton -> IN');
-    assert(by('BB03')?.direction === 'in' && by('BB03')?.basis === 'state-shipped-return', 'shipped carton -> IN (return)');
-  }
-
-  console.log('toggle mode: an IR-stamped read still wins as ground truth');
-  {
-    const { d, events } = makeDetector({ detectMode: 'toggle' });
-    read(d, 'CC01', { direction: 'out', passageId: 77 });
-    await sleep(50);
-    assert(events.length === 1 && events[0]?.direction === 'out' && events[0]?.method === 'ir', 'observed direction fires immediately, method ir');
-  }
-
-  console.log('hydrate: journal memory survives a "restart"');
-  {
-    const { d, events } = makeDetector({ detectMode: 'toggle' });
+    const { d, events } = makeDetector();
     const old = new Date(Date.now() - 60_000).toISOString();
+    d.catalog = { DD01: fresh() }; // Nexus has not caught up yet — the journal is the only witness
     d.hydrate([
-      { seq: 1, at: old, event: { epc: 'DD01', direction: 'in', timestamp: old, known: false, item: { sku: 'X', name: 'x', pallet: null, category: null } } },
+      { seq: 1, at: old, event: { epc: 'DD01', direction: 'in', timestamp: old, known: true, item: fresh() } },
     ]);
     await burst(d, 'DD01');
     await sleep(250);
-    assert(events.length === 1 && events[0]?.direction === 'out' && events[0]?.basis === 'local-flip', 'hydrated IN flips to OUT after restart');
+    assert(events.length === 0, 'no second receipt');
+    assert(why(d)['already-received-here'] === 1, 'the journal survived the restart');
   }
 
-  console.log('hydrate: re-arm clock survives a "restart"');
+  console.log('restart: the re-arm clock survives too');
   {
-    const { d, events } = makeDetector({ detectMode: 'toggle' });
+    const { d, events } = makeDetector();
     const justNow = new Date(Date.now() - 100).toISOString();
-    d.hydrate([{ seq: 1, at: justNow, event: { epc: 'DD02', direction: 'in', timestamp: justNow, known: false, item: null } }]);
-    await burst(d, 'DD02'); // still inside the 400ms re-arm restored from the journal
+    d.catalog = { DD02: fresh() };
+    d.hydrate([{ seq: 1, at: justNow, event: { epc: 'DD02', direction: 'in', timestamp: justNow, known: true, item: fresh() } }]);
+    await burst(d, 'DD02'); // inside the 400ms re-arm restored from the journal
     await sleep(250);
-    assert(events.length === 0, 'visit inside the restored re-arm window did not fire');
+    assert(decisions(d, events) === 0, 'the read never reached a decision');
   }
 
-  console.log('toggle mode: stale Nexus state still guides direction (marked, no accusation)');
+  console.log('receiving reset: a withdrawn carton can be received again');
   {
-    const { d, events } = makeDetector({ detectMode: 'toggle' });
-    d.catalog = {
-      EE01: { kind: 'carton', sku: 'S-1', name: 's', pallet: null, category: null, state: 'received', receivedAt: '2026-08-01T00:00:00Z' },
-    };
-    d._cartonStateAt = Date.now() - 31 * 60_000; // older than stateMaxAgeMs (30 min)
-    await burst(d, 'EE01');
-    await sleep(250);
-    assert(events.length === 1 && events[0]?.direction === 'out' && events[0]?.basis === 'state-in-building-stale', 'stale state -> OUT, basis marked -stale');
-    assert(events[0]?.unexpected == null, 'no accusatory flag from stale state');
-  }
-
-  console.log('toggle mode: fresh Nexus record overrides old gate memory');
-  {
-    const { d, events } = makeDetector({ detectMode: 'toggle' });
-    const old = new Date(Date.now() - 10 * 60_000).toISOString();
-    d.hydrate([
-      { seq: 1, at: old, event: { epc: 'FF01', direction: 'in', timestamp: old, known: true, item: { sku: 'S-2', name: 's', pallet: null, category: null } } },
-    ]);
-    d.catalog = {
-      FF01: { kind: 'carton', sku: 'S-2', name: 's', pallet: null, category: null, state: 'shipped', receivedAt: '2026-08-01T00:00:00Z' },
-    };
-    d._cartonStateAt = Date.now(); // decisively newer than the 10-min-old local verdict
-    await burst(d, 'FF01');
-    await sleep(250);
-    assert(
-      events.length === 1 && events[0]?.direction === 'in' && events[0]?.basis === 'state-shipped-return',
-      'fresh shipped state wins over local INSIDE (local flip alone would have said OUT)'
-    );
-  }
-
-  console.log('receiving reset: a withdrawn carton reads as ARRIVING again');
-  {
-    const { d, events } = makeDetector({ detectMode: 'toggle' });
-    // A printed tag with no warehouse record yet — nothing has been received.
-    d.catalog = { RS01: { kind: 'carton', sku: 'R-1', name: 'R-1', pallet: null, category: null } };
+    const { d, events } = makeDetector();
+    d.catalog = { RS01: fresh() };
     d._cartonStateAt = Date.now();
 
-    // It rolls in through the doorway. Nexus records the receipt, and the next
-    // catalog pass brings the warehouse_carton row back with it.
     await burst(d, 'RS01');
     await sleep(250);
-    assert(events.length === 1 && events[0]?.direction === 'in', 'carton arrives (IN)');
-    assert(d.inventory.get('RS01')?.status === 'INSIDE', 'gate holds it INSIDE');
-    const onTheBooks = { RS01: { kind: 'carton', sku: 'R-1', name: 'R-1', pallet: null, category: null, state: 'received', receivedAt: '2026-08-18T00:00:00Z' } };
+    assert(events.length === 1 && events[0]?.direction === 'in', 'carton arrives');
+    assert(d.inventory.get('RS01')?.status === 'INSIDE', 'gate remembers it');
+
+    // Nexus records the receipt; the next catalog pass brings the row with it.
+    const onTheBooks = { RS01: received() };
     d.catalog = onTheBooks;
     d._cartonStateAt = Date.now();
 
-    // The operator resets the batch. Nexus soft-deletes the carton, so the next
-    // pass carries the label entry with no state on it — and that disappearance
-    // is the whole signal the gate gets.
-    const withdrawn = { RS01: { kind: 'carton', sku: 'R-1', name: 'R-1', pallet: null, category: null } };
+    // The operator resets the batch. Nexus soft-deletes the carton, so the row
+    // vanishes — and that disappearance is the whole signal the gate gets.
+    const withdrawn = { RS01: fresh() };
     d._forgetWithdrawn(onTheBooks, withdrawn);
     d.catalog = withdrawn;
     d._cartonStateAt = Date.now();
-    assert(d.inventory.get('RS01')?.status === 'OUTSIDE', 'withdrawal drops the INSIDE claim');
+    assert(d.inventory.get('RS01')?.status === 'OUTSIDE', 'withdrawal drops the local claim');
 
-    // Rolled back through the doorway it must count as arriving, NOT as a
-    // dispatch — which is exactly what the stale local flip would have said.
     await sleep(500); // clear the re-arm and absence gates
     await burst(d, 'RS01');
     await sleep(250);
-    assert(events.length === 2, 'the return passage fired');
-    assert(events[1]?.direction === 'in', 'reset carton arrives again (IN, not a dispatch)');
-    assert(events[1]?.basis === 'state-never-received', 'decided from state, not from the stale local flip');
-    assert(!events[1]?.unexpected, 'not stamped as an unexpected exit');
+    assert(events.length === 2 && events[1]?.direction === 'in', 'the redo is received, not declined');
   }
 
-  console.log('receiving reset: without the withdrawal the return would read as a dispatch');
+  console.log('receiving reset: without the withdrawal the redo would be refused');
   {
-    // The same sequence with the diff NOT applied — pins down what the change is
-    // actually buying, so a regression shows up as this test passing wrongly.
-    const { d, events } = makeDetector({ detectMode: 'toggle' });
-    d.catalog = { RS03: { kind: 'carton', sku: 'R-3', name: 'R-3', pallet: null, category: null } };
-    d._cartonStateAt = Date.now();
+    // The same sequence with the diff NOT applied — pins down what the
+    // withdrawal is buying, so losing it shows up here rather than in a
+    // warehouse wondering why a re-scan took nothing in.
+    const { d, events } = makeDetector();
+    d.catalog = { RS03: fresh('A-1', 'BOX-0003') };
     await burst(d, 'RS03');
     await sleep(250);
-    d.catalog = { RS03: { kind: 'carton', sku: 'R-3', name: 'R-3', pallet: null, category: null, state: 'received', receivedAt: '2026-08-18T00:00:00Z' } };
-    d._cartonStateAt = Date.now();
-
-    // State withdrawn, local claim left standing (the old behaviour).
-    d.catalog = { RS03: { kind: 'carton', sku: 'R-3', name: 'R-3', pallet: null, category: null } };
-    d._cartonStateAt = Date.now();
+    d.catalog = { RS03: fresh('A-1', 'BOX-0003') }; // state withdrawn, local claim left standing
     await sleep(500);
     await burst(d, 'RS03');
     await sleep(250);
-    assert(events[1]?.direction === 'out' && events[1]?.basis === 'local-flip', 'stale local flip alone calls the return a dispatch');
+    assert(events.length === 1 && why(d)['already-received-here'] === 1, 'the stale local claim refuses the redo');
   }
 
   console.log('receiving reset: a failed state fetch must not empty the building');
   {
-    const { d } = makeDetector({ detectMode: 'toggle' });
-    d.catalog = { RS02: { kind: 'carton', sku: 'R-2', name: 'R-2', pallet: null, category: null } };
-    d._cartonStateAt = Date.now();
+    const { d } = makeDetector();
+    d.catalog = { RS02: fresh('A-1', 'BOX-0004') };
     await burst(d, 'RS02');
     await sleep(250);
     assert(d.inventory.get('RS02')?.status === 'INSIDE', 'carton is INSIDE to begin with');
-    const onTheBooks = { RS02: { kind: 'carton', sku: 'R-2', name: 'R-2', pallet: null, category: null, state: 'received', receivedAt: '2026-08-18T00:00:00Z' } };
+    const onTheBooks = { RS02: received('A-1', 'BOX-0004') };
     d.catalog = onTheBooks;
     d._cartonStateAt = Date.now();
 
@@ -281,15 +334,29 @@ async function main() {
     // loadCatalogRemote only runs the diff when the read SUCCEEDED — asserting
     // the guard here keeps the contract visible from the test file.
     const stateOk = false;
-    if (stateOk) d._forgetWithdrawn(onTheBooks, { RS02: { kind: 'carton', sku: 'R-2', name: 'R-2', pallet: null, category: null } });
+    if (stateOk) d._forgetWithdrawn(onTheBooks, { RS02: fresh('A-1', 'BOX-0004') });
     assert(d.inventory.get('RS02')?.status === 'INSIDE', 'a failed state read changes nothing');
   }
+
+  console.log('summary(): every ignore is answerable without reading the logs');
+  {
+    const { d } = makeDetector({ receivable: ['A-1'] });
+    d.catalog = { S1: fresh(), S2: fresh('A-9', 'BOX-9') };
+    await burst(d, 'S1');
+    await burst(d, 'S2');
+    await burst(d, 'S3'); // unknown
+    await sleep(300);
+    const s = d.summary();
+    assert(s.ignored['not-on-open-batch'] === 1 && s.ignored['unknown-tag'] === 1, 'reasons are counted');
+    assert(s.allowShipping === false, 'shipping reads as off');
+  }
+
   console.log('');
   if (failures) {
     console.error(`${failures} assertion(s) FAILED`);
     process.exit(1);
   }
-  console.log('all toggle-mode assertions passed');
+  console.log('all receiving-rule assertions passed');
 }
 
 main().catch((err) => {

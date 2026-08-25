@@ -5,8 +5,9 @@ import { audioSupported, unlockAudio } from './sound';
  * Whether this browser will actually let the board make a noise.
  *
  * Browsers refuse to play audio on a page nobody has interacted with, and the
- * refusal is silent — speak() returns normally and nothing comes out. On a
- * desk that never shows, because opening the console to switch voice on is
+ * refusal is silent — the tone is scheduled, returns normally, and nothing
+ * comes out. On a
+ * desk that never shows, because opening the console to switch sound on is
  * itself the interaction. On a wall-mounted TV it is the whole problem: the
  * page is opened by typing a URL, which does not count, so the board stays
  * mute forever with no indication why.
@@ -18,42 +19,35 @@ import { audioSupported, unlockAudio } from './sound';
  *     enough — which matters because the plain <div> controls on this board
  *     cannot be focused with a D-pad, making the gear literally unreachable.
  *   - The state is reported, so the board can say "press any button" instead
- *     of failing silently.
+ *     of failing silently. That report is not optional decoration: the whole
+ *     mechanism is invisible without it, and a board rendered without the chip
+ *     is a board that stays mute with nothing on screen to explain why.
  *
- * The priming utterance is spoken INSIDE the gesture handler and at zero
- * volume: some engines only lift the block when the first speak() happens in
- * the gesture's own call stack, so waiting for the next real movement is too
- * late.
+ * unlockAudio() is called INSIDE the gesture handler, not on the next movement:
+ * a suspended AudioContext will only resume from within the gesture's own call
+ * stack, so resuming when a tag is finally read is already too late.
  */
 export type SoundState =
   /** Audio is unlocked; alerts will be heard. */
   | 'ready'
   /** Supported, but waiting for any key press or tap on this page. */
   | 'needs-gesture'
-  /** This browser can make no sound at all — neither tones nor speech. */
+  /** This browser has no Web Audio, so it can make no sound at all. */
   | 'unsupported';
 
 export function useAudioGate(enabled: boolean): SoundState {
   const [gestured, setGestured] = useState(false);
-  // Tones are the alert that matters, so Web Audio alone counts as supported:
-  // TVBro (Android WebView) has no speech synthesis but does have Web Audio,
-  // and on that device a board that beeps is the working outcome.
-  const supported = typeof window !== 'undefined' && (audioSupported() || 'speechSynthesis' in window);
+  // Web Audio is the whole test now. The tone IS the alert — there is no longer
+  // a speech path to fall back to — so a browser without Web Audio can make no
+  // sound at all and must say so rather than sit on 'needs-gesture' forever,
+  // telling the operator to press something that will not help.
+  const supported = typeof window !== 'undefined' && audioSupported();
 
   useEffect(() => {
     if (!supported || !enabled || gestured) return;
 
     const unlock = () => {
       unlockAudio();
-      try {
-        if ('speechSynthesis' in window) {
-          const prime = new SpeechSynthesisUtterance(' ');
-          prime.volume = 0;
-          window.speechSynthesis.speak(prime);
-        }
-      } catch {
-        // Priming is best-effort — the gesture still counts either way.
-      }
       setGestured(true);
     };
 
