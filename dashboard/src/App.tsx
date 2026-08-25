@@ -7,6 +7,7 @@ import { chime } from './sound';
 import ControlDrawer from './ControlDrawer';
 import TvBoard from './TvBoard';
 import PalletPrintingPage from './PalletPrintingPage';
+import PowerCutRecoveryPage from './PowerCutRecoveryPage';
 
 /**
  * Shell and router.
@@ -22,7 +23,7 @@ import PalletPrintingPage from './PalletPrintingPage';
  * without extra config; a production host needs the same SPA fallback.
  */
 
-const ROUTES = { gate: '/gateboard', tv: '/tv', printing: '/printing' } as const;
+const ROUTES = { gate: '/gateboard', tv: '/tv', printing: '/printing', powerCut: '/power-cut' } as const;
 type Route = keyof typeof ROUTES;
 
 /** Change the URL without a reload, preserving ?bridge=<ip> and friends. */
@@ -72,7 +73,7 @@ export default function App() {
   }, []);
 
   // Route table. `#tv` is the legacy hash; anything unrecognised is the board.
-  const route: Route = location.hash === '#tv' || location.pathname === ROUTES.tv ? 'tv' : location.pathname === ROUTES.printing ? 'printing' : 'gate';
+  const route: Route = location.hash === '#tv' || location.pathname === ROUTES.tv ? 'tv' : location.pathname === ROUTES.printing ? 'printing' : location.pathname === ROUTES.powerCut ? 'powerCut' : 'gate';
 
   // Give `/`, unknown paths and the legacy hash a real URL.
   useEffect(() => {
@@ -137,6 +138,7 @@ export default function App() {
 
   if (route === 'tv') return <TvBoard bridge={bridge} onExit={() => navigate(ROUTES.gate)} />;
   if (route === 'printing') return <PalletPrintingPage bridge={bridge} />;
+  if (route === 'powerCut') return <PowerCutRecoveryPage />;
 
   return (
     <>
@@ -173,6 +175,7 @@ function DeliveryAlarm({ movement }: { movement: ReturnType<typeof useBridge>['m
   return (
     <div role="alert" aria-live="assertive" style={{ position: 'fixed', zIndex: 10000, top: 12, left: '50%', transform: 'translateX(-50%)', width: 'min(94vw, 1100px)', padding: '16px 22px', borderRadius: 14, background: critical ? '#991b1b' : '#92400e', color: 'white', boxShadow: '0 8px 30px rgba(0,0,0,.3)', fontWeight: 800, textAlign: 'center' }}>
       {journalBad ? 'MANUAL FALLBACK REQUIRED' : critical ? 'ACTION REQUIRED — WORK CONTINUES' : 'NEXUS OFFLINE — RECEIVING IS SAVED LOCALLY'} · {detail}
+      {journalBad && <a href="/power-cut" style={{ marginLeft: 12, color: 'white', textDecoration: 'underline' }}>Open recovery checklist</a>}
     </div>
   );
 }
