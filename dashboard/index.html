@@ -17,7 +17,14 @@
          errors ever reported to it, and a bundle that fails to PARSE runs no
          app code at all - including any reporter living inside the bundle.
          This script is the only thing guaranteed to still be running, so it is
-         what tells the bridge why the screen is dark. -->
+         what tells the bridge why the screen is dark.
+
+         It also PAINTS the failure now, not only posts it. Reporting to the
+         bridge assumes someone is watching the bridge's console at the moment
+         a tablet in someone else's hands fails; putting the text on the glass
+         assumes only that the person holding it can read. That is the case
+         that actually happens - an iPad on iPadOS 15.7 opening /printing, one
+         frame of layout, then the body's #0b0f17 and no way to ask why. -->
     <script>
       (function () {
         var host = (location.search.match(/[?&]bridge=([^&]+)/) || [])[1] || location.hostname;
@@ -31,18 +38,62 @@
             x.send(JSON.stringify({ source: 'page', stage: stage, message: String(message), ua: navigator.userAgent }));
           } catch (e) {}
         }
+        // Paint the failure into #root. Inline styles only, and no stylesheet
+        // is assumed to have loaded - on the parse-error path the CSS may be
+        // the only thing that DID load, and it is what makes the page black.
+        var painted = 0;
+        function show(stage, message) {
+          if (painted++) return; // first failure is the cause; the rest are echoes
+          var r = document.getElementById('root');
+          if (!r) return;
+          r.innerHTML = '';
+          var box = document.createElement('div');
+          box.setAttribute(
+            'style',
+            'min-height:100%;background:#fff;color:#0a0a0a;padding:24px;overflow:auto;' +
+              'font:15px/1.5 -apple-system,system-ui,sans-serif'
+          );
+          var h = document.createElement('div');
+          h.setAttribute('style', 'font-weight:800;font-size:20px;margin-bottom:8px');
+          h.appendChild(document.createTextNode('This screen could not start'));
+          var sub = document.createElement('div');
+          sub.setAttribute('style', 'color:#737373;margin-bottom:16px');
+          sub.appendChild(document.createTextNode('Show this text to whoever maintains the gate.'));
+          var pre = document.createElement('pre');
+          pre.setAttribute(
+            'style',
+            'white-space:pre-wrap;word-break:break-word;background:#f5f5f5;border:1px solid #e5e5e5;' +
+              'border-radius:12px;padding:12px;margin:0'
+          );
+          pre.appendChild(document.createTextNode(stage + '\n\n' + message + '\n\n' + navigator.userAgent));
+          box.appendChild(h);
+          box.appendChild(sub);
+          box.appendChild(pre);
+          r.appendChild(box);
+        }
+
         window.addEventListener('error', function (e) {
-          report('window.onerror', (e.message || 'error') + ' @ ' + (e.filename || '?') + ':' + (e.lineno || 0));
+          var where = (e.message || 'error') + ' @ ' + (e.filename || '?') + ':' + (e.lineno || 0);
+          report('window.onerror', where);
+          show('window.onerror', where);
         });
         window.addEventListener('unhandledrejection', function (e) {
-          report('unhandledrejection', (e.reason && e.reason.message) || e.reason || 'rejection');
+          var why = (e.reason && e.reason.message) || e.reason || 'rejection';
+          report('unhandledrejection', why);
+          show('unhandledrejection', String(why));
         });
         // If React never mounts, say so. A parse error leaves #root empty
-        // forever and produces no 'error' event on some old WebViews.
+        // forever and produces no 'error' event on some old WebViews - which is
+        // precisely the silent case, so this is the only thing that speaks for
+        // it. 5s, not 8: long enough for a cold module graph over WiFi, short
+        // enough that nobody has walked away from the tablet yet.
         setTimeout(function () {
           var r = document.getElementById('root');
-          if (r && !r.firstChild) report('never-mounted', 'root still empty after 8s');
-        }, 8000);
+          if (r && !r.firstChild) {
+            report('never-mounted', 'root still empty after 5s');
+            show('never-mounted', 'The page loaded but the app never started. Nothing threw an error this browser could report, which usually means the JavaScript bundle could not be parsed or fetched.');
+          }
+        }, 5000);
       })();
     </script>
     <script type="module" src="/src/main.tsx"></script>

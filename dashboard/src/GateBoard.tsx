@@ -32,10 +32,22 @@ import type { EntryRow } from './types';
  */
 
 const IDLE_TIMEOUT_MS = 45_000;
+/**
+ * How long the last pallet stays on the panel after the door goes quiet.
+ *
+ * The live panel is scoped to the most recent inbound passage, which never used
+ * to expire — so a pallet received at 09:10 was still the subject of the board
+ * at lunchtime. On a wall panel that reads as the current state of the door, and
+ * someone walking up has no way to tell that nothing has arrived for hours.
+ *
+ * Ten minutes is well past any single pallet being unloaded (the pallet window
+ * itself is one minute), so this only ever fires on a genuinely idle door.
+ */
+const PALLET_IDLE_CLEAR_MS = 10 * 60_000;
 /** How long a just-counted product stays highlighted on the board. */
 const FOCUS_MS = 9_000;
 
-export default function GateBoard(props: { board: GateBoardApi; entries: EntryRow[]; onOpenControls: () => void }) {
+export default function GateBoard(props: { board: GateBoardApi; entries: EntryRow[]; sound: SoundState; onOpenControls: () => void }) {
   const { board } = props;
   const { docs } = board.board;
   // Receiving-only: the board follows the latest INBOUND passage. A pallet
@@ -56,7 +68,25 @@ export default function GateBoard(props: { board: GateBoardApi; entries: EntryRo
     () => props.entries.filter((entry) => entry.direction === 'in' && !entry.unexpected && entry.known),
     [props.entries]
   );
-  const latestEntry = inboundEntries[0] ?? null;
+  // Coarse clock, only so the expiry below re-evaluates without a passage. 5s
+  // granularity on a 10-minute boundary is invisible and costs one render.
+  const [clockTick, setClockTick] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setClockTick(Date.now()), 5_000);
+    return () => clearInterval(t);
+  }, []);
+
+  // The latest inbound passage, unless the door has been quiet long enough that
+  // it is history rather than news — see PALLET_IDLE_CLEAR_MS. Expiring the
+  // ENTRY rather than filtering liveDocs keeps one source of truth: liveTotals,
+  // liveFocus and the pallet caption all fall away with it.
+  const latestEntry = useMemo(() => {
+    const newest = inboundEntries[0] ?? null;
+    if (!newest) return null;
+    const at = Date.parse(newest.timestamp ?? '');
+    if (Number.isFinite(at) && clockTick - at > PALLET_IDLE_CLEAR_MS) return null;
+    return newest;
+  }, [inboundEntries, clockTick]);
   const liveBatchId = latestEntry ? String(latestEntry.passageId ?? latestEntry.eventId ?? latestEntry.id) : null;
   const liveEntries = useMemo(
     () => liveBatchId == null ? [] : inboundEntries.filter((entry) => String(entry.passageId ?? entry.eventId ?? entry.id) === liveBatchId),
@@ -160,25 +190,28 @@ export default function GateBoard(props: { board: GateBoardApi; entries: EntryRo
   const inTotals = useMemo(() => sumTotals(inDocs), [inDocs]);
 
   /**
-   * RESTING STATE — what the board shows when no passage is in progress.
+   * RESTING STATE — the board shows NO carton figures when nothing is arriving.
    *
-   * The panel renders `liveDocs`, which is scoped to the current passage and is
-   * therefore EMPTY most of the time: `props.entries` is filled only by live
-   * WebSocket messages, so it starts empty on every page load and stays empty
-   * whenever nothing is crossing. The board had no fallback, so it painted a
-   * blank screen — which on a 43" panel with no input reads as "the gate is
-   * broken", not "nothing is moving".
+   * It used to fall back to today's outstanding batches. That was wrong at a
+   * doorway for a reason that only shows up on the floor: an unfinished batch
+   * stays outstanding in Nexus indefinitely, so a delivery that was 7/8 two days
+   * ago sat on the board as though it were happening now. And the missing carton
+   * genuinely may be on a later pallet — a part-received batch is not a problem
+   * to display, it is just work not finished yet.
    *
-   * It was masked before only because ANY inbound read produced a liveDoc,
-   * including products on no receiving batch. Filtering those out (rightly)
-   * removed the accident that was standing in for a resting state.
+   * So the panel is scoped to the pallet at the door and nothing else. When that
+   * expires (PALLET_IDLE_CLEAR_MS) the figures go, because a figure on a wall
+   * panel reads as "this is happening now" and after ten minutes it is not.
    *
-   * Today's batches are the honest thing to show: the work outstanding at this
-   * door. A passage then narrows the panel to the batch being filled.
+   * NOT a black screen, which is the other way to get this wrong: on a 43" panel
+   * with no keyboard, black reads as "the gate is broken". An explicit waiting
+   * state says the same thing honestly — nothing is arriving, and the gate is
+   * fine.
    */
-  const panelDocs = liveDocs.length ? liveDocs : inDocs;
-  const panelTotals = liveDocs.length ? liveTotals : inTotals;
-  const panelFocus = liveDocs.length ? liveFocus : focus;
+  const idle = liveDocs.length === 0;
+  const panelDocs = liveDocs;
+  const panelTotals = liveTotals;
+  const panelFocus = liveFocus;
 
   const dirDocs = inDocs;
   const activeDoc = activeId ? (dirDocs.find((d) => d.id === activeId) ?? null) : null;
@@ -199,6 +232,7 @@ export default function GateBoard(props: { board: GateBoardApi; entries: EntryRo
   return (
     <div className="gate" style={{ width: u(1920), height: '100%', margin: '0 auto', position: 'relative', overflow: 'hidden', background: C.white, color: C.fg, display: 'flex', flexDirection: 'column', userSelect: 'none' }}>
       <Header
+        sound={props.sound}
         onControls={() => {
           touch();
           props.onOpenControls();
@@ -207,7 +241,9 @@ export default function GateBoard(props: { board: GateBoardApi; entries: EntryRo
 
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
         <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', padding: `${u(18)} ${u(28)}` }}>
-          <DirectionSection dir="in" docs={panelDocs} totals={panelTotals} focus={panelFocus} onOpen={() => {}} />
+          {idle ? <WaitingForPallet feed={board.feed} poCount={inDocs.length} /> : (
+            <DirectionSection dir="in" docs={panelDocs} totals={panelTotals} focus={panelFocus} onOpen={() => {}} />
+          )}
         </div>
 
         {board.dupMsg && <DupToast message={board.dupMsg} />}
@@ -220,6 +256,7 @@ export default function GateBoard(props: { board: GateBoardApi; entries: EntryRo
 /* ---------------------------------------------------------------- header */
 
 function Header(props: {
+  sound: SoundState;
   onControls: () => void;
 }) {
   const [now, setNow] = useState(() => new Date());
@@ -254,6 +291,8 @@ function Header(props: {
       <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: u(18) }}>
         <div style={{ flex: 1, minWidth: u(20) }} />
 
+        <SoundChip state={props.sound} />
+
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: u(4), flex: '0 0 auto' }}>
           <div style={{ fontSize: u(36), fontWeight: 700, letterSpacing: u(-0.5), fontVariantNumeric: 'tabular-nums', lineHeight: 1, whiteSpace: 'nowrap' }}>{clock}</div>
           <div style={{ fontSize: u(16), fontWeight: 600, letterSpacing: '0.08em', color: C.muted, whiteSpace: 'nowrap' }}>{dateLabel}</div>
@@ -286,7 +325,7 @@ function SoundChip(props: { state: SoundState }) {
 
   return (
     <div
-      title={waiting ? 'Browsers block audio until the page is touched once. Any key, tap or remote button will do.' : 'This browser supports neither Web Audio nor speech synthesis — alerts are silent on this device.'}
+      title={waiting ? 'Browsers block audio until the page is touched once. Any key, tap or remote button will do.' : 'This browser has no Web Audio, so the gate chime cannot be played on this device at all.'}
       style={{ display: 'flex', alignItems: 'center', gap: u(10), padding: `${u(12)} ${u(22)}`, borderRadius: u(26), background: look.bg, border: `1px solid ${look.edge}`, flex: '0 0 auto' }}
     >
       <div style={{ fontSize: u(18), lineHeight: 1 }}>🔇</div>
@@ -305,6 +344,40 @@ function SoundChip(props: { state: SoundState }) {
  * appear when the feed is cached or down. Tapping re-pulls immediately, for
  * when someone has just created a batch and doesn't want to wait out the poll.
  */
+/**
+ * The resting state: nothing has arrived for PALLET_IDLE_CLEAR_MS.
+ *
+ * Deliberately carries NO carton figures. The whole point is that a number on a
+ * wall panel reads as current, so an idle door must not show one — the previous
+ * pallet's counts are history and a part-received batch may simply be waiting on
+ * a later pallet.
+ *
+ * It does say how many POs are open, because "the gate is idle" and "there is
+ * nothing to receive today" are different facts and the floor needs both. And it
+ * carries the feed state: an idle board and a board that cannot reach Nexus look
+ * identical otherwise, which is how a broken link goes unnoticed for a shift.
+ */
+function WaitingForPallet(props: { feed: FeedState; poCount: number }) {
+  const broken = props.feed.status === 'error' || props.feed.status === 'stale';
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: u(28) }}>
+      <div style={{ width: u(120), height: u(120), borderRadius: '50%', border: `${u(3)} solid ${C.border}`, display: 'grid', placeItems: 'center' }}>
+        <Icon.Box size={58} />
+      </div>
+      <div style={{ fontSize: u(52), fontWeight: 800, letterSpacing: u(-1), color: C.muted, textAlign: 'center' }}>
+        READY FOR THE NEXT PALLET
+      </div>
+      <div style={{ fontSize: u(24), fontWeight: 600, color: C.faint, textAlign: 'center', maxWidth: u(1100) }}>
+        {broken
+          ? 'Receiving documents are not reaching this board — check the link to Nexus.'
+          : props.poCount === 0
+            ? 'No receiving batches open at this door.'
+            : `${props.poCount} receiving ${props.poCount === 1 ? 'batch' : 'batches'} open · counts appear as cartons pass`}
+      </div>
+    </div>
+  );
+}
+
 function FeedChip(props: { feed: FeedState; onRefresh: () => void }) {
   const { status, fetchedAt } = props.feed;
   // hour12:false to match the header's own 24h clock, and to avoid a trailing

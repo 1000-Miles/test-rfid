@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { BRIDGE_HTTP } from './api';
+import { fetchDocuments } from './documents';
 import type { BridgeState } from './useBridge';
 import type { PalletProduct } from './types';
 
 type Notice = { kind: 'success' | 'error'; text: string } | null;
+
+/** What a product looks like on screen, as the board feed resolves it. */
+type ProductArt = { photoUrl: string | null; emoji: string | null };
 
 /**
  * Operator-facing pallet name, e.g. "Pallet-319".
@@ -57,6 +61,7 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [printerCfg, setPrinterCfg] = useState<PalletPrinterInfo | null>(null);
   const [cfgError, setCfgError] = useState<string | null>(null);
+  const [photos, setPhotos] = useState<Record<string, ProductArt>>({});
 
   useEffect(() => {
     if (workflow?.type !== 'pallet-open') return;
@@ -102,6 +107,39 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
   useEffect(() => {
     void loadPrinterCfg();
   }, [loadPrinterCfg]);
+
+  /** Product artwork, by SKU.
+   *
+   *  The pallet card's product lines come from the tag catalogue (sku, name,
+   *  cartons — see productBreakdown in bridge/src/outbox.js), which carries no
+   *  picture. Nexus already resolves one per receiving line and the bridge
+   *  passes it through as photoUrl on every DocLine, so the board feed is the
+   *  source of truth for it rather than a second lookup of our own.
+   *
+   *  Failure is deliberately silent: a missing photo falls back to the emoji or
+   *  glyph, and a pallet an operator needs to print must never be held up by
+   *  the picture next to it. */
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const feed = await fetchDocuments();
+        if (!live) return;
+        const bySku: Record<string, ProductArt> = {};
+        for (const doc of [...(feed.docs ?? []), ...(feed.pool ?? [])]) {
+          for (const line of doc.lines ?? []) {
+            const art = { photoUrl: line.photoUrl ?? null, emoji: line.emoji ?? null };
+            // First non-empty wins — the same SKU on two batches is one product.
+            if (!bySku[line.sku]?.photoUrl && (art.photoUrl || art.emoji)) bySku[line.sku] = art;
+          }
+        }
+        setPhotos(bySku);
+      } catch {
+        /* no artwork this load — the lines render with their glyph fallback */
+      }
+    })();
+    return () => { live = false; };
+  }, [bridge.receivingResetAt]);
 
   // Escape closes the dialog. Bound only while it is open so the page does not
   // keep a listener for a dialog nobody is looking at.
@@ -264,13 +302,15 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
           : 'border-[#e5e5e5] bg-[#f5f5f5] text-[#737373]';
 
   return (
-    <main className="gate-operator min-h-full bg-[#f5f5f5] p-6 text-[#0a0a0a] md:p-10">
+    <main className="gate-operator min-h-full bg-[#f5f5f5] p-4 text-[#0a0a0a] md:p-10">
       <div className="mx-auto max-w-5xl">
-        <header className="mb-8 flex items-start justify-between gap-4">
+        <header className="mb-5 flex items-start justify-between gap-4 md:mb-8">
           <div>
             <div className="text-sm font-extrabold tracking-[0.18em] text-[#008A9C]">WAREHOUSE OPERATIONS</div>
-            <h1 className="mt-1 text-3xl font-extrabold md:text-4xl">Pallet label printing</h1>
-            <p className="mt-2 font-medium text-[#737373]">Print and reprint pallet labels without touching the GateBoard TV.</p>
+            <h1 className="mt-1 text-2xl font-extrabold md:text-4xl">Pallet label printing</h1>
+            {/* The strapline explains the page, it does not run it — on a tablet
+                that vertical space is better spent on the print button. */}
+            <p className="mt-2 hidden font-medium text-[#737373] md:block">Print and reprint pallet labels without touching the GateBoard TV.</p>
           </div>
           <button
             onClick={() => { setSettingsOpen(true); void loadPrinterCfg(); }}
@@ -283,32 +323,42 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
         </header>
 
         <section className="overflow-hidden rounded-2xl border border-[#e5e5e5] bg-white shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#e5e5e5] px-6 py-5">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#e5e5e5] px-4 py-4 md:px-6 md:py-5">
             <h2 className="text-xl font-extrabold">Latest gate pallet</h2>
             <span className={`rounded-full border px-4 py-2 text-xs font-extrabold tracking-wider ${tone}`}>{status.label}</span>
           </div>
-          <div className="p-6 md:p-8">
+          <div className="p-4 md:p-8">
             {workflow ? (
-              <div className="grid gap-6 md:grid-cols-[1fr_auto] md:items-end">
-                <div>
-                  <div className="text-sm font-extrabold tracking-[0.08em] text-[#737373]">PALLET</div>
-                  <div className="mt-2 text-2xl font-extrabold tracking-tight md:text-4xl">{palletName(workflow.palletCode)}</div>
-                  {/* The receiving batch is assigned by Nexus when the passage is
-                      accepted, so it is genuinely unknown until that lands. Saying
-                      so beats printing the raw code and letting it read as a batch. */}
-                  <div className="mt-1 break-all text-sm font-medium text-[#737373]">
-                    {workflow.batchRef ? `Batch ${workflow.batchRef}` : 'Batch not assigned yet'}
+              <div>
+                {/* Pallet identity and the print button share the FIRST row, and
+                    the product breakdown sits below both. It used to live inside
+                    the left column, which made the row as tall as the product
+                    list and pushed the button off a tablet screen — the one
+                    control an operator came to this page to press must never
+                    need a scroll to reach. */}
+                <div className="grid gap-5 md:grid-cols-[1fr_auto] md:items-start md:gap-6">
+                  <div>
+                    <div className="text-sm font-extrabold tracking-[0.08em] text-[#737373]">PALLET</div>
+                    <div className="mt-2 text-2xl font-extrabold tracking-tight md:text-4xl">{palletName(workflow.palletCode)}</div>
+                    {/* The receiving batch is assigned by Nexus when the passage is
+                        accepted, so it is genuinely unknown until that lands. Saying
+                        so beats printing the raw code and letting it read as a batch. */}
+                    <div className="mt-1 break-all text-sm font-medium text-[#737373]">
+                      {workflow.batchRef ? `Batch ${workflow.batchRef}` : 'Batch not assigned yet'}
+                    </div>
                   </div>
-                  <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3">
-                    <Metric label="Cartons" value={String(workflow.cartonCount)} />
-                    <Metric label="Location" value="AMZ" />
-                    <Metric label={workflow.type === 'pallet-open' ? 'Auto close' : 'Nexus'} value={workflow.type === 'pallet-open' ? `${secondsLeft ?? 0}s` : synced ? 'Synced' : workflow.queued ? 'Queued' : 'Sending'} />
-                  </div>
-                  <ProductLines products={workflow.products} cartonCount={workflow.cartonCount} />
+                  <button disabled={printing} onClick={() => void (workflow.type === 'pallet-open' ? closeAndPrint() : printCurrent())} className="min-h-16 w-full rounded-xl border border-[#008A9C] bg-[#00BCD4] px-8 py-4 text-lg font-extrabold text-white shadow-sm hover:bg-[#008A9C] disabled:cursor-wait disabled:opacity-60 md:w-auto">
+                    {printing ? 'Working…' : workflow.type === 'pallet-open' ? 'Confirm and print' : workflow.type === 'pallet-print' ? (workflow.ok === false ? 'Retry print' : 'Print again') : 'Print label'}
+                  </button>
                 </div>
-                <button disabled={printing} onClick={() => void (workflow.type === 'pallet-open' ? closeAndPrint() : printCurrent())} className="min-h-16 rounded-xl border border-[#008A9C] bg-[#00BCD4] px-8 py-4 text-lg font-extrabold text-white shadow-sm hover:bg-[#008A9C] disabled:cursor-wait disabled:opacity-60">
-                  {printing ? 'Working…' : workflow.type === 'pallet-open' ? 'Close & print' : workflow.type === 'pallet-print' ? (workflow.ok === false ? 'Retry print' : 'Print again') : 'Print label'}
-                </button>
+                {/* No Location tile: the pallet has not been put away when this
+                    label prints, so there is no location to state. A hardcoded
+                    "AMZ" was a guess printed as a fact. */}
+                <div className="mt-6 grid grid-cols-2 gap-4">
+                  <Metric label="Cartons" value={String(workflow.cartonCount)} />
+                  <Metric label={workflow.type === 'pallet-open' ? 'Auto close' : 'Nexus'} value={workflow.type === 'pallet-open' ? `${secondsLeft ?? 0}s` : synced ? 'Synced' : workflow.queued ? 'Queued' : 'Sending'} />
+                </div>
+                <ProductLines products={workflow.products} cartonCount={workflow.cartonCount} photos={photos} />
               </div>
             ) : (
               <div className="py-12 text-center text-[#737373]">
@@ -462,7 +512,7 @@ function printedAt(at: string | null) {
 /** What is actually on the pallet, per product. Hidden entirely when the bridge
  *  sent no breakdown (an older bridge, or a pallet with no cartons behind it) —
  *  an empty table would read as "no products", which is a different claim. */
-function ProductLines({ products, cartonCount }: { products?: PalletProduct[]; cartonCount: number }) {
+function ProductLines({ products, cartonCount, photos }: { products?: PalletProduct[]; cartonCount: number; photos: Record<string, ProductArt> }) {
   if (!products?.length) return null;
   // The breakdown is built from the same entries as cartonCount, so a mismatch
   // means cartons were added between the two reads. Surfaced rather than hidden:
@@ -476,8 +526,9 @@ function ProductLines({ products, cartonCount }: { products?: PalletProduct[]; c
       </div>
       <ul className="mt-2 divide-y divide-[#e5e5e5] overflow-hidden rounded-xl border border-[#e5e5e5]">
         {products.map((p) => (
-          <li key={p.sku} className="flex items-center justify-between gap-4 bg-white px-4 py-3">
-            <div className="min-w-0">
+          <li key={p.sku} className="flex items-center gap-4 bg-white px-4 py-3">
+            <ProductThumb art={photos[p.sku]} name={p.name} />
+            <div className="min-w-0 flex-1">
               <div className="truncate font-extrabold text-[#0a0a0a]">{p.name}</div>
               <div className="truncate text-xs font-bold tracking-wide text-[#737373]">{p.sku}</div>
             </div>
@@ -495,6 +546,33 @@ function ProductLines({ products, cartonCount }: { products?: PalletProduct[]; c
       )}
     </div>
   );
+}
+
+/** Photo, then the product's own emoji, then its initials — the same precedence
+ *  the GateBoard tiles use (see boardKit.tsx), so one product looks like itself
+ *  on every screen in the warehouse. A broken image URL falls through to the
+ *  same fallback rather than leaving a torn-image icon on the row. */
+function ProductThumb({ art, name }: { art?: ProductArt; name: string }) {
+  const [broken, setBroken] = useState(false);
+  const photo = !broken ? art?.photoUrl : null;
+  return (
+    <div className="grid h-14 w-14 shrink-0 place-items-center overflow-hidden rounded-lg border border-[#e5e5e5] bg-[#f5f5f5]">
+      {photo ? (
+        <img src={photo} alt="" onError={() => setBroken(true)} className="h-full w-full object-cover" />
+      ) : art?.emoji ? (
+        <span className="text-2xl leading-none">{art.emoji}</span>
+      ) : (
+        <span className="text-sm font-extrabold text-[#a3a3a3]">{initials(name)}</span>
+      )}
+    </div>
+  );
+}
+
+/** Up to two letters standing in for a product with no picture yet. */
+function initials(name: string): string {
+  const words = String(name).trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return '—';
+  return words.slice(0, 2).map((w) => w[0]!.toUpperCase()).join('');
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

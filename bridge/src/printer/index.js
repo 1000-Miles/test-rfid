@@ -92,6 +92,22 @@ const DEFAULT_CONFIG = {
   // the finished TSPL bytes to the machine the printer is plugged into.
   // e.g. http://192.168.1.112:3011
   palletSidecarUrl: process.env.PALLET_SIDECAR_URL || '',
+  /**
+   * How the pallet printer is reached: 'sidecar' (a queue on another PC) or
+   * 'tcp' (straight to the printer's own network port).
+   *
+   * 'tcp' exists because the sidecar route needs a PC to be switched on, and
+   * that is a whole extra machine in the chain for no benefit when the label
+   * printer has an ethernet port of its own. The TSC heads answer TSPL on 9100
+   * exactly like the CP30 answers ZPL, so the same transport the carton printer
+   * has always used works here too.
+   *
+   * Defaults to 'sidecar' only because that is what existing installs use;
+   * 'tcp' is the better answer wherever the printer is networked.
+   */
+  palletTransport: process.env.PALLET_TRANSPORT === 'tcp' ? 'tcp' : 'sidecar',
+  palletHost: process.env.PALLET_HOST || '',
+  palletTcpPort: Number(process.env.PALLET_TCP_PORT || 9100),
 };
 
 const CONFIG_KEYS = Object.keys(DEFAULT_CONFIG);
@@ -378,6 +394,11 @@ class PrinterManager {
       // Normalised so the rest of the code can treat "" as "print locally" and
       // concatenate paths without doubling the slash.
       else if (k === 'palletSidecarUrl') this.config[k] = String(partial[k] ?? '').trim().replace(/\/+$/, '');
+      // Whitelisted: an unknown transport must fall back to the one that was
+      // working, not silently stop printing.
+      else if (k === 'palletTransport') this.config[k] = partial[k] === 'tcp' ? 'tcp' : 'sidecar';
+      else if (k === 'palletHost') this.config[k] = String(partial[k] ?? '').trim();
+      else if (k === 'palletTcpPort') this.config[k] = Number(partial[k]) > 0 ? Math.floor(Number(partial[k])) : 9100;
       // Whitelisted: an unrecognised orientation must fall back to the layout
       // that is known to fit, not print a tag at an angle nobody chose.
       else if (k === 'palletOrientation') this.config[k] = partial[k] === 'landscape' ? 'landscape' : 'portrait';
@@ -443,6 +464,14 @@ class PrinterManager {
   /** Send finished pallet bytes wherever the pallet printer actually lives.
    *  Returns the same { bytes, jobId } shape for both paths. */
   async _sendPalletRaw(data, docName) {
+    // Straight at the printer's own network port. No PC in the chain, so nothing
+    // to be switched on and no second address to keep in step.
+    if (this.config.palletTransport === 'tcp') {
+      const host = String(this.config.palletHost || '').trim();
+      if (!host) throw new Error('pallet printer is set to network (TCP) but no printer IP is configured');
+      await sendTcp(host, this.config.palletTcpPort || 9100, data, 20000);
+      return { bytes: data.length, jobId: null };
+    }
     const sidecar = this._palletSidecar;
     const queue = this.config.palletPrinterName;
     if (!sidecar) {
@@ -467,22 +496,74 @@ class PrinterManager {
     return { bytes: body.bytes ?? data.length, jobId: body.jobId ?? null };
   }
 
-  /** Same trust model as checkReady(), but for the pallet-tag printer's queue.
-   * Always a spooler/CUPS queue — the Gprinter has no TCP transport here. It
-   * just may be a queue on a DIFFERENT machine, reached through the sidecar. */
+  /** Same trust model as checkReady(), but for the pallet-tag printer.
+   * Either the printer's own network port, or a spooler/CUPS queue — which may
+   * be a queue on a DIFFERENT machine, reached through the sidecar. */
   async checkPalletReady() {
     const cache = this._palletReadyCache;
     if (cache && Date.now() - cache.at < 5000) return cache.result;
-    const name = this.config.palletPrinterName;
-    const result = !name
-      ? { ready: false, detail: 'no pallet printer configured (palletPrinterName)' }
-      : this._palletSidecar
-        ? await this._probeSidecar(name)
-        : IS_WINDOWS
-          ? await this._probeQueueWindows(name)
-          : await this._probeReadyCups(name);
+    const result =
+      this.config.palletTransport === 'tcp'
+        ? await this._probePalletTcp()
+        : !this.config.palletPrinterName
+          ? { ready: false, detail: 'no pallet printer configured (palletPrinterName)' }
+          : this._palletSidecar
+            ? await this._probeSidecar(this.config.palletPrinterName)
+            : IS_WINDOWS
+              ? await this._probeQueueWindows(this.config.palletPrinterName)
+              : await this._probeReadyCups(this.config.palletPrinterName);
     this._palletReadyCache = { at: Date.now(), result };
     return result;
+  }
+
+  /**
+   * Is the networked pallet printer there?
+   *
+   * `<ESC>!?` is TSPL's status query and answers with ONE byte: 0 = ready, and
+   * a bit set for paused / no paper / head open. Reported rather than collapsed
+   * into "not ready", because "out of paper" and "wrong IP" need different
+   * people to do different things.
+   *
+   * A printer that opens the socket but never answers is still reported ready:
+   * some heads answer nothing until they have work, and refusing to print to a
+   * printer that is plainly there is the worse mistake.
+   */
+  async _probePalletTcp() {
+    const host = String(this.config.palletHost || '').trim();
+    const port = this.config.palletTcpPort || 9100;
+    if (!host) return { ready: false, detail: 'no pallet printer IP configured (palletHost)' };
+    try {
+      const reply = await sendTcpAndRead(host, port, '\x1b!?', { timeoutMs: 3000, quietMs: 350 });
+      const code = reply && reply.length ? reply.charCodeAt(0) : 0;
+      // Silence is NOT ready. Every TSPL head answers this query, so a socket
+      // that opens and then says nothing is something else on that port — most
+      // often a PC's IP typed into the printer field, or a router accepting the
+      // connection on a route to nowhere. Reporting that as ready produced a
+      // green light followed by a print that timed out, which is a worse
+      // failure than an honest refusal: it sends someone looking at the printer
+      // when the problem is the address.
+      if (!reply || !reply.length) {
+        return {
+          ready: false,
+          detail: `${host}:${port} opened but did not answer a printer status query — is that address the PRINTER, not a PC?`,
+        };
+      }
+      if (code === 0) return { ready: true, detail: `${host}:${port} ready` };
+      const faults = [];
+      if (code & 0x01) faults.push('head open');
+      if (code & 0x02) faults.push('paper jam');
+      if (code & 0x04) faults.push('out of paper');
+      if (code & 0x08) faults.push('out of ribbon');
+      if (code & 0x10) faults.push('paused');
+      if (code & 0x20) faults.push('printing');
+      // 'printing' and 'paused' are not faults worth blocking a queued label on.
+      const blocking = faults.filter((f) => f !== 'printing');
+      return blocking.length
+        ? { ready: false, detail: `${host}:${port} — ${blocking.join(', ')}` }
+        : { ready: true, detail: `${host}:${port} ${faults.join(', ') || 'ready'}` };
+    } catch (err) {
+      return { ready: false, detail: `${host}:${port} unreachable — ${err.message}` };
+    }
   }
 
   async _probeReady() {

@@ -34,6 +34,7 @@ import java.util.concurrent.Executors;
  *   GET  /power                  POST /power?dbm=&ants=1,2
  *   GET  /antennas               POST /antennas?ports=1,3
  *   GET  /workmode               POST /workmode?mode=0
+ *   GET  /beep                   POST /beep?on=0        (0 = silence the reader)
  *   GET  /tag/single             (singulate ONE tag: pc + epc)
  *   POST /tag/read?bank=&ptr=&words=[&fbank=&fptr=&fdata=][&pwd=]
  *   POST /tag/write?bank=&ptr=&data=[&fbank=&fptr=&fdata=][&pwd=]
@@ -235,6 +236,25 @@ public class UhfSidecar {
                 return "{\"ok\":" + uhf.setWorkMode(mode) + "}";
             }
             return "{\"ok\":true,\"mode\":" + uhf.getWorkMode() + "}";
+        }));
+
+        // Reader buzzer. The UR4 chirps on every single tag read out of the box,
+        // which at a gate reading continuously is a solid tone all shift — so
+        // this exists purely to shut it up: POST /beep?on=0.
+        //
+        // Persists in the reader, so it survives a power cycle and does NOT need
+        // re-applying on connect.
+        server.createContext("/beep", ex -> handle(ex, q -> {
+            if ("POST".equals(ex.getRequestMethod())) {
+                int on = Integer.parseInt(q.getOrDefault("on", "0"));
+                return "{\"ok\":" + uhf.setBeep(on) + "}";
+            }
+            // getBeep returns the raw status characters; first one carries the
+            // on/off flag. Null means the reader would not answer, which is not
+            // the same as "off" and must not be reported as it.
+            char[] b = uhf.getBeep();
+            if (b == null || b.length == 0) return "{\"ok\":false}";
+            return "{\"ok\":true,\"on\":" + ((int) b[0] != 0) + ",\"raw\":" + (int) b[0] + "}";
         }));
 
         server.start();

@@ -122,7 +122,17 @@ async function forwardMovementToSupabase(event) {
 }
 
 // --- Controller ---------------------------------------------------------------
-const controller = new Controller();
+// READ_MIN_RSSI shrinks the read zone in software: any read weaker than this is
+// dropped in the controller, so it never becomes a tag event, a board row, a
+// movement, or a database row. Blank = off. Negative dBm; -70..-55 is the usual
+// range for a doorway. Also settable live via POST /read-filter.
+//
+// This is the blunt, global version of the floor. NEXUS_MIN_RSSI below is a
+// second, narrower one that only applies to NO-IR toggle decisions — the two
+// stack, and this one runs first.
+const controller = new Controller({
+  minRssi: process.env.READ_MIN_RSSI ? Number(process.env.READ_MIN_RSSI) : null,
+});
 
 // --- Printers: carton labels on the Chainway CP30 (ZPL, main config) and
 // --- barcode-only pallet tags on the dedicated Gprinter (TSPL, palletPrinterName)
@@ -151,9 +161,14 @@ const nexus = new PassageDetector({
   // "Is any live receiving batch waiting for this product?" — answered by the
   // board feed, which already holds exactly that list. Deliberately a closure
   // over `board` (declared below) rather than a value: it must answer with the
-  // board as it is at PASSAGE time, not as it was at boot. Only ever called
-  // from a movement decision, long after `board` is initialised.
-  expectsInbound: (sku) => board.expectsInbound(sku),
+  // board as it is at READ time, not as it was at boot. Only ever called from a
+  // receiving decision, long after `board` is initialised.
+  receivableSku: (sku) => board.receivableSku(sku),
+  // Shipping stays off until Nexus can name the cartons on an open shipment.
+  // Env-gated rather than hardcoded so the day that feed exists this is a config
+  // change — but it defaults OFF, and turning it on without that feed would put
+  // guessed dispatches back in the journal.
+  allowShipping: /^(1|true|yes|on)$/i.test(process.env.GATE_ALLOW_SHIPPING || ''),
 });
 
 // --- Outbox (durable push to Nexus POST /api/movement) -------------------------
@@ -193,9 +208,19 @@ const outbox = new Outbox({
   // Short code printed into every pallet code (PALLET-G1-001). MUST differ
   // between gates — see _nextPalletCode.
   gateShort: process.env.GATE_SHORT || 'G1',
+  // 'short' mints PALLET-G1-001; 'long' (default) mints
+  // PLT-YIWU-MAIN-GATE-00000526. Nexus validates this field and currently
+  // rejects the short form, so switching before its pattern is relaxed
+  // dead-letters every carton. See NEXUS-HANDOFF.md item 3.
+  palletCodeFormat: process.env.PALLET_CODE_FORMAT === 'short' ? 'short' : 'long',
   batchSettleMs: Number(process.env.MOVEMENT_BATCH_SETTLE_MS || 500),
   toggleBatchQuietMs: Number(process.env.MOVEMENT_TOGGLE_BATCH_QUIET_MS || 1_500),
-  togglePalletWindowMs: Number(process.env.MOVEMENT_TOGGLE_PALLET_WINDOW_MS || 120_000),
+  // How long a pallet stays open for. 60s, not the old 120s: with no beams this
+  // window is the ONLY thing separating one pallet from the next, so anything
+  // arriving inside it joins the same pallet code and the same printed label.
+  // Two minutes merged pallets that arrived back to back whenever nobody reached
+  // the Close & print button in time. Adjustable live from the console.
+  togglePalletWindowMs: Number(process.env.MOVEMENT_TOGGLE_PALLET_WINDOW_MS || 60_000),
   log: (text, level) => controller.log(`[outbox] ${text}`, level),
 });
 outbox.on('batch-sent', (reply) => {
@@ -355,7 +380,7 @@ app.use(express.json());
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
@@ -585,19 +610,28 @@ app.get('/printer/queues', async (_req, res) => {
   }
 });
 
-// --- Text-to-speech for the gate board -------------------------------------------
-// TV browsers (Android WebView and friends) have no speechSynthesis, so the
-// board fetches its announcement audio from here instead. Cached on disk, so
-// repeat phrases work even when the synth service is unreachable.
-const { handleTtsRequest } = require('./tts');
-app.get('/tts', (req, res) => handleTtsRequest(req, res, (text, level) => controller.log(text, level)));
-
 // Client-side error reports from the board. The wallboard TV has no devtools,
-// so this log line is the only visibility into why IT went silent — the
-// dashboard posts here whenever speech fails on the display device.
+// so this log line is the only visibility into a fault that happens on the
+// display device itself — the dashboard's error boundary posts here when a
+// render throws, which would otherwise be a black screen and nothing else.
+//
+// Also appended to bridge/data/client-errors.log. The console line alone is
+// only readable by someone standing at the bridge terminal at the moment a
+// tablet somewhere else in the building fails — and the bridge is usually
+// running detached, so in practice that is nobody. A file can be read after
+// the fact, which is the only way a "it went black on the iPad" report ever
+// turns into a cause.
+const CLIENT_LOG_PATH = require('path').join(__dirname, '..', 'data', 'client-errors.log');
 app.post('/client-log', (req, res) => {
   const { source = 'client', stage = '?', message = '', ua = '' } = req.body || {};
-  controller.log(`[${source}] ${stage}: ${String(message).slice(0, 300)} (ua: ${String(ua).slice(0, 120)})`, 'warn');
+  const line = `[${source}] ${stage}: ${String(message).slice(0, 300)} (ua: ${String(ua).slice(0, 120)})`;
+  controller.log(line, 'warn');
+  try {
+    require('fs').appendFileSync(CLIENT_LOG_PATH, `[${new Date().toISOString()}] ${line}\n`);
+  } catch (err) {
+    // Diagnostics must never become their own failure — a full or read-only
+    // disk must not turn a client error report into a 500.
+  }
   res.json({ ok: true });
 });
 
@@ -798,11 +832,113 @@ app.post('/power', async (req, res) => {
   }
 });
 
+/**
+ * Run a config read/write with inventory paused, then put the gate back.
+ *
+ * The reader ignores config commands mid-inventory AND lies when questioned:
+ * questioned while reading, it reports enabled=[1] no matter how many ports are
+ * really on. The gate reads essentially all the time, so an un-paused caller
+ * gets that lie every time — which is how the console came to grey out ANT 2-4
+ * and refuse every per-port power change on a reader that had all four.
+ *
+ * Resuming is not optional: the operator asked to change a setting, not to end
+ * the shift.
+ */
+async function withInventoryPaused(what, fn) {
+  const wasReading = controller.reading;
+  if (wasReading) await controller.stopReading();
+  try {
+    return await controller._withLock(fn);
+  } finally {
+    if (wasReading) {
+      try {
+        await controller.startReading();
+      } catch (err) {
+        controller.log(`could not resume reading after ${what}: ${err.message}`, 'warn');
+      }
+    }
+  }
+}
+
+/**
+ * Reader buzzer. GET reads it, POST { on: false } silences it.
+ *
+ * The UR4 chirps once per tag read out of the box. At a gate that reads
+ * continuously that is not a chirp, it is a siren for the whole shift — and
+ * turning it off has nothing to do with the software's own sounds (the board's
+ * voice announcements are separate, in the dashboard).
+ *
+ * The setting persists inside the reader, so this is a one-time press, not
+ * something the bridge re-applies on every connect.
+ */
+app.post('/beep', async (req, res) => {
+  try {
+    const uhf = require('./driver');
+    if (!uhf.setBeep) {
+      return res.status(501).json({ ok: false, error: 'the active driver does not implement beeper control' });
+    }
+    if (!req.body || !('on' in req.body)) return res.status(400).json({ ok: false, error: 'on: boolean required' });
+    const on = Boolean(req.body.on);
+    const result = await withInventoryPaused('beeper change', async () => ({
+      rc: await uhf.setBeep(on),
+      on: uhf.getBeep ? await uhf.getBeep() : null,
+    }));
+    if (result.rc !== 0) {
+      return res.status(502).json({ ok: false, error: 'the reader refused the change', rc: result.rc });
+    }
+    controller.log(`Reader beeper ${on ? 'ON' : 'OFF (silent)'}.`);
+    res.json({ ok: true, on: result.on ?? on });
+  } catch (err) {
+    // An old sidecar build has no /beep route. That is a rebuild, not a fault.
+    const stale = /404|not found/i.test(err.message);
+    res.status(stale ? 501 : 500).json({
+      ok: false,
+      error: stale ? 'this sidecar build has no /beep route — rebuild it (see bridge/sidecar/README)' : err.message,
+    });
+  }
+});
+
+app.get('/beep', async (_req, res) => {
+  try {
+    const uhf = require('./driver');
+    if (!uhf.getBeep) return res.status(501).json({ ok: false, error: 'the active driver does not implement beeper control' });
+    const on = await withInventoryPaused('beeper read', () => uhf.getBeep());
+    res.json({ ok: on != null, on });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * Read-zone floor: POST { minRssi: -65 } to drop weaker reads entirely, or
+ * { minRssi: null } to keep everything.
+ *
+ * Deliberately NOT part of /power: turning the transmitter down shrinks the
+ * physical field (and weakens the read you WANT), while this leaves the field
+ * alone and discards what comes back too faint. At a gate you usually want
+ * both — enough power to read the carton passing, plus a floor that throws away
+ * the shelf stock that same power reaches.
+ */
+app.post('/read-filter', (req, res) => {
+  try {
+    // An absent key is a malformed request, NOT "turn the floor off" — a stray
+    // POST {} would otherwise silently reopen the read zone mid-shift.
+    if (!req.body || !('minRssi' in req.body)) {
+      return res.status(400).json({ ok: false, error: 'minRssi required (negative dBm, or null to turn the floor off)' });
+    }
+    const raw = req.body.minRssi;
+    const status = controller.setMinRssi(raw === null || raw === '' ? null : raw);
+    res.json({ ok: true, minRssi: status.minRssi, weakDropped: status.weakDropped });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
 // Antenna config: which ports are enabled + physically connected.
 app.get('/antennas', async (_req, res) => {
   try {
     const uhf = require('./driver');
-    const info = await controller._withLock(async () => ({
+    const info = await withInventoryPaused('antenna read', async () => ({
       enabled: await uhf.getAntennas(),
       connected: await uhf.getAntennaLink(),
     }));
@@ -817,10 +953,11 @@ app.post('/antennas', async (req, res) => {
     const uhf = require('./driver');
     const ports = req.body?.ports;
     if (!Array.isArray(ports) || ports.length === 0) return res.status(400).json({ ok: false, error: 'ports: number[] required' });
-    const result = await controller._withLock(async () => {
+    const result = await withInventoryPaused('antenna change', async () => {
       const rc = await uhf.setAntennas(ports, true);
       return { rc, enabled: await uhf.getAntennas() };
     });
+    controller.log(`Antennas enabled: ${(result.enabled || ports).join(', ')} (rc=${result.rc}).`);
     res.json({ ok: result.rc === 0, ...result });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -942,7 +1079,12 @@ app.post('/tag/power', async (req, res) => {
   });
 });
 
-app.get('/nexus/summary', (_req, res) => res.json({ ok: true, ...nexus.summary() }));
+app.get('/nexus/summary', (_req, res) =>
+  // The pallet window lives on the outbox, not the detector, but it is a gate
+  // TUNING value and belongs in the one summary the console already polls —
+  // a second endpoint for one number is how settings end up scattered.
+  res.json({ ok: true, ...nexus.summary(), palletWindowMs: outbox.togglePalletWindowMs })
+);
 app.get('/nexus/inventory', (_req, res) => res.json({ ok: true, inventory: nexus.getInventory() }));
 app.get('/nexus/events', (req, res) => res.json({ ok: true, events: nexus.getEvents(Number(req.query.limit) || 50) }));
 /**
@@ -952,6 +1094,311 @@ app.get('/nexus/events', (req, res) => res.json({ ok: true, events: nexus.getEve
  * passages are real warehouse events, and this is the one endpoint that can
  * destroy them. A stray call from a dashboard bug must not be able to.
  */
+/**
+ * Reset-marker poll — the gate asking Nexus "has anything been reset?"
+ *
+ * Exists because the direction matters. Nexus is on the internet and this bridge
+ * is on a warehouse LAN with no route in, so the webhook below can only ever
+ * work through a tunnel. Everything this gate already does — pushing movements,
+ * reading the board — goes OUTWARD, and so does this.
+ *
+ * Nexus only has to expose one small read: when the last receiving reset
+ * happened, and which cartons it affected. Small is the point — it is cheap
+ * enough to ask every few seconds, where re-reading the whole receiving list
+ * (BOARD_REFRESH_MS, a minute) is not.
+ *
+ * Expected JSON, both keys optional:
+ *   { "resetAt": "2026-08-24T06:32:11.000Z",   // or "resetSeq": 47
+ *     "epcs": ["E280...", ...],
+ *     "reason": "batch 4821 reset on iPad" }
+ *
+ * `resetAt` is treated as an OPAQUE marker, not a date: any value that changes
+ * when a reset happens works, so Nexus can hand over a counter, a row id or a
+ * hash without this needing to know which. It is only ever compared for
+ * equality.
+ *
+ * The figure-watching detector in board.js stays as the fallback — this poll
+ * being unconfigured, or Nexus's marker being wrong, must not leave resets
+ * completely invisible.
+ */
+const RESET_POLL_URL = (process.env.NEXUS_RESET_URL || '').trim();
+const RESET_POLL_MS = Math.max(1000, Number(process.env.NEXUS_RESET_POLL_MS || 5000));
+const RESET_POLL_KEY = (process.env.MOVEMENT_API_KEY || process.env.NEXUS_API_KEY || '').trim();
+
+/**
+ * The cursor, PERSISTED.
+ *
+ * Nexus's marker doubles as a `?since=` cursor, and keeping it on disk is what
+ * makes a restart correct rather than merely safe. Held only in memory, a boot
+ * has two bad options: act on whatever the marker currently says (replaying an
+ * old reset, hours late, mid-shift) or take it as a baseline and act on nothing
+ * (silently missing a reset that happened while the bridge was down — and the
+ * gate's memory is rebuilt from the journal at boot, so those cartons come back
+ * stale and stuck).
+ *
+ * With the cursor on disk there is no choice to make: ask for everything after
+ * where we left off. No replay, nothing missed.
+ *
+ * `null` still means "no cursor at all" — a genuinely first boot, where taking a
+ * baseline IS right because there is no gap to catch up on.
+ */
+const RESET_CURSOR_PATH = require('path').join(__dirname, '..', 'data', 'reset-cursor.json');
+let lastResetMarker = null;
+let lastResetSeq = null; // numeric half, sent as ?since= — null until Nexus gives one
+let resetPollFailures = 0;
+
+try {
+  const saved = JSON.parse(require('fs').readFileSync(RESET_CURSOR_PATH, 'utf8'));
+  if (saved?.marker != null) lastResetMarker = String(saved.marker);
+  if (Number.isFinite(saved?.seq)) lastResetSeq = Math.floor(saved.seq);
+} catch {
+  /* first boot, or unreadable — treated as "no cursor", which takes a baseline */
+}
+
+function saveResetCursor() {
+  try {
+    const { writeFileAtomic } = require('./atomic-write');
+    require('fs').mkdirSync(require('path').dirname(RESET_CURSOR_PATH), { recursive: true });
+    writeFileAtomic(RESET_CURSOR_PATH, JSON.stringify({ marker: lastResetMarker, seq: lastResetSeq }) + '\n');
+  } catch (err) {
+    // Not fatal, but it silently degrades the next restart back to the baseline
+    // behaviour above, so it must be visible.
+    controller.log(`[reset] cursor write failed (${err.message}) — a restart may miss a reset`, 'warn');
+  }
+}
+
+async function pollResetMarker() {
+  try {
+    // Send the cursor when we have one: without it Nexus has to return the full
+    // EPC list on every poll, and a container-sized reset is thousands of tags
+    // — 17,280 times a day. With it, an up-to-date gate gets `epcs: []`.
+    const url = new URL(RESET_POLL_URL);
+    if (lastResetSeq != null) url.searchParams.set('since', String(lastResetSeq));
+    const res = await fetch(url, {
+      headers: RESET_POLL_KEY ? { Authorization: `Bearer ${RESET_POLL_KEY}` } : {},
+      signal: AbortSignal.timeout(Math.min(RESET_POLL_MS, 10_000)),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = await res.json();
+    // Only complain once per outage, then again when it recovers — a poll this
+    // frequent would otherwise bury the log in identical lines.
+    if (resetPollFailures > 0) {
+      controller.log(`[reset] Nexus reset marker readable again (after ${resetPollFailures} failed attempt(s)).`);
+      resetPollFailures = 0;
+    }
+    // Prefer resetSeq: it is the authoritative counter AND the cursor, so
+    // comparing anything else risks a marker that moves while the cursor does
+    // not. resetAt is the fallback for a deployment that only sends a timestamp.
+    const seq = Number.isFinite(Number(body?.resetSeq)) ? Math.floor(Number(body.resetSeq)) : null;
+    const marker = seq != null ? seq : body?.resetAt;
+    if (marker == null || marker === '') return; // nothing published yet
+    const seen = String(marker);
+
+    if (lastResetMarker === null) {
+      lastResetMarker = seen;
+      lastResetSeq = seq;
+      saveResetCursor();
+      controller.log(`[reset] cursor starts at ${seen} — watching for changes.`);
+      return;
+    }
+    if (seen === lastResetMarker) return;
+
+    // Commit the cursor BEFORE doing the work. If applying it throws, the next
+    // poll must not retry the same reset forever.
+    const truncated = body?.truncated === true;
+    lastResetMarker = seen;
+    lastResetSeq = seq;
+    saveResetCursor();
+    await applyReceivingReset({
+      epcs: body?.epcs,
+      batches: [body?.batchRef, body?.batchId].filter((v) => typeof v === 'string' && v.trim()),
+      skus: Array.isArray(body?.skus) ? body.skus : [],
+      forgetEverything: truncated,
+      reason:
+        (typeof body?.reason === 'string' && body.reason.trim() ? body.reason.trim() : `reset marker moved to ${seen}`) +
+        (truncated ? ' [Nexus truncated the carton list]' : ''),
+      source: 'nexus-poll',
+    });
+  } catch (err) {
+    resetPollFailures++;
+    if (resetPollFailures === 1) {
+      controller.log(`[reset] cannot read the Nexus reset marker (${err.message}) — falling back to the figure check`, 'warn');
+    }
+  }
+}
+
+/**
+ * Receiving-reset webhook: Nexus (or the iPad, through Nexus) tells the gate a
+ * batch has been reset, the moment it happens.
+ *
+ * Replaces guesswork with a statement. The poll in board.js infers a reset from
+ * receiving figures going backwards, which works but is up to BOARD_REFRESH_MS
+ * late — and during that window the gate is still running on the old picture,
+ * so cartons re-scanned immediately after a reset on the iPad get judged
+ * against state that no longer exists. The poll STAYS as the fallback: a webhook
+ * that is never wired up, or a Nexus that cannot reach the gate, must not leave
+ * resets undetected.
+ *
+ * Body, all optional:
+ *   { epcs: ["E280...", ...] }  forget exactly these cartons. PREFERRED — a
+ *                               reset of one batch should not clear the gate's
+ *                               memory of a different batch's cartons, which is
+ *                               what the unscoped path has to do.
+ *   { reason: "batch 4821 reset on iPad" }   free text, ends up in the log
+ *   { batchId, documentId }      recorded alongside the reason
+ *
+ * With no epcs it falls back to the same full wipe the poll performs.
+ *
+ * Auth: if RESET_WEBHOOK_KEY (or MOVEMENT_API_KEY / NEXUS_API_KEY — the key
+ * Nexus already holds) is set, an Authorization: Bearer header must match.
+ * Compared with timingSafeEqual. No key configured = open, like every other
+ * route on this LAN-only bridge; the boot log says which it is.
+ */
+const RESET_WEBHOOK_KEY = (process.env.RESET_WEBHOOK_KEY || process.env.MOVEMENT_API_KEY || process.env.NEXUS_API_KEY || '').trim();
+
+function resetWebhookAuthorized(req) {
+  if (!RESET_WEBHOOK_KEY) return true; // unconfigured = open, same as the rest
+  const header = String(req.get('authorization') || '');
+  const offered = header.replace(/^Bearer\s+/i, '').trim();
+  if (!offered) return false;
+  const a = Buffer.from(offered);
+  const b = Buffer.from(RESET_WEBHOOK_KEY);
+  // Length must be compared separately — timingSafeEqual throws on a mismatch.
+  return a.length === b.length && require('crypto').timingSafeEqual(a, b);
+}
+
+app.post('/receiving/reset', async (req, res) => {
+  if (!resetWebhookAuthorized(req)) {
+    controller.log('[reset] webhook rejected: bad or missing bearer key', 'warn');
+    return res.status(401).json({ ok: false, error: 'bad or missing Authorization: Bearer key' });
+  }
+  const body = req.body || {};
+  const tags = [body.batchId, body.documentId].filter(Boolean).join(' ');
+  const result = await applyReceivingReset({
+    epcs: body.epcs,
+    // Fallbacks when no tags are named: the gate resolves a batch ref or a
+    // product to its own cartons rather than clearing everything.
+    batches: [body.batchRef, body.batchId, body.documentRef].filter((v) => typeof v === 'string' && v.trim()),
+    skus: Array.isArray(body.skus) ? body.skus : [],
+    reason: `${typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim() : 'reset reported by Nexus'}${tags ? ` (${tags})` : ''}`,
+    source: 'webhook',
+  });
+  res.json({ ok: true, ...result });
+});
+
+/**
+ * Apply a reset the gate has been TOLD about (webhook or reset-marker poll),
+ * as opposed to one it inferred from figures moving.
+ *
+ * One function for both so the two can never drift: the webhook and the poller
+ * are two delivery routes for the same fact, and a fix to what a reset means
+ * has to land on both.
+ *
+ * @param {string[]} [epcs] the cartons that were un-received. Naming them is
+ *   what makes the reset surgical — without them the gate has no choice but to
+ *   forget every tag, including cartons from batches nobody touched.
+ * @param {boolean} [refreshBoard] false when the caller is already inside a
+ *   board load (the figure detector), true otherwise.
+ */
+async function refreshBoardAfterReset(source) {
+  // Redraw against post-reset figures instead of waiting out BOARD_REFRESH_MS.
+  // Suppress first: this very refresh is the one that would see the drop and
+  // announce the same reset a second time.
+  board.suppressNextReset(source);
+  try {
+    await board.load();
+  } catch (err) {
+    controller.log(`[reset] board refresh after ${source} failed (${err.message}) — screens told anyway`, 'warn');
+  }
+}
+
+async function applyReceivingReset({ epcs, batches, skus, reason, source, refreshBoard = true, forgetEverything = false }) {
+  // An ABSENT list and an EMPTY list mean different things, and conflating them
+  // is a real bug either way round:
+  //   absent  -> the caller did not say which cartons. Unknown, so wipe all.
+  //   empty   -> the caller says explicitly "no cartons were affected" (Nexus's
+  //              cursor answers `epcs: []` to an up-to-date gate). Wiping there
+  //              would throw away the gate's whole memory on a reset that
+  //              touched nothing.
+  const named = Array.isArray(epcs);
+  const list = named ? epcs.filter((e) => typeof e === 'string' && e.trim()).map((e) => e.trim().toUpperCase()) : [];
+
+  let cleared = 0;
+  let scope;
+  // Nexus named a batch or a product but no tags? Resolve it here rather than
+  // widening to a full wipe. The gate's own catalogue knows which tags belong to
+  // a batch (the carton code carries the ref as a prefix), so a batch redo stays
+  // surgical even when the reply carries no EPC list.
+  if (!forgetEverything && !list.length && (batches?.length || skus?.length)) {
+    const r = nexus.forgetScope({ batches, skus });
+    if (r.epcs.length) {
+      controller.log(
+        `[reset] ${source}: ${reason} — resolved ${batches?.length ? `batch(es) ${batches.join(', ')}` : ''}` +
+          `${batches?.length && skus?.length ? ' + ' : ''}${skus?.length ? `product(s) ${skus.join(', ')}` : ''}` +
+          ` to ${r.epcs.length} carton(s), ${r.cleared} had local state`
+      );
+      if (refreshBoard) await refreshBoardAfterReset(source);
+      broadcast({
+        type: 'receiving-reset',
+        epcs: r.epcs,
+        count: r.epcs.length,
+        reasons: [reason],
+        source,
+        timestamp: new Date().toISOString(),
+      });
+      return { scoped: true, epcs: r.epcs.length, cleared: r.cleared };
+    }
+    // Named a scope the gate cannot resolve — a pallet code, or a batch whose
+    // tags are not in the catalogue yet. Widening to a full wipe here would
+    // clear cartons from batches nobody touched, so it does NOT: it says so and
+    // keeps the memory, because a wrong wipe double-counts real stock while a
+    // missed forget only refuses a redo, visibly, with a reason.
+    controller.log(
+      `[reset] ${source}: ${reason} — could not resolve the named scope to any carton ` +
+        `(pallet codes are not resolvable here; ask Nexus for epcs or skus). Memory kept.`,
+      'warn'
+    );
+    scope = 'named scope unresolvable — memory kept, nothing forgotten';
+    if (refreshBoard) await refreshBoardAfterReset(source);
+    broadcast({ type: 'receiving-reset', epcs: [], count: 0, reasons: [reason], source, timestamp: new Date().toISOString() });
+    return { scoped: false, epcs: 0, cleared: 0, unresolved: true };
+  }
+  if (forgetEverything) {
+    // Nexus truncated the list: there were more cartons than one reply carries,
+    // so the names we did get are a subset and the rest are unknown. Forgetting
+    // the subset would leave real cartons stuck as INSIDE — silently unable to
+    // re-count, which is the exact failure this whole mechanism exists to stop.
+    nexus.resetForReceiving();
+    scope = `truncated list (${list.length} name(s) shown) — full wipe, the remainder is unknown`;
+  } else if (!named) {
+    // Nothing named at all. Every tag reads as arriving again — right for the
+    // reset batch, tolerable for the rest only because the absence gate still
+    // makes a carton leave the field and come back.
+    nexus.resetForReceiving();
+    scope = 'no epcs given — full wipe';
+  } else if (list.length) {
+    cleared = nexus.forgetEpcs(list);
+    scope = `${list.length} carton(s) named, ${cleared} had local state`;
+  } else {
+    scope = 'no cartons affected — figures refreshed, movement memory kept';
+  }
+  controller.log(`[reset] ${source}: ${reason} — ${scope}`);
+
+  // The screens still need telling either way — a Nexus that is briefly
+  // unreachable does not make the reset any less real.
+  if (refreshBoard) await refreshBoardAfterReset(source);
+
+  broadcast({
+    type: 'receiving-reset',
+    epcs: list,
+    count: list.length,
+    reasons: [reason],
+    source,
+    timestamp: new Date().toISOString(),
+  });
+  return { scoped: list.length > 0, epcs: list.length, cleared };
+}
+
 app.post('/admin/wipe-local', (req, res) => {
   if (req.body?.confirm !== 'wipe') {
     return res.status(400).json({
@@ -1030,12 +1477,22 @@ app.post('/movement/replay', (req, res) => {
 });
 
 app.post('/nexus/config', (req, res) => {
+  // Routed here rather than to its own endpoint for the reason above. Applied
+  // before the detector config so a bad value fails the whole request instead of
+  // half-applying it.
+  if (req.body && req.body.palletWindowMs != null) {
+    try {
+      outbox.setPalletWindowMs(req.body.palletWindowMs);
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
+  }
   const summary = nexus.setConfig(req.body || {});
   controller.log(
     `[nexus] config: detect=${summary.detectMode} dedup=${summary.dedupMs}ms quiet=${summary.quietMs}ms maxWindow=${summary.maxWindowMs}ms` +
       ` | no-IR: rearm=${summary.toggleDedupMs}ms absence=${summary.absenceMs}ms minRssi=${summary.minRssi ?? 'off'} minReads=${summary.toggleMinReads}`
   );
-  res.json({ ok: true, ...summary });
+  res.json({ ok: true, ...summary, palletWindowMs: outbox.togglePalletWindowMs });
 });
 
 
@@ -1223,6 +1680,27 @@ app.post('/printer/pallet-test-tag', async (req, res) => {
 server.listen(PORT, () => {
   controller.log(`Bridge listening on http://localhost:${PORT}  (WS: ws://localhost:${PORT}/ws)`);
   controller.log(`Reader defaults: ${DEFAULT_IP}:${DEFAULT_PORT}. Supabase forwarding: ${SB_ENABLED ? 'ON' : 'off'}.`);
+  if (outbox.palletCodeFormat === 'short') {
+    controller.log(
+      'Pallet codes: SHORT form (PALLET-G1-001). Nexus must accept this pattern — if cartons start dead-lettering, ' +
+        'set PALLET_CODE_FORMAT=long and restart.',
+      'warn'
+    );
+  } else {
+    controller.log('Pallet codes: long form (PLT-<GATE>-00000000). Set PALLET_CODE_FORMAT=short once Nexus accepts PALLET-G1-001.');
+  }
+  controller.log(
+    RESET_WEBHOOK_KEY
+      ? 'Reset webhook: POST /receiving/reset (bearer key required).'
+      : 'Reset webhook: POST /receiving/reset (NO key set — open on this LAN; set RESET_WEBHOOK_KEY to require one).'
+  );
+  // A floor silently discarding reads is the first thing to suspect when a gate
+  // "stops seeing tags", so it says so on every boot rather than only when set.
+  controller.log(
+    controller.minRssi == null
+      ? 'Read floor: off — every read is kept (set READ_MIN_RSSI or POST /read-filter to shrink the read zone).'
+      : `Read floor: ${controller.minRssi}dBm — weaker reads are dropped and never recorded.`
+  );
 
   const ob = outbox.status();
   if (!ob.configured) {
@@ -1243,25 +1721,33 @@ server.listen(PORT, () => {
   reportClockOffset();
   outbox.start();
   outbox.emitPendingBatches();
-  board.start(); // warm the document cache so the first kiosk paint is instant
+  // The document cache is warmed below, before the reader starts — see the
+  // awaited block at the end of boot.
 
   // ...and keep it warm on the BRIDGE's own clock. Until now the board only
   // refreshed inside get(), i.e. only when a kiosk asked for it — fine while the
   // cache was just something to paint, but the gate now uses it to decide
-  // whether an arriving carton has an open receiving batch (expectsInbound).
+  // whether an arriving carton has an open receiving batch (receivableSku).
   // Hanging a safety check off "is a browser open somewhere" is wrong: on a
   // TV-only doorway nothing calls /board/documents at all, the board would age
   // past expectMaxAgeMs, and the check would quietly go back to passing
   // everything. This interval is what makes the verdict independent of the
   // screens.
+  // Reset marker: the gate asking Nexus, every few seconds, whether a receiving
+  // reset has happened. Unconfigured leaves the minute-late figure check as the
+  // only detector, so say so rather than letting it look wired up.
+  if (RESET_POLL_URL) {
+    controller.log(`Reset marker: polling ${RESET_POLL_URL} every ${RESET_POLL_MS}ms.`);
+    void pollResetMarker(); // take the baseline now, not one interval from now
+    setInterval(() => void pollResetMarker(), RESET_POLL_MS).unref();
+  } else {
+    controller.log('Reset marker: NEXUS_RESET_URL unset — resets are only noticed by the slower figure check.');
+  }
+
   const BOARD_REFRESH_MS = Number(process.env.BOARD_REFRESH_MS || 60_000);
   if (BOARD_REFRESH_MS > 0) {
     setInterval(() => void board.load(), BOARD_REFRESH_MS).unref();
   }
-
-  // Refresh the catalog from the live tag registry (falls back to the cached
-  // data/catalog.json already loaded by the constructor).
-  nexus.loadCatalogRemote();
 
   // ...and keep refreshing it. This used to be a boot-only load, which was fine
   // while the catalog was just EPC -> product name: a tag printed after boot
@@ -1280,11 +1766,28 @@ server.listen(PORT, () => {
   if (CATALOG_REFRESH_MS > 0) {
     setInterval(() => void nexus.loadCatalogRemote(), CATALOG_REFRESH_MS).unref();
   }
-  try {
-    controller.start();
-  } catch (err) {
-    controller.log(`Failed to start controller: ${err.message}`, 'error');
-  }
+  // The reader starts LAST, and only once the gate knows what it is allowed to
+  // receive.
+  //
+  // Both loads are what the receiving rule reads: the board says which products
+  // an open batch is waiting for, the catalog says which EPC is which carton and
+  // which have already been taken in. A read arriving before either lands can
+  // only be ignored ('unknown-tag' or 'no-batch-data'), and the absence gate
+  // then holds that tag for absenceMs — so a carton crossing in the first
+  // seconds of boot would be missed outright, silently. Waiting a beat is much
+  // cheaper than that.
+  //
+  // Neither load can hang the doorway: each falls back to its own disk cache and
+  // each carries its own request timeout, and allSettled means a failure starts
+  // the reader anyway rather than leaving a gate that never opens.
+  void (async () => {
+    await Promise.allSettled([board.load(), nexus.loadCatalogRemote()]);
+    try {
+      controller.start();
+    } catch (err) {
+      controller.log(`Failed to start controller: ${err.message}`, 'error');
+    }
+  })();
 });
 
 process.on('SIGINT', async () => {

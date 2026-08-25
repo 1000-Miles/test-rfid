@@ -20,13 +20,14 @@
  *   'ir' (default) — direction observed by the beams, exactly as documented
  *   below. Reads without a direction are strays.
  *
- *   'toggle' (NO-IR trial) — no beams; the antennas face each other across the
- *   doorway and the reader reads continuously. Every read burst ("visit") IS a
- *   passage, and direction is INFERRED, not observed: first pass = received
- *   (IN), next pass = shipping out (OUT). The inference is anchored to state
- *   rather than a blind per-EPC flip — see _inferToggleDirection — because a
- *   blind flip desyncs silently and then inverts every later event. Extra
- *   guards, all of which exist because there is no passage boundary anymore:
+ *   'toggle' (NO-IR, the mode this gate runs) — no beams; the antennas face
+ *   each other across the doorway and the reader reads continuously. Every read
+ *   burst ("visit") IS a passage. Direction is NOT inferred from visit order any
+ *   more: the first-pass-in / next-pass-out rule that used to live here has been
+ *   deleted in favour of _decideReceiving, which asks the paperwork instead of
+ *   guessing. Extra guards, all of which exist because there is no passage
+ *   boundary anymore — and which are now noise control rather than the thing
+ *   holding correctness together:
  *     - absenceMs: a new visit opens only after the tag has been UNSEEN this
  *       long ("it left the field" replaces "the beams cleared") — otherwise a
  *       pallet parked in the read zone flips in/out forever
@@ -41,10 +42,24 @@
  *       is usually a real carton at an awkward angle, and dropping it loses a
  *       carton silently, which costs far more than an occasional stray.
  *
- * Direction (two IR beams, decided by the bridge controller):
+ * WHAT A READ BECOMES — receiving only, no direction logic:
+ *   This gate receives, or it does nothing. See _decideReceiving for the rule
+ *   in full; in short, a read becomes a receipt only when the tag is a KNOWN
+ *   carton, has NOT been taken in already (locally or per Nexus), and its
+ *   product is on an open receiving batch. Everything else is ignored —
+ *   silently on the boards, counted in summary().
+ *
+ *   There is no outbound path. Shipping is off (allowShipping) because nothing
+ *   tells this bridge which cartons are on an open shipment, so an exit could
+ *   only be guessed at; an observed outbound read is ignored instead.
+ *
+ *   The two modes below therefore differ only in READ QUALITY — whether a
+ *   physical passage boundary exists — never in what a read means.
+ *
+ * Read grouping (two IR beams, decided by the bridge controller):
  *   - GPI1 beam broken first = IN, GPI2 beam broken first = OUT. The
  *     controller stamps that passage direction onto every tag message it
- *     emits during the burst; this module just consumes `tag.direction`.
+ *     emits during the burst. An 'out' stamp is now an ignore, not a dispatch.
  *   - Reads for an EPC are buffered in a SLIDING window: the decision fires
  *     after `quietMs` (default 700ms) with no new reads, or `maxWindowMs`
  *     (default 4000ms) after the first read — whichever comes first. This
@@ -52,7 +67,8 @@
  *     direction wins for that EPC.
  *   - Reads with NO direction (manual-mode reads, ambiguous both-beams-at-
  *     once triggers, HW-mode UDP reads) are stray reads -> IGNORED, status
- *     never flips.
+ *     never flips. In no-IR mode there is no stamp to require, so the window
+ *     groups one visit and the rule decides it.
  *   - Dedup, two layers:
  *       1. Passage-scoped: a tag fires at most ONE event per physical passage
  *          (`tag.passageId` from the controller) — a pallet parked in the
@@ -74,28 +90,21 @@
  *     apart. Each successful load is cached to data/catalog.json so offline
  *     boots still know the tags. Unknown EPCs are auto-registered as unknown
  *     items (still tracked).
- *   - Sanity check, both directions (_movementCheck). A passage that
- *     contradicts what Nexus knows is stamped `unexpected: <reason>`:
- *       inbound  'no-open-batch'    no live receiving batch expects this
- *                                   product, so nothing here is a receipt
- *       outbound 'not-received'     the carton was never taken in
- *       outbound 'already-shipped'  the carton has already left
- *     Such a passage is still reported and still journaled — it physically
- *     happened — but it is not presented as a receipt or a dispatch: it moves
- *     neither local tally, the board files it as an exception instead of
- *     crediting a line, and the TV stamps it as an anomaly instead of
- *     CHECKED IN. Every arm goes QUIET rather than guessing when its source
- *     data is missing or stale; see _movementCheck.
+ *   - Sanity checking is no longer a stamp on a reported passage; it IS the
+ *     decision. What used to be reported-but-flagged ('no-open-batch',
+ *     'not-received', 'already-shipped') is now simply not an event at all, so
+ *     `unexpected` is permanently null and the boards have no exceptions to
+ *     file. The reasons live in summary().ignored instead.
  *   - In-memory live view: epc -> { item, status: 'INSIDE'|'OUTSIDE', ... }.
  *     This is a LOCAL DISPLAY CONVENIENCE for the dashboard/TV board only — it
  *     resets on restart and is not a record of anything. Nexus owns warehouse
  *     state (warehouse_carton / warehouse_pallet); never reconcile against this.
  *
- * Emits 'movement' events:
- *   { type: 'entry'|'exit', direction: 'in'|'out', method: 'ir'|'toggle',
+ * Emits 'movement' events — always a receipt:
+ *   { type: 'entry', direction: 'in', method: 'ir'|'toggle',
  *     epc, known, item, location, timestamp, antennas: number[],
- *     basis: null | string (toggle only: WHY this direction was inferred),
- *     unexpected: null | 'no-open-batch' | 'not-received' | 'already-shipped' }.
+ *     basis: 'on-open-batch' | 'on-open-batch-cached'  (WHY it was received),
+ *     unexpected: null  (kept on the wire; nothing questionable is emitted) }.
  */
 
 const fs = require('fs');
@@ -104,6 +113,7 @@ const EventEmitter = require('events');
 const { writeFileAtomic } = require('./atomic-write');
 
 const CATALOG_PATH = path.join(__dirname, '..', 'data', 'catalog.json');
+const FORGOTTEN_PATH = path.join(path.dirname(CATALOG_PATH), 'receiving-forgotten.json');
 
 class PassageDetector extends EventEmitter {
   constructor(opts = {}) {
@@ -128,11 +138,44 @@ class PassageDetector extends EventEmitter {
     // back to reporting the passage without a verdict.
     this.stateMaxAgeMs = opts.stateMaxAgeMs ?? 30 * 60_000;
     this._cartonStateAt = null; // ms epoch of the last successful warehouse_carton read
-    // Injected by server.js from the BoardFeed: sku -> true | false | null.
+    // Injected by server.js from the BoardFeed: sku -> {ok, source}.
     // A function rather than a snapshot because the board refreshes on its own
     // schedule and the answer must be the one true at PASSAGE time, not at
-    // construction time. Absent (reader-only builds, tests) = never judged.
-    this.expectsInbound = typeof opts.expectsInbound === 'function' ? opts.expectsInbound : null;
+    // construction time. Absent (reader-only builds, tests) = nothing is
+    // receivable, which is the safe direction: the gate reports nothing rather
+    // than crediting cartons against paperwork it cannot see.
+    this.receivableSku = typeof opts.receivableSku === 'function' ? opts.receivableSku : null;
+    /**
+     * Shipping. OFF, and it stays off until Nexus can tell this gate which
+     * cartons are on an open shipment — it currently cannot: the shipping feed
+     * is not called and no outbound document reaches the bridge. With no such
+     * source an exit could only ever be GUESSED, and guessing is exactly what
+     * put 196 dispatches for cartons nobody shipped into this gate's journal.
+     * So an outbound read is IGNORED rather than reported.
+     */
+    this.allowShipping = opts.allowShipping === true;
+    // Why reads were ignored, by reason, since boot. The answer to "the gate saw
+    // it, so why didn't it receive it?" — without which the only honest reply is
+    // "read the logs". Exposed in summary().
+    this._ignored = new Map();
+    /**
+     * When each carton was FORGOTTEN, and when everything was.
+     *
+     * The journal is the gate's durable memory, and hydrate() replays it at
+     * every boot. A reset that only cleared the in-memory record was therefore
+     * undone by the next restart: the journal still said "received", hydrate
+     * put the carton back INSIDE, and the redo was declined as
+     * 'already-received-here' — silently, which is the worst way to lose a
+     * re-scan and exactly what the reset exists to prevent.
+     *
+     * So a forget is a durable, TIMESTAMPED fact. Any journalled movement at or
+     * before the cutoff is void; anything after it stands, so a carton received
+     * again after the reset is remembered normally.
+     */
+    this._forgottenAt = new Map(); // epc -> ms
+    this._forgottenAllAt = 0; // ms, from resetForReceiving()
+    this._forgottenPath = FORGOTTEN_PATH;
+    this._loadForgotten();
     this.catalog = {};
     this.inventory = new Map(); // epc -> record
     this.events = []; // newest first, capped
@@ -312,14 +355,12 @@ class PassageDetector extends EventEmitter {
    * and the goods are, as far as the records go, no longer in the building. They
    * have to roll back through the doorway to be received again.
    *
-   * Without this the gate would fight itself for a while. _inferToggleDirection
-   * prefers the LOCAL flip — the tag came in, so it must be going out — and only
-   * lets the snapshot win once the snapshot is decisively newer than the local
-   * move (two minutes). Inside that window a reset pallet rolling back in would
-   * be read as a dispatch, stamped unexpected, and never counted as arriving.
-   * So a withdrawal clears the local claim instead of waiting to be outvoted:
-   * the record goes OUTSIDE with no move anchor, and the next passage decides
-   * from state alone — 'state-never-received' — which is an entry.
+   * Without this the gate refuses the redo outright. _decideReceiving ignores a
+   * tag whose record still says INSIDE, so a withdrawn pallet rolling back in
+   * would be declined as 'already-received-here' — silently, which is the worst
+   * possible way to lose a re-scan. Clearing the local claim is what makes the
+   * carton receivable again: the record goes OUTSIDE, and with Nexus's row gone
+   * too, the next pass sees a carton nobody has taken in.
    *
    * Only ever called after a state read that actually SUCCEEDED, and only when
    * the previous pass had state too. A failed fetch leaves every entry without
@@ -342,16 +383,7 @@ class PassageDetector extends EventEmitter {
     }
     if (withdrawn.length === 0) return;
 
-    let cleared = 0;
-    for (const tag of withdrawn) {
-      this._lastEventAt.delete(tag);
-      this._lastEventPassage.delete(tag);
-      const rec = this.inventory.get(tag);
-      if (!rec) continue;
-      rec.status = 'OUTSIDE';
-      rec.lastMoveAt = 0; // drop the recency anchor _inferToggleDirection reads
-      cleared++;
-    }
+    const cleared = this.forgetEpcs(withdrawn);
     this.emit(
       'log',
       `${withdrawn.length} carton tag(s) withdrawn in Nexus (receiving reset or delete) — ` +
@@ -367,54 +399,133 @@ class PassageDetector extends EventEmitter {
   }
 
   /**
-   * Is this carton entitled to leave?
+   * Forget the gate's movement memory for SPECIFIC tags, so each reads as
+   * arriving next time it passes.
    *
-   * Returns a reason code when an OUTBOUND passage contradicts what Nexus knows
-   * about the carton, or null when the passage is unremarkable — including when
-   * the gate simply cannot tell, which is not the same as "fine" but must be
-   * treated as such: refusing to report a passage the gate is unsure about
-   * would lose a movement that physically happened.
+   * The scoped counterpart to resetForReceiving(): when the caller knows
+   * exactly which cartons were un-received — a reset webhook that names them —
+   * throwing away every other tag's state is collateral damage. A carton from
+   * an untouched batch that happens to be sitting inside would come back as
+   * ARRIVING and be counted twice.
    *
-   *   'not-received'    a printed tag with no warehouse_carton row — the carton
-   *                     was never taken in, so it cannot be going out
-   *   'already-shipped' the tag's current carton is already shipped; whatever
-   *                     just left, it is not that carton leaving again
+   * Same three registers as the full reset, and `_lastReadAt` is kept for the
+   * same reason: it is the absence gate, and a reset in Nexus is not a movement
+   * at the door.
    *
-   * Deliberately NOT a whitelist of good states: the status enum lives in Nexus
-   * and can grow, and an unrecognised state must read as "no objection" rather
-   * than alarming on every passage the day a new state is added.
+   * Emits nothing — the caller decides what to tell the screens, because the
+   * 'withdrawn' listener triggers a FULL wipe and would undo the scoping.
+   *
+   * @returns {number} how many tags actually had local state to clear.
    */
-  _movementCheck(direction, item, rec) {
-    if (!item || item.kind !== 'carton') return null; // pallets have their own lifecycle
+  forgetEpcs(epcs) {
+    const now = Date.now();
+    let cleared = 0;
+    let stamped = 0;
+    for (const tag of epcs || []) {
+      if (!tag) continue;
+      // Stamped whether or not there is a local record: the journal may still
+      // hold a receipt for a carton this process has never seen in memory, and
+      // that is precisely the one a restart would resurrect.
+      this._forgottenAt.set(tag, now);
+      stamped++;
+      this._lastEventAt.delete(tag);
+      this._lastEventPassage.delete(tag);
+      const rec = this.inventory.get(tag);
+      if (!rec) continue;
+      rec.status = 'OUTSIDE';
+      rec.lastMoveAt = 0; // OUTSIDE again, so _decideReceiving can take it in
+      cleared++;
+    }
+    if (stamped) this._saveForgotten();
+    return cleared;
+  }
 
-    // INBOUND: is any live receiving batch actually waiting for this product?
-    // Nothing arrives at a warehouse door by accident, so a carton whose product
-    // is on no open batch is either a mis-tag, a delivery nobody booked, or
-    // stock that never left — none of which is a receipt.
-    if (direction === 'in') {
-      if (!this.expectsInbound) return null;
-      return this.expectsInbound(item.sku) === false ? 'no-open-batch' : null;
+  /**
+   * Resolve a reset's SCOPE to the exact tags it affected, then forget only
+   * those.
+   *
+   * A batch or pallet redo must never clear the whole gate. Cartons from
+   * untouched batches that happen to be sitting inside would come back as
+   * arriving and be counted a second time — the redo would fix one batch and
+   * corrupt every other.
+   *
+   * Three ways to name the scope, unioned:
+   *   epcs    — exact tags. Best, and what Nexus's reset marker already sends.
+   *   batches — a batch ref, e.g. 'RB-2026-0005'. Resolved locally: a carton's
+   *             code carries its batch as a prefix (RB-2026-0005-BSC-358-…), so
+   *             the gate can find the tags itself without being told.
+   *   skus    — every carton of a product.
+   *
+   * NOT resolvable here: a pallet CODE. The catalog knows which product and
+   * which box a tag is, but not which pallet a carton was put on — nothing in
+   * warehouse_carton's selected columns carries it. A pallet redo therefore has
+   * to arrive as `epcs` or `skus`; asking for it by pallet code alone returns
+   * nothing matched, and the caller decides what to do about that rather than
+   * this quietly widening to everything.
+   *
+   * @returns {{epcs: string[], cleared: number, matched: {epcs:number,batches:number,skus:number}}}
+   */
+  forgetScope({ epcs = [], batches = [], skus = [] } = {}) {
+    const want = new Set();
+    const matched = { epcs: 0, batches: 0, skus: 0 };
+
+    for (const e of epcs || []) {
+      if (typeof e === 'string' && e.trim()) {
+        want.add(e.trim().toUpperCase());
+        matched.epcs++;
+      }
+    }
+    const batchRefs = (batches || []).filter((b) => typeof b === 'string' && b.trim()).map((b) => b.trim().toUpperCase());
+    const skuSet = new Set((skus || []).filter((k) => typeof k === 'string' && k.trim()).map((k) => k.trim().toUpperCase()));
+
+    if (batchRefs.length || skuSet.size) {
+      for (const [tag, item] of Object.entries(this.catalog || {})) {
+        if (!item || item.kind !== 'carton') continue; // pallets are not received
+        const code = String(item.carton || '').toUpperCase();
+        if (code && batchRefs.some((ref) => code.startsWith(ref))) {
+          if (!want.has(tag)) matched.batches++;
+          want.add(tag);
+          continue;
+        }
+        if (skuSet.size && skuSet.has(String(item.sku || '').toUpperCase())) {
+          if (!want.has(tag)) matched.skus++;
+          want.add(tag);
+        }
+      }
     }
 
-    // OUTBOUND: does Nexus's own record of the carton contradict it leaving?
-    //
-    // FIRST, believe our own eyes. If this gate watched the carton come IN, it
-    // is in the building — whatever the snapshot says. The snapshot is up to
-    // `NEXUS_CATALOG_REFRESH_MS` old and sits behind the outbox's delivery lag,
-    // so a carton received two minutes ago and leaving now is simply not in it
-    // yet, and every one of those exits was being stamped 'not-received'. The
-    // screens went permanently red for movements that were entirely correct,
-    // which reads as a caching fault because that is exactly what it is.
-    //
-    // Local evidence only ever SUPPRESSES an accusation here; it never creates
-    // one. A carton this gate never saw arrive is still judged on the snapshot.
-    if (rec && rec.status === 'INSIDE') return null;
+    const list = [...want];
+    return { epcs: list, cleared: this.forgetEpcs(list), matched };
+  }
 
-    if (!this._cartonStateAt) return null; // state never loaded — nothing to check against
-    if (Date.now() - this._cartonStateAt > this.stateMaxAgeMs) return null; // too stale to accuse
-    if (!item.receivedAt && !item.state) return 'not-received';
-    if (item.state === 'shipped') return 'already-shipped';
-    return null;
+  /**
+   * Persist the forget cutoffs. Best-effort, but loudly so: unwritten, the next
+   * restart replays the journal and quietly un-does the reset.
+   */
+  _saveForgotten() {
+    try {
+      // Only cutoffs that can still void something are worth keeping. A global
+      // cutoff supersedes every per-carton stamp at or before it.
+      for (const [epc, at] of this._forgottenAt) if (at <= this._forgottenAllAt) this._forgottenAt.delete(epc);
+      writeFileAtomic(
+        this._forgottenPath,
+        JSON.stringify({ allAt: this._forgottenAllAt, epcs: Object.fromEntries(this._forgottenAt) }) + '\n'
+      );
+    } catch (err) {
+      this.emit('log', `forget-state write failed (${err.message}) — a restart may un-do this reset`);
+    }
+  }
+
+  _loadForgotten() {
+    try {
+      const raw = JSON.parse(fs.readFileSync(this._forgottenPath, 'utf8'));
+      if (Number.isFinite(raw?.allAt)) this._forgottenAllAt = raw.allAt;
+      for (const [epc, at] of Object.entries(raw?.epcs || {})) {
+        if (Number.isFinite(at)) this._forgottenAt.set(String(epc).toUpperCase(), at);
+      }
+    } catch {
+      /* nothing forgotten yet, or unreadable — the journal simply applies in full */
+    }
   }
 
   /**
@@ -453,6 +564,10 @@ class PassageDetector extends EventEmitter {
         };
         this.inventory.set(e.epc, rec);
       }
+      // Void: this movement predates a reset that forgot the carton. Skipped
+      // rather than applied-then-cleared, so `entries` and the re-arm clock do
+      // not carry it either.
+      if (t <= Math.max(this._forgottenAllAt, this._forgottenAt.get(e.epc) || 0)) continue;
       if (t >= (rec.lastMoveAt || 0)) {
         rec.status = e.direction === 'in' ? 'INSIDE' : 'OUTSIDE';
         rec.lastMoveAt = t;
@@ -471,53 +586,78 @@ class PassageDetector extends EventEmitter {
   }
 
   /**
-   * NO-IR direction inference — used only when detectMode is 'toggle'.
+   * THE RECEIVING RULE — the whole decision this gate makes.
    *
-   * The rule being trialled is "first pass = received, next pass = shipping
-   * out". A blind per-EPC flip implements that but desyncs silently and then
-   * inverts every later event, so the flip is anchored to evidence — and
-   * RECENCY, not a fixed pecking order, decides which evidence wins:
+   * Direction is no longer inferred, guessed or flipped. It is not decided at
+   * all: this gate receives, or it does nothing. The question a read must answer
+   * is not "which way is this going" but "is this a carton the paperwork is
+   * still waiting for":
    *
-   *   local-flip        the gate's own last verdict for this EPC (survives
-   *                     restarts via hydrate()). Wins unless Nexus's snapshot
-   *                     is DECISIVELY newer — the margin is one catalog
-   *                     refresh cycle, because a snapshot merely slightly
-   *                     newer than the local event may predate that event's
-   *                     arrival in Nexus (drain + ingest + refresh lag).
-   *                     The decisive-win rule is also what lets a hand-
-   *                     correction in Nexus override the gate's memory within
-   *                     minutes instead of waiting for a restart.
-   *   state-*           Nexus carton state from the catalog:
-   *                     no warehouse row = never received -> IN;
-   *                     'shipped' = it left, a read now is a return -> IN;
-   *                     anything else = it is in the building -> OUT.
-   *                     STALE state is still used for direction — an old
-   *                     record beats a blind guess — but the basis is marked
-   *                     '-stale'. Only _outboundCheck (the accusatory flags)
-   *                     keeps a hard freshness gate: guesses may be humble,
-   *                     accusations may not be stale.
-   *   default           nothing known at all — the rule's opening move: IN.
+   *   1. unknown tag                  -> ignore. No record anywhere means there
+   *                                      is nothing to credit it against.
+   *   2. not a carton (pallet tag)    -> ignore. Pallets have their own
+   *                                      lifecycle; they are not received.
+   *   3. this gate already took it in -> ignore. Local memory: instant, and the
+   *                                      only source that is never minutes old.
+   *   4. Nexus says already received  -> ignore. Catches cartons taken in by a
+   *                                      handheld, or by this gate before a
+   *                                      restart.
+   *   5. product on no open batch     -> ignore. Nothing is expecting it.
+   *   6. otherwise                    -> RECEIVE.
    *
-   * `basis` travels on the event so the trial tab can show WHY each direction
-   * was chosen.
+   * Every ignore is SILENT on the boards, deliberately: a doorway that
+   * announces every carton it correctly declined is a doorway nobody reads.
+   * Each one is counted in summary() and logged, so the reason is always
+   * recoverable after the fact.
+   *
+   * What this replaces: the old first-pass-in / next-pass-out inference, which
+   * had to guess because it had nothing else to go on. In this gate's own
+   * journal that guess produced 196 dispatches for cartons that never shipped
+   * and 449 arrivals against no open batch. Neither is reachable from here any
+   * more — an event now needs a positive reason to exist at all.
+   *
+   * @returns {{action: 'receive'|'ignore', reason: string}}
    */
-  _inferToggleDirection(rec, item, known) {
-    const flip = (status) =>
-      status === 'INSIDE' ? { direction: 'out', basis: 'local-flip' } : { direction: 'in', basis: 'local-flip' };
-    const localAt = rec && (rec.status === 'INSIDE' || rec.status === 'OUTSIDE') ? rec.lastMoveAt || 0 : 0;
-    const stateAt = this._cartonStateAt || 0;
-    const stateUsable = Boolean(known && item && item.kind === 'carton' && stateAt);
-    const stateFresh = stateUsable && Date.now() - stateAt <= this.stateMaxAgeMs;
-    const fromState = () => {
-      const suffix = stateFresh ? '' : '-stale';
-      if (!item.state && !item.receivedAt) return { direction: 'in', basis: `state-never-received${suffix}` };
-      if (item.state === 'shipped') return { direction: 'in', basis: `state-shipped-return${suffix}` };
-      return { direction: 'out', basis: `state-in-building${suffix}` };
-    };
-    if (stateUsable && stateAt > localAt + 120_000) return fromState(); // snapshot decisively newer
-    if (localAt) return flip(rec.status);
-    if (stateUsable) return fromState();
-    return { direction: 'in', basis: 'default-first-seen' };
+  _decideReceiving(item, known, rec) {
+    if (!known) return { action: 'ignore', reason: 'unknown-tag' };
+    if (item.kind !== 'carton') return { action: 'ignore', reason: 'not-a-carton' };
+    if (rec && rec.status === 'INSIDE') return { action: 'ignore', reason: 'already-received-here' };
+    if (this._nexusSaysReceived(item)) return { action: 'ignore', reason: 'already-received-nexus' };
+    if (!this.receivableSku) return { action: 'ignore', reason: 'no-batch-data' };
+    const batch = this.receivableSku(item.sku);
+    if (!batch || batch.source === 'none') return { action: 'ignore', reason: 'no-batch-data' };
+    if (!batch.ok) return { action: 'ignore', reason: 'not-on-open-batch' };
+    return { action: 'receive', reason: batch.source === 'live' ? 'on-open-batch' : 'on-open-batch-cached' };
+  }
+
+  /**
+   * Does Nexus's own record say this carton has already been taken in?
+   *
+   * A warehouse_carton row is created ON RECEIPT, so the row existing at all is
+   * the answer — 'shipped' included, since a carton cannot ship without having
+   * been received first.
+   *
+   * DELIBERATELY that simple. An earlier version also compared the carton code
+   * against the label's box id, to survive a tag being re-used on a later
+   * carton: a row from the tag's previous life would otherwise block its new
+   * carton forever. This warehouse does not re-use labels — one label, one
+   * carton, for its whole life — so that guard protected against nothing while
+   * being able to cause real harm: any mismatch in Nexus's own code formatting
+   * would read as "not received" and receive an already-received carton a second
+   * time. Given item 1 of NEXUS-HANDOFF.md (a carton row inserted per passage),
+   * a false "not received" is the expensive direction to be wrong in.
+   *
+   * If labels ever ARE re-used, this is where the suffix check goes back.
+   */
+  _nexusSaysReceived(item) {
+    return Boolean(item.state || item.receivedAt);
+  }
+
+  /** Record an ignored read: counted for summary(), logged once, never shown. */
+  _ignore(epc, item, known, reason, reads) {
+    this._ignored.set(reason, (this._ignored.get(reason) || 0) + 1);
+    this.emit('log', `ignored ${epc} (${known ? item.sku : 'unregistered'}) — ${reason} [${reads} read(s)]`);
+    return null;
   }
 
   /**
@@ -668,34 +808,40 @@ class PassageDetector extends EventEmitter {
       ? this.catalog[epc]
       : { sku: `UNKNOWN-${String(++this._unknownSeq).padStart(3, '0')}`, name: 'Unregistered item', pallet: null, category: null };
 
-    // Direction: observed (IR) when a stamped read exists — ground truth wins
-    // in any mode — otherwise inferred from state (toggle mode only).
-    let direction;
-    let method;
-    let basis = null;
-    if (firstDir) {
-      direction = firstDir.dir;
-      method = 'ir';
-    } else {
-      const inferred = this._inferToggleDirection(rec0, item, known);
-      direction = inferred.direction;
-      basis = inferred.basis;
-      method = 'toggle';
-      this.emit('log', `no-IR decision: ${epc} (${item.sku}) -> ${direction.toUpperCase()} [${basis}] from ${p.reads.length} reads`);
+    // Shipping is off (see this.allowShipping). An observed outbound passage is
+    // therefore not a dispatch waiting to be reported — it is a read this gate
+    // has nothing to do with, and reporting it anyway is what filled the journal
+    // with shipments nobody made.
+    if (firstDir?.dir === 'out' && !this.allowShipping) {
+      return this._ignore(epc, item, known, 'shipping-disabled', p.reads.length);
     }
 
-    // An outbound passage that Nexus's own records contradict. The passage is
-    // still reported — it physically happened and the record of it is the whole
-    // point — but it is stamped so nothing downstream mistakes it for a clean
-    // dispatch: the board files it as an exception instead of crediting a
-    // shipment line, and the voice warns instead of confirming.
-    const unexpected = known ? this._movementCheck(direction, item, rec0) : null;
-    if (unexpected) {
-      this.emit(
-        'log',
-        `UNEXPECTED ${direction.toUpperCase()}: ${epc} (${item.sku}) — ${unexpected}; reported but not counted`
-      );
+    // THE decision — see _decideReceiving. Either this is a carton the paperwork
+    // is still waiting for, or nothing happens at all.
+    const decision = this._decideReceiving(item, known, rec0);
+    if (decision.action === 'ignore') {
+      // Missing batch data is the one ignore that is a TEMPORARY condition — the
+      // board is mid-load, or the bridge has just booted. Re-arming for the full
+      // window would make a restart during receiving silently drop cartons for a
+      // minute apiece, so this reason alone gets a short retry instead.
+      if (decision.reason === 'no-batch-data') {
+        const rearm = this.detectMode === 'toggle' ? this.toggleDedupMs : this.dedupMs;
+        this._lastEventAt.set(epc, now - Math.max(0, rearm - 5_000));
+      }
+      return this._ignore(epc, item, known, decision.reason, p.reads.length);
     }
+
+    // Always a receipt. Kept as a variable rather than inlined because the event
+    // shape (and Nexus's ingest) still carries a direction field, and it must
+    // read as deliberate rather than as a leftover.
+    const direction = 'in';
+    const method = firstDir ? 'ir' : 'toggle';
+    const basis = decision.reason;
+    // Nothing questionable is emitted any more: a passage either earns a receipt
+    // or never becomes an event. The field stays on the wire — Nexus and the
+    // boards both read it — but it can only ever be null now.
+    const unexpected = null;
+    this.emit('log', `RECEIVE ${epc} (${item.sku}) [${basis}] from ${p.reads.length} read(s)`);
 
     const timestamp = new Date(now).toISOString();
     const scanStartedAt = new Date(Math.min(...p.reads.map((read) => read.t))).toISOString();
@@ -704,19 +850,15 @@ class PassageDetector extends EventEmitter {
       rec = { epc, item, known, status: 'OUTSIDE', firstSeen: timestamp, lastSeen: timestamp, entries: 0, exits: 0 };
       this.inventory.set(epc, rec);
     }
-    rec.status = direction === 'in' ? 'INSIDE' : 'OUTSIDE';
+    // INSIDE is now also the "already received" register the rule reads on the
+    // next pass (_decideReceiving step 3), which is why the reset paths clear it
+    // — resetForReceiving() wipes the inventory, forgetEpcs() flips the named
+    // tags back to OUTSIDE. Without that, a redo after a Nexus reset would find
+    // every carton already received and take nothing in.
+    rec.status = 'INSIDE';
     rec.lastSeen = timestamp;
-    rec.lastMoveAt = now; // recency anchor for _inferToggleDirection
-    // A contested exit is not a dispatch, so it does not move the local tally
-    // the TV board counts. Status still goes OUTSIDE: whatever the paperwork
-    // says, the thing is no longer in the building.
-    // A contested passage is not a receipt and not a dispatch, so it moves
-    // neither tally. Status still follows the physical fact: the thing is
-    // either in the building or it is not, whatever the paperwork says.
-    if (unexpected) {
-      /* counted in neither direction */
-    } else if (direction === 'in') rec.entries += 1;
-    else rec.exits = (rec.exits || 0) + 1;
+    rec.lastMoveAt = now;
+    rec.entries += 1;
 
     const strongest = p.reads.reduce((a, b) => ((b.rssi ?? -999) > (a.rssi ?? -999) ? b : a));
     const event = {
@@ -743,9 +885,11 @@ class PassageDetector extends EventEmitter {
       // ignore it (it owns the decision), but the field means the gate no
       // longer reports a contested exit as though it were a clean one.
       unexpected,
-      // toggle mode only: WHY this direction was inferred (see
-      // _inferToggleDirection). null on observed (IR) passages. Without it a
-      // desync during the no-IR trial is undiagnosable.
+      // WHY this carton was received (see _decideReceiving) —
+      // 'on-open-batch', or 'on-open-batch-cached' when the batch list came
+      // from the disk cache rather than a live load. The distinction is the
+      // difference between a receipt checked against current paperwork and one
+      // checked against the last copy the gate managed to download.
       basis,
       timestamp,
     };
@@ -786,6 +930,10 @@ class PassageDetector extends EventEmitter {
       location: this.location,
       catalogSize: Object.keys(this.catalog).length,
       catalogSource: this.catalogSource,
+      allowShipping: this.allowShipping,
+      // Ignored reads by reason since boot — the only place "why was that carton
+      // not received?" can be answered without trawling the log.
+      ignored: Object.fromEntries(this._ignored),
     };
   }
 
@@ -812,6 +960,11 @@ class PassageDetector extends EventEmitter {
     const readAt = new Map(this._lastReadAt); // survive the wipe below
     this.reset();
     this._lastReadAt = readAt;
+    // Durable, for the same reason forgetEpcs stamps: clearing memory alone is
+    // undone by the next boot, because the journal still says "received".
+    this._forgottenAllAt = Date.now();
+    this._forgottenAt.clear();
+    this._saveForgotten();
     this.emit(
       'log',
       `receiving reset — cleared movement memory for ${known} tag(s); every carton now reads as ARRIVING ` +

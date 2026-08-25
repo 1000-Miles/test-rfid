@@ -67,6 +67,8 @@ const initialStatus: Status = {
   mode: 'manual',
   irDurationMs: 500,
   irMinGapMs: 200,
+  minRssi: null,
+  weakDropped: 0,
   gpi: { gpi1: null, gpi2: null, raw: '' },
 };
 
@@ -290,6 +292,8 @@ export function useBridge(): BridgeState {
               mode: msg.mode,
               irDurationMs: msg.irDurationMs,
               irMinGapMs: msg.irMinGapMs,
+              minRssi: msg.minRssi ?? null,
+              weakDropped: msg.weakDropped ?? 0,
               gpi: msg.gpi,
               udp: msg.udp,
             });

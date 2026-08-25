@@ -43,6 +43,25 @@ class Controller extends EventEmitter {
     // beams clear.
     this.passage = null; // { id, direction: 'in'|'out'|null, input, startedAt }
     this._passageSeq = 0; // passage id: nexus dedups to one event per EPC per passage
+    /**
+     * Read-zone floor in dBm: a read weaker than this is DROPPED here, before
+     * anything downstream sees it — no tag event, no board row, no passage, no
+     * movement, no Supabase row. This is the only place that can honestly claim
+     * "not read and not recorded", which is why it lives here and not in
+     * passage.js (whose own minRssi only ever applied in NO-IR toggle mode).
+     *
+     * RSSI is NEGATIVE and closer to zero is stronger: -55 is a carton at the
+     * doorway, -75 is stock on a shelf two aisles away. So a floor of -65 keeps
+     * everything at or above -65 and discards the rest. null = off, keep
+     * everything.
+     *
+     * This trades recall for precision — set it too close to zero and the real
+     * carton passing the gate gets dropped too. Tune it against the RSSI column
+     * in the console's tag feed, not by guessing.
+     */
+    this.minRssi = Number.isFinite(opts.minRssi) ? opts.minRssi : null;
+    this._weakDropped = 0; // count since boot, so a too-tight floor is visible
+
     // 150ms: hardware shows beam breaks as short as ~100ms; 300ms missed fast swipes.
     this.gpiIntervalMs = opts.gpiIntervalMs ?? 150;
 
@@ -246,6 +265,38 @@ class Controller extends EventEmitter {
     return rc;
   }
 
+  /**
+   * Set (or clear) the read-zone floor. Pass null to keep every read.
+   * @param {number|null} dBm negative, e.g. -65
+   */
+  setMinRssi(dBm) {
+    if (dBm == null || dBm === '') {
+      this.minRssi = null;
+    } else {
+      const v = Number(dBm);
+      if (!Number.isFinite(v)) throw new Error('minRssi must be a number (negative dBm) or null');
+      // A positive figure is always a units slip, and silently accepting it
+      // would drop EVERY read — the gate would look dead, not misconfigured.
+      if (v > 0) throw new Error(`minRssi must be negative dBm (got ${v}); a gate floor is typically -70..-55`);
+      this.minRssi = v;
+    }
+    this.log(`Read floor = ${this.minRssi == null ? 'off (every read kept)' : `${this.minRssi}dBm`}.`);
+    this._emitStatus();
+    return this.getStatus();
+  }
+
+  /**
+   * Is this read strong enough to exist? Counts what it drops.
+   * A read with NO rssi at all is kept: silently discarding every tag from a
+   * frame the parser could not measure would look exactly like a dead antenna.
+   */
+  _passesFloor(rssi) {
+    if (this.minRssi == null || rssi == null || !Number.isFinite(rssi)) return true;
+    if (rssi >= this.minRssi) return true;
+    this._weakDropped++;
+    return false;
+  }
+
   async setMode(cfg = {}) {
     const prev = this.mode;
     // Both IR modes trigger off a GPI beam. On a reader with no GPIO the mode
@@ -437,6 +488,7 @@ class Controller extends EventEmitter {
       timestamp: ts,
     });
     if (d.parsed && d.parsed.epc) {
+      if (!this._passesFloor(d.parsed.rssi)) return; // same floor as the TCP path
       this._totalReads = (this._totalReads || 0) + 1;
       this.emit('message', {
         type: 'tag',
@@ -460,6 +512,10 @@ class Controller extends EventEmitter {
       hasGpio: this.hasGpio,
       irDurationMs: this.irDurationMs,
       irMinGapMs: this.irMinGapMs,
+      // null = off. weakDropped rising fast next to a flat read count means the
+      // floor is too tight and real cartons are being thrown away.
+      minRssi: this.minRssi,
+      weakDropped: this._weakDropped,
       gpi: this.lastGpi,
       passage: this.passage,
       udp: {
@@ -539,6 +595,9 @@ class Controller extends EventEmitter {
     for (const tag of tags) {
       n++;
       if (!tag.epc) continue; // skip malformed frames
+      // Weak reads die here: before the counter, before the log, before anyone
+      // downstream can act on them.
+      if (!this._passesFloor(tag.rssi)) continue;
       this._totalReads = (this._totalReads || 0) + 1;
       if (!this._firstTagLogged) {
         this._firstTagLogged = true;

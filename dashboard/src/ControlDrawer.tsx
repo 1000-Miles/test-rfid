@@ -96,7 +96,7 @@ export default function ControlDrawer(props: {
             </button>
             <button
               onClick={props.onToggleVoice}
-              title={props.voiceOn ? 'Voice announcements ON — click to mute' : 'Voice announcements OFF — click to enable'}
+              title={props.voiceOn ? 'Gate chime ON — click to mute' : 'Gate chime OFF — click to enable'}
               className={`text-lg rounded-md px-2 py-1 border transition ${
                 props.voiceOn ? 'bg-indigo-600/30 border-indigo-500/50' : 'bg-black/30 border-white/10 opacity-60 hover:opacity-100'
               }`}
@@ -135,10 +135,12 @@ export default function ControlDrawer(props: {
                   onPort={setPort}
                   onConnect={() => run(() => api.connect(ip, port))}
                   onDisconnect={() => run(() => api.disconnect())}
-                  powerControl={<PowerControl connected={status.connected} />}
+                  powerControl={<PowerControl connected={status.connected} minRssi={status.minRssi} weakDropped={status.weakDropped} />}
                 />
                 <ModePanel mode={status.mode} irDuration={irDuration} busy={busy} onIrDuration={setIrDuration} onSetMode={setMode} />
               </div>
+
+              <PalletWindowCard />
 
               <GpiPanel gpi={bridge.gpi} mode={status.mode} />
 
@@ -167,6 +169,159 @@ export default function ControlDrawer(props: {
         </div>
       </aside>
     </div>
+  );
+}
+
+/**
+ * How long a pallet stays open before it closes itself.
+ *
+ * On the CONSOLE tab, not the No-IR one, even though it only applies in no-IR
+ * mode. That tab is still called a "trial" and this gate runs no-IR
+ * permanently — so the setting that decides which cartons share a pallet, and
+ * therefore share a printed label, sat behind a name that reads as optional.
+ * Someone looking for it here is looking in the right place.
+ *
+ * Self-fetching rather than fed from the parent: it is one number, and threading
+ * it through the console's state to be read once is more coupling than it earns.
+ */
+/** Host + port, controlled, applied on an explicit press. */
+function AddressField(props: {
+  label: string;
+  value: string;
+  port: number;
+  placeholder?: string;
+  onApply: (host: string, port: number) => void;
+}) {
+  const [host, setHost] = useState(props.value);
+  const [port, setPort] = useState(String(props.port));
+  // Follow the stored config, so the box never shows a value the bridge is not
+  // actually using.
+  useEffect(() => setHost(props.value), [props.value]);
+  useEffect(() => setPort(String(props.port)), [props.port]);
+  const dirty = host.trim() !== props.value || Number(port) !== props.port;
+  return (
+    <div className="text-sm">
+      <span className="text-slate-400">{props.label}</span>
+      <div className="mt-1 flex gap-2">
+        <input
+          value={host}
+          onChange={(e) => setHost(e.target.value)}
+          placeholder={props.placeholder}
+          className="flex-1 rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm placeholder:text-slate-600"
+        />
+        <input
+          value={port}
+          onChange={(e) => setPort(e.target.value)}
+          className="w-20 rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm"
+        />
+        <button
+          onClick={() => props.onApply(host.trim(), Number(port) || 9100)}
+          disabled={!dirty}
+          className="rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-40 px-3 py-2 text-sm"
+        >
+          Set
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** A single URL, controlled, applied on an explicit press. */
+function UrlField(props: { label: string; value: string; placeholder?: string; hint?: string; onApply: (v: string) => void }) {
+  const [text, setText] = useState(props.value);
+  useEffect(() => setText(props.value), [props.value]);
+  return (
+    <div className="text-sm">
+      <span className="text-slate-400">{props.label}</span>
+      <div className="mt-1 flex gap-2">
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder={props.placeholder}
+          className="flex-1 rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm placeholder:text-slate-600"
+        />
+        <button
+          onClick={() => props.onApply(text.trim())}
+          disabled={text.trim() === props.value}
+          className="rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-40 px-3 py-2 text-sm"
+        >
+          Set
+        </button>
+      </div>
+      {props.hint && <p className="text-xs text-slate-500 mt-1">{props.hint}</p>}
+    </div>
+  );
+}
+
+function PalletWindowCard() {
+  const [sec, setSec] = useState(60);
+  const [applied, setApplied] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  const refresh = useCallback(() => {
+    api
+      .nexusSummary()
+      .then((s) => {
+        const v = Math.round((s.palletWindowMs ?? 60000) / 1000);
+        setApplied(v);
+        setSec(v);
+      })
+      .catch(() => {});
+  }, []);
+  useEffect(() => void refresh(), [refresh]);
+
+  const apply = async () => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const r = await api.setNexusConfig({ palletWindowMs: Math.max(10, sec) * 1000 });
+      if (!r.ok) setNote('The bridge refused that value.');
+      else setApplied(Math.round((r.palletWindowMs ?? sec * 1000) / 1000));
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : 'The bridge did not answer.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card title="Pallet grouping">
+      <label className="text-sm block">
+        <span className="text-slate-400">
+          Close an unconfirmed pallet after (seconds)
+          {applied != null ? <span className="text-emerald-400"> — now {applied}s</span> : ''}
+        </span>
+        <div className="flex gap-2 mt-1 items-center">
+          <input
+            type="number"
+            min={10}
+            max={900}
+            step={10}
+            value={sec}
+            disabled={busy}
+            onChange={(e) => setSec(Number(e.target.value))}
+            className="w-24 rounded-md bg-black/40 border border-white/10 px-2 py-1.5 font-mono text-sm"
+          />
+          <button
+            onClick={apply}
+            disabled={busy || sec === applied}
+            className="rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-3 py-1.5 text-sm"
+          >
+            Set
+          </button>
+        </div>
+      </label>
+      <p className="text-xs text-slate-500 mt-2">
+        Every carton read inside this window joins ONE pallet and ONE printed label. Pressing <b>Close &amp; print</b> ends it
+        immediately — this is only the fallback for when nobody does.
+      </p>
+      <p className="text-xs text-slate-500 mt-1">
+        The clock starts on the <b>first</b> carton and does not extend. Shorter separates pallets arriving back to back; too short
+        splits a slow unload across two labels. A change applies to the next pallet, never one already open.
+      </p>
+      {note && <p className="text-xs text-amber-400 mt-2">{note}</p>}
+    </Card>
   );
 }
 
@@ -218,6 +373,7 @@ function NoIrPanel(props: { bridge: BridgeState }) {
   const [rearmSec, setRearmSec] = useState(60);
   const [minRssiText, setMinRssiText] = useState(''); // blank = floor off
   const [minReads, setMinReads] = useState(2);
+  const [palletWindowSec, setPalletWindowSec] = useState(60);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
@@ -231,6 +387,7 @@ function NoIrPanel(props: { bridge: BridgeState }) {
         setRearmSec(Math.round((s.toggleDedupMs ?? 60000) / 1000));
         setMinRssiText(s.minRssi != null ? String(s.minRssi) : '');
         setMinReads(s.toggleMinReads ?? 2);
+        setPalletWindowSec(Math.round((s.palletWindowMs ?? 60000) / 1000));
       })
       .catch(() => {});
   useEffect(() => {
@@ -277,6 +434,7 @@ function NoIrPanel(props: { bridge: BridgeState }) {
       await api.setNexusConfig({
         absenceMs: Math.max(0, absenceSec) * 1000,
         toggleDedupMs: Math.max(0, rearmSec) * 1000,
+        palletWindowMs: Math.max(10, palletWindowSec) * 1000,
         minRssi: rssi === '' ? null : Number(rssi),
         toggleMinReads: Math.max(1, minReads),
       });
@@ -338,7 +496,15 @@ function NoIrPanel(props: { bridge: BridgeState }) {
       </Card>
 
       <Card title="No-IR tuning">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+          <NumField
+            label="Pallet window (s)"
+            value={palletWindowSec}
+            min={10}
+            step={10}
+            onChange={setPalletWindowSec}
+            hint="Everything read inside this window lands on ONE pallet and one printed label. Pressing Close & print ends it early — this is the fallback for when nobody does. Shorter separates back-to-back pallets; too short splits a slow unload across two labels. Applies to the next pallet, not one already open."
+          />
           <NumField
             label="Absence (s)"
             value={absenceSec}
@@ -699,7 +865,7 @@ function ConnectPanel(props: {
   );
 }
 
-function PowerControl(props: { connected: boolean }) {
+function PowerControl(props: { connected: boolean; minRssi?: number | null; weakDropped?: number }) {
   const [current, setCurrent] = useState<number | null>(null);
   const [value, setValue] = useState(20);
   const [busy, setBusy] = useState(false);
@@ -752,7 +918,191 @@ function PowerControl(props: { connected: boolean }) {
       </div>
       <p className="text-xs text-slate-500 mt-1">Low = short range (fewer stray reads) · 30 = max. Persists on the reader.</p>
       <AntennaPower connected={props.connected} />
+      <ReadFloor minRssi={props.minRssi} weakDropped={props.weakDropped} />
+      <BeeperControl connected={props.connected} />
     </label>
+  );
+}
+
+/**
+ * The READER's buzzer — the hardware chirp, not this app's voice.
+ *
+ * The UR4 beeps once per tag read out of the box, and a gate reads continuously,
+ * so it arrives on site sounding like a stuck alarm. Kept next to power and the
+ * read floor because that is where someone goes when the gate is behaving badly,
+ * and "make it stop" is usually the first thing they want.
+ *
+ * The setting lives in the reader and survives a power cycle, so this is one
+ * press forever — no need to re-apply on connect.
+ */
+function BeeperControl(props: { connected: boolean }) {
+  const [on, setOn] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!props.connected) {
+      setOn(null);
+      return;
+    }
+    api
+      .getBeep()
+      .then((r) => setOn(r.ok ? r.on : null))
+      .catch(() => setOn(null));
+  }, [props.connected]);
+
+  const toggle = async () => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const r = await api.setBeep(!on);
+      if (!r.ok) setNote(r.error ?? 'the reader refused the change');
+      else setOn(r.on ?? !on);
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : 'the bridge did not answer');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-slate-300">Reader beeper</span>
+        <button
+          onClick={toggle}
+          disabled={!props.connected || busy}
+          className={`rounded-md px-2 py-1 text-xs font-semibold disabled:opacity-40 ${
+            on ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' : 'bg-slate-700/50 text-slate-400 border border-white/10'
+          }`}
+        >
+          {on == null ? '—' : on ? 'BEEPING' : 'SILENT'}
+        </button>
+      </div>
+      <p className="text-[11px] text-slate-500 mt-2">
+        The reader's own chirp on every tag read — separate from this board's voice. Saved in the reader, so it stays off after a power
+        cycle.
+      </p>
+      {note && <p className="text-xs text-amber-400 mt-2">{note}</p>}
+    </div>
+  );
+}
+
+/**
+ * Software read-zone floor: drop any read weaker than N dBm.
+ *
+ * The companion to power, not a substitute for it. Turning power down shrinks
+ * the physical field, which also weakens the read you actually want; this leaves
+ * the field alone and throws away what comes back too faint. A doorway usually
+ * needs both — power enough to read the carton passing through, plus a floor
+ * that discards the shelf stock the same power reaches.
+ *
+ * RSSI is negative and closer to zero is stronger, so the floor is an upper
+ * bound on weakness: -55 is strict (near the antenna only), -80 is permissive.
+ * `weakDropped` climbing while the read count stays flat means the floor is too
+ * strict and real cartons are going in the bin — the reason that number is on
+ * screen at all.
+ */
+function ReadFloor(props: { minRssi?: number | null; weakDropped?: number }) {
+  const on = props.minRssi != null;
+  // Deliberately a STRING, starting empty: the box shows no number until someone
+  // puts one there. A pre-filled default would be this console suggesting a
+  // threshold it has no way to know — the right figure depends on the doorway,
+  // the antenna placement and the cartons, so it is the operator's call and the
+  // UI should not pretend otherwise.
+  const [text, setText] = useState(props.minRssi != null ? String(props.minRssi) : '');
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  const typed = text.trim() === '' ? null : Number(text);
+  const valid = typed != null && Number.isFinite(typed) && typed < 0;
+  // Slider thumb needs somewhere to sit before anything is typed. This positions
+  // it only; it never writes a number into the box on its own.
+  const sliderAt = valid ? typed : -65;
+
+  // Follow the bridge when it reports a different floor (another console, a
+  // restart, READ_MIN_RSSI from the env) — but never while a change is in
+  // flight, or the box would change under the operator's fingers mid-edit.
+  useEffect(() => {
+    if (!busy && props.minRssi != null) setText(String(props.minRssi));
+  }, [props.minRssi, busy]);
+
+  const send = async (minRssi: number | null) => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const r = await api.setReadFilter(minRssi);
+      if (!r.ok) setNote(r.error ?? 'the bridge refused the change');
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : 'the bridge did not answer');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-semibold text-slate-300">Ignore weak reads</span>
+        <button
+          onClick={() => send(on ? null : typed)}
+          disabled={busy || (!on && !valid)}
+          title={!on && !valid ? 'Type a cut-off first' : undefined}
+          className={`rounded-md px-2 py-1 text-xs font-semibold disabled:opacity-40 ${
+            on ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : 'bg-slate-700/50 text-slate-400 border border-white/10'
+          }`}
+        >
+          {on ? 'ON' : 'OFF'}
+        </button>
+      </div>
+      <div className="flex gap-2 items-center">
+        <input
+          type="number"
+          inputMode="numeric"
+          max={-1}
+          step={1}
+          value={text}
+          placeholder="e.g. -65"
+          disabled={busy}
+          onChange={(e) => setText(e.target.value)}
+          className="w-24 rounded-md bg-black/40 border border-white/10 px-2 py-1 font-mono text-xs tabular-nums text-slate-200 placeholder:text-slate-600 disabled:opacity-40"
+        />
+        <span className="text-[11px] text-slate-500">dBm</span>
+        <input
+          type="range"
+          min={-90}
+          max={-40}
+          value={sliderAt}
+          disabled={busy}
+          onChange={(e) => setText(e.target.value)}
+          className="flex-1 accent-emerald-500 disabled:opacity-40"
+          aria-label="Read floor, coarse adjust"
+        />
+        <button
+          onClick={() => send(typed)}
+          disabled={busy || !valid || typed === props.minRssi}
+          className="rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-40 px-2 py-1 text-xs"
+        >
+          Set
+        </button>
+      </div>
+      {text.trim() !== '' && !valid && <p className="text-xs text-amber-400 mt-2">Signal strength is a negative number, e.g. -65.</p>}
+      <p className="text-[11px] text-slate-500 mt-2">
+        {on ? (
+          <>
+            Reads weaker than {props.minRssi} dBm are thrown away — no board row, no movement, nothing recorded.{' '}
+            {props.weakDropped ? <span className="text-slate-400">{props.weakDropped} dropped so far.</span> : null}
+          </>
+        ) : (
+          <>Off — every read counts. Turn on to shrink the read zone without touching antenna power.</>
+        )}
+      </p>
+      <p className="text-[11px] text-slate-500 mt-1">
+        You choose the cut-off. Closer to −40 = near the antenna only · closer to −90 = the whole room. Read the RSSI column in the tag
+        feed to see what your own cartons actually measure.
+      </p>
+      {note && <p className="text-xs text-amber-400 mt-2">{note}</p>}
+    </div>
   );
 }
 
@@ -770,8 +1120,9 @@ function PowerControl(props: { connected: boolean }) {
  * enabled port, so each one that answers nothing is dwell time taken from the
  * ones that do. Turn a port off if nothing is plugged into it.
  *
- * The firmware cannot read power back per port, so what is shown is what this
- * bridge last wrote (`applied`) — blank means "never set from here".
+ * The right-hand figure is the port's actual power: the reader's own per-port
+ * read-back where it answers, overridden by what this bridge last wrote. Blank
+ * means neither was available — not "unset".
  */
 function AntennaPower(props: { connected: boolean }) {
   const PORTS = [1, 2, 3, 4];
@@ -786,7 +1137,17 @@ function AntennaPower(props: { connected: boolean }) {
     try {
       const [a, p] = await Promise.all([api.antennas(), api.getPower()]);
       setEnabled(Array.isArray(a.enabled) ? a.enabled : []);
-      const app = p.applied ?? {};
+      // This firmware DOES answer the per-port read-back, so prefer the reader's
+      // own numbers over nothing — showing "—" for a port that is sitting at
+      // 15dBm is what made a working setting look like one that never saved.
+      // `applied` still wins where present: it is what we last wrote, and it
+      // survives a firmware that goes quiet mid-read.
+      const back = Object.fromEntries(
+        Object.entries(p.perAntenna ?? {})
+          .map(([port, v]) => [Number(port), v?.read ?? v?.write])
+          .filter(([, v]) => typeof v === 'number')
+      ) as Record<number, number>;
+      const app = { ...back, ...(p.applied ?? {}) };
       setApplied(app);
       setDraft((d) => ({ ...Object.fromEntries(PORTS.map((n) => [n, app[n] ?? p.dBm ?? 18])), ...d }));
     } catch {
@@ -808,10 +1169,13 @@ function AntennaPower(props: { connected: boolean }) {
     setNote(null);
     try {
       const r = await api.setAntennas(next);
-      if (!r.ok) setNote(`Reader refused the change (rc ${r.rc}) — it will not accept one mid-read.`);
+      if (!r.ok) setNote(`Reader refused the change (rc ${r.rc}).`);
       setEnabled(Array.isArray(r.enabled) ? r.enabled : next);
     } finally {
       setBusy(false);
+      // A port just came on: pull its real dBm so the slider does not start at
+      // a default the reader disagrees with.
+      void refresh();
     }
   };
 
@@ -855,7 +1219,7 @@ function AntennaPower(props: { connected: boolean }) {
               />
               <span className="w-8 text-right font-mono text-xs tabular-nums text-slate-300">{draft[port] ?? 18}</span>
               <span className="w-14 text-right font-mono text-[11px] tabular-nums text-slate-500">
-                {applied[port] != null ? `set ${applied[port]}` : '—'}
+                {applied[port] != null ? `${applied[port]} dBm` : '—'}
               </span>
               <button
                 onClick={() => applyPower(port)}
@@ -1390,22 +1754,71 @@ function PalletTagPanel() {
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
         {/* printer + density */}
         <div className="flex flex-col gap-3">
-          <label className="text-sm">
-            <span className="text-slate-400">Windows print queue</span>
-            <select
-              value={cfg?.palletPrinterName ?? ''}
-              onChange={(e) => applyCfg({ palletPrinterName: e.target.value })}
-              disabled={!cfg}
-              className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 text-sm"
-            >
-              {cfg && !queues.includes(cfg.palletPrinterName) && <option value={cfg.palletPrinterName}>{cfg.palletPrinterName}</option>}
-              {queues.map((q) => (
-                <option key={q} value={q}>
-                  {q}
-                </option>
-              ))}
-            </select>
-          </label>
+          {/* HOW the printer is reached. Network needs no second machine switched
+              on, which is why it is first and recommended. */}
+          <div className="text-sm">
+            <span className="text-slate-400">How the pallet printer is reached</span>
+            <div className="mt-1 flex rounded-lg bg-black/40 border border-white/10 p-1">
+              <ModeButton active={cfg?.palletTransport === 'tcp'} onClick={() => applyCfg({ palletTransport: 'tcp' })} disabled={busy || !cfg}>
+                Network (printer IP)
+              </ModeButton>
+              <ModeButton
+                active={cfg?.palletTransport !== 'tcp'}
+                onClick={() => applyCfg({ palletTransport: 'sidecar' })}
+                disabled={busy || !cfg}
+              >
+                Via a PC (sidecar)
+              </ModeButton>
+            </div>
+            <p className="text-xs text-slate-500 mt-1">
+              Network prints straight to the label printer — nothing else has to be switched on. Use a PC only when the printer is
+              attached by USB.
+            </p>
+          </div>
+
+          {cfg?.palletTransport === 'tcp' ? (
+            /* CONTROLLED, with an explicit Set. Uncontrolled inputs kept their
+               first value while the stored config changed underneath them, then
+               wrote that stale value back on blur — which is how the printer PC's
+               address ended up in the PRINTER IP field and the sidecar's port in
+               the TCP port field, and why the setting appeared to change on its
+               own. */
+            <AddressField
+              label="Printer IP — the label printer itself, not a PC"
+              value={cfg?.palletHost ?? ''}
+              port={cfg?.palletTcpPort ?? 9100}
+              placeholder="192.168.1.137"
+              onApply={(host, port) => applyCfg({ palletHost: host, palletTcpPort: port })}
+            />
+          ) : (
+            <>
+              <UrlField
+                label="Printer PC address (sidecar) — the PC, not the printer"
+                value={cfg?.palletSidecarUrl ?? ''}
+                placeholder="http://192.168.1.112:3011"
+                hint="Blank = print on this machine. Must be an address this bridge can reach — a PC on a different network will always time out."
+                onApply={(url) => applyCfg({ palletSidecarUrl: url })}
+              />
+              <label className="text-sm">
+                <span className="text-slate-400">Windows print queue</span>
+                <select
+                  value={cfg?.palletPrinterName ?? ''}
+                  onChange={(e) => applyCfg({ palletPrinterName: e.target.value })}
+                  disabled={!cfg}
+                  className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 text-sm"
+                >
+                  {cfg && !queues.includes(cfg.palletPrinterName) && (
+                    <option value={cfg.palletPrinterName}>{cfg.palletPrinterName}</option>
+                  )}
+                  {queues.map((q) => (
+                    <option key={q} value={q}>
+                      {q}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          )}
 
           {ready.detail && (
             <div

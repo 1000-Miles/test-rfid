@@ -257,6 +257,25 @@ async function getAntennaPower() {
   return Object.keys(out).length ? out : null;
 }
 
+/**
+ * Reader buzzer on/off. The UR4 chirps on every tag read by default, which at a
+ * gate reading continuously is one long tone all shift.
+ *
+ * Returns 0 on success, -1 if the reader refused. Throws only if the sidecar
+ * has no /beep route at all — an OLD sidecar build, which the caller reports as
+ * "rebuild the sidecar" rather than as a reader fault.
+ */
+async function setBeep(on) {
+  const r = await call('POST', '/beep', { on: on ? 1 : 0 });
+  return r.ok ? 0 : -1;
+}
+
+/** @returns {boolean|null} null = the reader would not say. */
+async function getBeep() {
+  const r = await call('GET', '/beep');
+  return r.ok ? Boolean(r.on) : null;
+}
+
 async function getAntennas() {
   const r = await call('GET', '/antennas');
   return r.ok ? r.enabled : null;
@@ -383,6 +402,8 @@ module.exports = {
   drainTags,
   getGpi,
   getPower,
+  setBeep,
+  getBeep,
   setAntennaPower,
   getAntennaPower,
   setPower,

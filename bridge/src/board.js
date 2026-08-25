@@ -42,7 +42,7 @@ class BoardFeed {
     // raise it and the kiosk interval together if Nexus read load ever bites.
     this.maxAgeMs = opts.maxAgeMs ?? 4_000;
     // How long a FAILING board may still be trusted to judge an inbound passage
-    // (see expectsInbound). Far longer than maxAgeMs on purpose: serving a
+    // (see receivableSku). Far longer than maxAgeMs on purpose: serving a
     // slightly stale board to a screen is harmless, but refusing to credit a
     // real delivery because the WAN blipped is not, so the verdict outlives the
     // display's idea of freshness.
@@ -50,6 +50,7 @@ class BoardFeed {
     this.log = opts.log || (() => {});
     // Called when a load shows receiving having gone BACKWARDS — see _detectReset.
     this.onReceivingReset = opts.onReceivingReset || (() => {});
+    this._suppressReset = null; // set by suppressNextReset(), cleared on use
     this.lastFetchAt = null;
     this.lastError = null;
     this._refreshing = null;
@@ -187,41 +188,39 @@ class BoardFeed {
   }
 
   /**
-   * Does any LIVE receiving batch expect this product?
+   * Is this product on a receiving batch a carton may be credited against?
    *
-   *   true  — the product code is on a batch Nexus is currently returning
-   *   false — it is on none of them, so nothing at this door is waiting for it
-   *   null  — the gate cannot tell, and must not accuse: no board has ever
-   *           loaded, or the last load failed and the cache has aged past
-   *           `expectMaxAgeMs`. Same stance as the carton-state check in
-   *           passage.js — going quiet beats inventing a verdict.
+   * The gate's whole receiving decision rests on this answer (see
+   * _decideReceiving in passage.js): no match here means the read is ignored and
+   * nothing is reported at all.
    *
    * Nexus does the deleted/archived filtering: the receiving endpoint only ever
-   * returns live batches (there is no deletedAt or archived field on the
-   * payload at all), so "absent from this feed" already means deleted,
-   * archived, closed, or never created. The bridge does not re-derive that, and
-   * must not try — a second rule here could only disagree with Nexus's.
+   * returns live batches (there is no deletedAt or archived field on the payload
+   * at all), so "absent from this feed" already means deleted, archived, closed,
+   * or never created. The bridge does not re-derive that, and must not try — a
+   * second rule here could only disagree with Nexus's.
    *
-   * The POOL counts as live. Draft batches are real, undeleted documents that
-   * staff can add to the board by hand, so a draft SKU is not an anomaly worth
-   * alarming about. It still will not be CREDITED unless someone adds it —
-   * that is the board's call (applyMovement), not this one.
+   * The disk cache IS consulted, unlike the accusation-style check this replaced.
+   * Declining here does not mean "no verdict", it means the gate receives
+   * NOTHING — and a warehouse PC that boots with no WAN must still be able to
+   * take a delivery in. `source` travels with the answer so a receipt decided on
+   * cached paperwork is visible as such rather than indistinguishable from one
+   * checked against current paperwork.
+   *
+   * The POOL counts. Draft batches are real, undeleted documents staff receive
+   * against on the kiosk, and ignoring their cartons would drop real stock on a
+   * technicality.
+   *
+   * @returns {{ok: boolean, source: 'live'|'cache'|'none'}}
    */
-  expectsInbound(sku) {
-    if (!sku) return null;
-    // A SUCCESSFUL live load is the licence to judge, and `lastFetchAt` is set
-    // only by one. The disk cache deliberately does NOT count: it exists to keep
-    // a doorway PAINTING through an outage and can be days old, so a bridge that
-    // boots with no WAN would otherwise reject every real delivery against
-    // yesterday's batches. Showing a stale board is the point of that file;
-    // accusing a carton with it is not.
-    if (!this.lastFetchAt) return null;
-    if (Date.now() - Date.parse(this.lastFetchAt) > this.expectMaxAgeMs) return null; // known-good too long ago
-    if (!this.cache) return null;
+  receivableSku(sku) {
+    if (!sku || !this.cache) return { ok: false, source: 'none' };
+    const fresh =
+      Boolean(this.lastFetchAt) && Date.now() - Date.parse(this.lastFetchAt) <= this.expectMaxAgeMs;
     for (const doc of [...(this.cache.docs || []), ...(this.cache.pool || [])]) {
-      if ((doc.lines || []).some((l) => l.sku === sku)) return true;
+      if ((doc.lines || []).some((l) => l.sku === sku)) return { ok: true, source: fresh ? 'live' : 'cache' };
     }
-    return false;
+    return { ok: false, source: fresh ? 'live' : 'cache' };
   }
 
   /**
@@ -237,7 +236,26 @@ class BoardFeed {
    * Only DECREASES count: receiving going up is the normal case and says
    * nothing about a reset.
    */
+  /**
+   * Skip the next comparison.
+   *
+   * Set when a reset has ALREADY been handled through the webhook. The refresh
+   * that follows it would otherwise see the figures drop and announce the same
+   * reset a second time — and the second announcement is not harmless: it wipes
+   * the gate's memory again, this time possibly after cartons have started
+   * coming back through, throwing away the re-scan already in progress.
+   */
+  suppressNextReset(why = '') {
+    this._suppressReset = why || 'handled elsewhere';
+  }
+
   _detectReset(before, after) {
+    if (this._suppressReset) {
+      const why = this._suppressReset;
+      this._suppressReset = null;
+      this.log(`receiving figures changed but the reset was already handled (${why}) — not announcing it twice`);
+      return;
+    }
     if (!before) return; // first load of this process — nothing to compare
     const priorReceived = new Map();
     for (const doc of before.docs || []) {
