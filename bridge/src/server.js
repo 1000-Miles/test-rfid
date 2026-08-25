@@ -370,7 +370,7 @@ app.use(express.json());
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
@@ -1079,6 +1079,311 @@ app.get('/nexus/events', (req, res) => res.json({ ok: true, events: nexus.getEve
  * passages are real warehouse events, and this is the one endpoint that can
  * destroy them. A stray call from a dashboard bug must not be able to.
  */
+/**
+ * Reset-marker poll — the gate asking Nexus "has anything been reset?"
+ *
+ * Exists because the direction matters. Nexus is on the internet and this bridge
+ * is on a warehouse LAN with no route in, so the webhook below can only ever
+ * work through a tunnel. Everything this gate already does — pushing movements,
+ * reading the board — goes OUTWARD, and so does this.
+ *
+ * Nexus only has to expose one small read: when the last receiving reset
+ * happened, and which cartons it affected. Small is the point — it is cheap
+ * enough to ask every few seconds, where re-reading the whole receiving list
+ * (BOARD_REFRESH_MS, a minute) is not.
+ *
+ * Expected JSON, both keys optional:
+ *   { "resetAt": "2026-08-24T06:32:11.000Z",   // or "resetSeq": 47
+ *     "epcs": ["E280...", ...],
+ *     "reason": "batch 4821 reset on iPad" }
+ *
+ * `resetAt` is treated as an OPAQUE marker, not a date: any value that changes
+ * when a reset happens works, so Nexus can hand over a counter, a row id or a
+ * hash without this needing to know which. It is only ever compared for
+ * equality.
+ *
+ * The figure-watching detector in board.js stays as the fallback — this poll
+ * being unconfigured, or Nexus's marker being wrong, must not leave resets
+ * completely invisible.
+ */
+const RESET_POLL_URL = (process.env.NEXUS_RESET_URL || '').trim();
+const RESET_POLL_MS = Math.max(1000, Number(process.env.NEXUS_RESET_POLL_MS || 5000));
+const RESET_POLL_KEY = (process.env.MOVEMENT_API_KEY || process.env.NEXUS_API_KEY || '').trim();
+
+/**
+ * The cursor, PERSISTED.
+ *
+ * Nexus's marker doubles as a `?since=` cursor, and keeping it on disk is what
+ * makes a restart correct rather than merely safe. Held only in memory, a boot
+ * has two bad options: act on whatever the marker currently says (replaying an
+ * old reset, hours late, mid-shift) or take it as a baseline and act on nothing
+ * (silently missing a reset that happened while the bridge was down — and the
+ * gate's memory is rebuilt from the journal at boot, so those cartons come back
+ * stale and stuck).
+ *
+ * With the cursor on disk there is no choice to make: ask for everything after
+ * where we left off. No replay, nothing missed.
+ *
+ * `null` still means "no cursor at all" — a genuinely first boot, where taking a
+ * baseline IS right because there is no gap to catch up on.
+ */
+const RESET_CURSOR_PATH = require('path').join(__dirname, '..', 'data', 'reset-cursor.json');
+let lastResetMarker = null;
+let lastResetSeq = null; // numeric half, sent as ?since= — null until Nexus gives one
+let resetPollFailures = 0;
+
+try {
+  const saved = JSON.parse(require('fs').readFileSync(RESET_CURSOR_PATH, 'utf8'));
+  if (saved?.marker != null) lastResetMarker = String(saved.marker);
+  if (Number.isFinite(saved?.seq)) lastResetSeq = Math.floor(saved.seq);
+} catch {
+  /* first boot, or unreadable — treated as "no cursor", which takes a baseline */
+}
+
+function saveResetCursor() {
+  try {
+    const { writeFileAtomic } = require('./atomic-write');
+    require('fs').mkdirSync(require('path').dirname(RESET_CURSOR_PATH), { recursive: true });
+    writeFileAtomic(RESET_CURSOR_PATH, JSON.stringify({ marker: lastResetMarker, seq: lastResetSeq }) + '\n');
+  } catch (err) {
+    // Not fatal, but it silently degrades the next restart back to the baseline
+    // behaviour above, so it must be visible.
+    controller.log(`[reset] cursor write failed (${err.message}) — a restart may miss a reset`, 'warn');
+  }
+}
+
+async function pollResetMarker() {
+  try {
+    // Send the cursor when we have one: without it Nexus has to return the full
+    // EPC list on every poll, and a container-sized reset is thousands of tags
+    // — 17,280 times a day. With it, an up-to-date gate gets `epcs: []`.
+    const url = new URL(RESET_POLL_URL);
+    if (lastResetSeq != null) url.searchParams.set('since', String(lastResetSeq));
+    const res = await fetch(url, {
+      headers: RESET_POLL_KEY ? { Authorization: `Bearer ${RESET_POLL_KEY}` } : {},
+      signal: AbortSignal.timeout(Math.min(RESET_POLL_MS, 10_000)),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = await res.json();
+    // Only complain once per outage, then again when it recovers — a poll this
+    // frequent would otherwise bury the log in identical lines.
+    if (resetPollFailures > 0) {
+      controller.log(`[reset] Nexus reset marker readable again (after ${resetPollFailures} failed attempt(s)).`);
+      resetPollFailures = 0;
+    }
+    // Prefer resetSeq: it is the authoritative counter AND the cursor, so
+    // comparing anything else risks a marker that moves while the cursor does
+    // not. resetAt is the fallback for a deployment that only sends a timestamp.
+    const seq = Number.isFinite(Number(body?.resetSeq)) ? Math.floor(Number(body.resetSeq)) : null;
+    const marker = seq != null ? seq : body?.resetAt;
+    if (marker == null || marker === '') return; // nothing published yet
+    const seen = String(marker);
+
+    if (lastResetMarker === null) {
+      lastResetMarker = seen;
+      lastResetSeq = seq;
+      saveResetCursor();
+      controller.log(`[reset] cursor starts at ${seen} — watching for changes.`);
+      return;
+    }
+    if (seen === lastResetMarker) return;
+
+    // Commit the cursor BEFORE doing the work. If applying it throws, the next
+    // poll must not retry the same reset forever.
+    const truncated = body?.truncated === true;
+    lastResetMarker = seen;
+    lastResetSeq = seq;
+    saveResetCursor();
+    await applyReceivingReset({
+      epcs: body?.epcs,
+      batches: [body?.batchRef, body?.batchId].filter((v) => typeof v === 'string' && v.trim()),
+      skus: Array.isArray(body?.skus) ? body.skus : [],
+      forgetEverything: truncated,
+      reason:
+        (typeof body?.reason === 'string' && body.reason.trim() ? body.reason.trim() : `reset marker moved to ${seen}`) +
+        (truncated ? ' [Nexus truncated the carton list]' : ''),
+      source: 'nexus-poll',
+    });
+  } catch (err) {
+    resetPollFailures++;
+    if (resetPollFailures === 1) {
+      controller.log(`[reset] cannot read the Nexus reset marker (${err.message}) — falling back to the figure check`, 'warn');
+    }
+  }
+}
+
+/**
+ * Receiving-reset webhook: Nexus (or the iPad, through Nexus) tells the gate a
+ * batch has been reset, the moment it happens.
+ *
+ * Replaces guesswork with a statement. The poll in board.js infers a reset from
+ * receiving figures going backwards, which works but is up to BOARD_REFRESH_MS
+ * late — and during that window the gate is still running on the old picture,
+ * so cartons re-scanned immediately after a reset on the iPad get judged
+ * against state that no longer exists. The poll STAYS as the fallback: a webhook
+ * that is never wired up, or a Nexus that cannot reach the gate, must not leave
+ * resets undetected.
+ *
+ * Body, all optional:
+ *   { epcs: ["E280...", ...] }  forget exactly these cartons. PREFERRED — a
+ *                               reset of one batch should not clear the gate's
+ *                               memory of a different batch's cartons, which is
+ *                               what the unscoped path has to do.
+ *   { reason: "batch 4821 reset on iPad" }   free text, ends up in the log
+ *   { batchId, documentId }      recorded alongside the reason
+ *
+ * With no epcs it falls back to the same full wipe the poll performs.
+ *
+ * Auth: if RESET_WEBHOOK_KEY (or MOVEMENT_API_KEY / NEXUS_API_KEY — the key
+ * Nexus already holds) is set, an Authorization: Bearer header must match.
+ * Compared with timingSafeEqual. No key configured = open, like every other
+ * route on this LAN-only bridge; the boot log says which it is.
+ */
+const RESET_WEBHOOK_KEY = (process.env.RESET_WEBHOOK_KEY || process.env.MOVEMENT_API_KEY || process.env.NEXUS_API_KEY || '').trim();
+
+function resetWebhookAuthorized(req) {
+  if (!RESET_WEBHOOK_KEY) return true; // unconfigured = open, same as the rest
+  const header = String(req.get('authorization') || '');
+  const offered = header.replace(/^Bearer\s+/i, '').trim();
+  if (!offered) return false;
+  const a = Buffer.from(offered);
+  const b = Buffer.from(RESET_WEBHOOK_KEY);
+  // Length must be compared separately — timingSafeEqual throws on a mismatch.
+  return a.length === b.length && require('crypto').timingSafeEqual(a, b);
+}
+
+app.post('/receiving/reset', async (req, res) => {
+  if (!resetWebhookAuthorized(req)) {
+    controller.log('[reset] webhook rejected: bad or missing bearer key', 'warn');
+    return res.status(401).json({ ok: false, error: 'bad or missing Authorization: Bearer key' });
+  }
+  const body = req.body || {};
+  const tags = [body.batchId, body.documentId].filter(Boolean).join(' ');
+  const result = await applyReceivingReset({
+    epcs: body.epcs,
+    // Fallbacks when no tags are named: the gate resolves a batch ref or a
+    // product to its own cartons rather than clearing everything.
+    batches: [body.batchRef, body.batchId, body.documentRef].filter((v) => typeof v === 'string' && v.trim()),
+    skus: Array.isArray(body.skus) ? body.skus : [],
+    reason: `${typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim() : 'reset reported by Nexus'}${tags ? ` (${tags})` : ''}`,
+    source: 'webhook',
+  });
+  res.json({ ok: true, ...result });
+});
+
+/**
+ * Apply a reset the gate has been TOLD about (webhook or reset-marker poll),
+ * as opposed to one it inferred from figures moving.
+ *
+ * One function for both so the two can never drift: the webhook and the poller
+ * are two delivery routes for the same fact, and a fix to what a reset means
+ * has to land on both.
+ *
+ * @param {string[]} [epcs] the cartons that were un-received. Naming them is
+ *   what makes the reset surgical — without them the gate has no choice but to
+ *   forget every tag, including cartons from batches nobody touched.
+ * @param {boolean} [refreshBoard] false when the caller is already inside a
+ *   board load (the figure detector), true otherwise.
+ */
+async function refreshBoardAfterReset(source) {
+  // Redraw against post-reset figures instead of waiting out BOARD_REFRESH_MS.
+  // Suppress first: this very refresh is the one that would see the drop and
+  // announce the same reset a second time.
+  board.suppressNextReset(source);
+  try {
+    await board.load();
+  } catch (err) {
+    controller.log(`[reset] board refresh after ${source} failed (${err.message}) — screens told anyway`, 'warn');
+  }
+}
+
+async function applyReceivingReset({ epcs, batches, skus, reason, source, refreshBoard = true, forgetEverything = false }) {
+  // An ABSENT list and an EMPTY list mean different things, and conflating them
+  // is a real bug either way round:
+  //   absent  -> the caller did not say which cartons. Unknown, so wipe all.
+  //   empty   -> the caller says explicitly "no cartons were affected" (Nexus's
+  //              cursor answers `epcs: []` to an up-to-date gate). Wiping there
+  //              would throw away the gate's whole memory on a reset that
+  //              touched nothing.
+  const named = Array.isArray(epcs);
+  const list = named ? epcs.filter((e) => typeof e === 'string' && e.trim()).map((e) => e.trim().toUpperCase()) : [];
+
+  let cleared = 0;
+  let scope;
+  // Nexus named a batch or a product but no tags? Resolve it here rather than
+  // widening to a full wipe. The gate's own catalogue knows which tags belong to
+  // a batch (the carton code carries the ref as a prefix), so a batch redo stays
+  // surgical even when the reply carries no EPC list.
+  if (!forgetEverything && !list.length && (batches?.length || skus?.length)) {
+    const r = nexus.forgetScope({ batches, skus });
+    if (r.epcs.length) {
+      controller.log(
+        `[reset] ${source}: ${reason} — resolved ${batches?.length ? `batch(es) ${batches.join(', ')}` : ''}` +
+          `${batches?.length && skus?.length ? ' + ' : ''}${skus?.length ? `product(s) ${skus.join(', ')}` : ''}` +
+          ` to ${r.epcs.length} carton(s), ${r.cleared} had local state`
+      );
+      if (refreshBoard) await refreshBoardAfterReset(source);
+      broadcast({
+        type: 'receiving-reset',
+        epcs: r.epcs,
+        count: r.epcs.length,
+        reasons: [reason],
+        source,
+        timestamp: new Date().toISOString(),
+      });
+      return { scoped: true, epcs: r.epcs.length, cleared: r.cleared };
+    }
+    // Named a scope the gate cannot resolve — a pallet code, or a batch whose
+    // tags are not in the catalogue yet. Widening to a full wipe here would
+    // clear cartons from batches nobody touched, so it does NOT: it says so and
+    // keeps the memory, because a wrong wipe double-counts real stock while a
+    // missed forget only refuses a redo, visibly, with a reason.
+    controller.log(
+      `[reset] ${source}: ${reason} — could not resolve the named scope to any carton ` +
+        `(pallet codes are not resolvable here; ask Nexus for epcs or skus). Memory kept.`,
+      'warn'
+    );
+    scope = 'named scope unresolvable — memory kept, nothing forgotten';
+    if (refreshBoard) await refreshBoardAfterReset(source);
+    broadcast({ type: 'receiving-reset', epcs: [], count: 0, reasons: [reason], source, timestamp: new Date().toISOString() });
+    return { scoped: false, epcs: 0, cleared: 0, unresolved: true };
+  }
+  if (forgetEverything) {
+    // Nexus truncated the list: there were more cartons than one reply carries,
+    // so the names we did get are a subset and the rest are unknown. Forgetting
+    // the subset would leave real cartons stuck as INSIDE — silently unable to
+    // re-count, which is the exact failure this whole mechanism exists to stop.
+    nexus.resetForReceiving();
+    scope = `truncated list (${list.length} name(s) shown) — full wipe, the remainder is unknown`;
+  } else if (!named) {
+    // Nothing named at all. Every tag reads as arriving again — right for the
+    // reset batch, tolerable for the rest only because the absence gate still
+    // makes a carton leave the field and come back.
+    nexus.resetForReceiving();
+    scope = 'no epcs given — full wipe';
+  } else if (list.length) {
+    cleared = nexus.forgetEpcs(list);
+    scope = `${list.length} carton(s) named, ${cleared} had local state`;
+  } else {
+    scope = 'no cartons affected — figures refreshed, movement memory kept';
+  }
+  controller.log(`[reset] ${source}: ${reason} — ${scope}`);
+
+  // The screens still need telling either way — a Nexus that is briefly
+  // unreachable does not make the reset any less real.
+  if (refreshBoard) await refreshBoardAfterReset(source);
+
+  broadcast({
+    type: 'receiving-reset',
+    epcs: list,
+    count: list.length,
+    reasons: [reason],
+    source,
+    timestamp: new Date().toISOString(),
+  });
+  return { scoped: list.length > 0, epcs: list.length, cleared };
+}
+
 app.post('/admin/wipe-local', (req, res) => {
   if (req.body?.confirm !== 'wipe') {
     return res.status(400).json({
