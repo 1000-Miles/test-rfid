@@ -1079,7 +1079,12 @@ app.post('/tag/power', async (req, res) => {
   });
 });
 
-app.get('/nexus/summary', (_req, res) => res.json({ ok: true, ...nexus.summary() }));
+app.get('/nexus/summary', (_req, res) =>
+  // The pallet window lives on the outbox, not the detector, but it is a gate
+  // TUNING value and belongs in the one summary the console already polls —
+  // a second endpoint for one number is how settings end up scattered.
+  res.json({ ok: true, ...nexus.summary(), palletWindowMs: outbox.togglePalletWindowMs })
+);
 app.get('/nexus/inventory', (_req, res) => res.json({ ok: true, inventory: nexus.getInventory() }));
 app.get('/nexus/events', (req, res) => res.json({ ok: true, events: nexus.getEvents(Number(req.query.limit) || 50) }));
 /**
@@ -1472,12 +1477,22 @@ app.post('/movement/replay', (req, res) => {
 });
 
 app.post('/nexus/config', (req, res) => {
+  // Routed here rather than to its own endpoint for the reason above. Applied
+  // before the detector config so a bad value fails the whole request instead of
+  // half-applying it.
+  if (req.body && req.body.palletWindowMs != null) {
+    try {
+      outbox.setPalletWindowMs(req.body.palletWindowMs);
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
+  }
   const summary = nexus.setConfig(req.body || {});
   controller.log(
     `[nexus] config: detect=${summary.detectMode} dedup=${summary.dedupMs}ms quiet=${summary.quietMs}ms maxWindow=${summary.maxWindowMs}ms` +
       ` | no-IR: rearm=${summary.toggleDedupMs}ms absence=${summary.absenceMs}ms minRssi=${summary.minRssi ?? 'off'} minReads=${summary.toggleMinReads}`
   );
-  res.json({ ok: true, ...summary });
+  res.json({ ok: true, ...summary, palletWindowMs: outbox.togglePalletWindowMs });
 });
 
 

@@ -78,7 +78,9 @@ class Outbox extends EventEmitter {
     this.drainPerSec = opts.drainPerSec ?? 5;
     this.batchSettleMs = opts.batchSettleMs ?? 500;
     this.toggleBatchQuietMs = opts.toggleBatchQuietMs ?? 1_500;
-    this.togglePalletWindowMs = opts.togglePalletWindowMs ?? 120_000;
+    // 60s. Must match the default in server.js — a caller that omits the option
+    // and one that reads it from the env should not get different pallets.
+    this.togglePalletWindowMs = opts.togglePalletWindowMs ?? 60_000;
     this.log = opts.log || (() => {});
     // Permanent identity of THIS gate. Together with the journal seq it forms
     // the immutable event id (`gateId:seq`) stamped on every movement before it
@@ -643,6 +645,33 @@ class Outbox extends EventEmitter {
     } catch (err) {
       this.log(`open pallet state write failed: ${err.message}`, 'error');
     }
+  }
+
+  /**
+   * Change how long a pallet stays open for.
+   *
+   * Applies to the NEXT pallet, never the one already open. Re-clocking a live
+   * pallet would let a shortened window land in the past and close it on the
+   * spot — cartons still being unloaded onto it would then belong to the pallet
+   * after, which is exactly the mis-grouping this window exists to prevent. An
+   * operator changing a setting is not saying "close the pallet in front of me".
+   *
+   * @param {number} ms 10s..15min. Outside that it is refused, not clamped: a
+   *   two-second window makes every carton its own pallet and an hour-long one
+   *   merges a whole shift, and both look like the gate is broken.
+   * @returns {number} the value now in force for new pallets.
+   */
+  setPalletWindowMs(ms) {
+    const v = Number(ms);
+    if (!Number.isFinite(v) || v < 10_000 || v > 900_000) {
+      throw new Error(`pallet window must be 10000..900000 ms (got ${ms})`);
+    }
+    this.togglePalletWindowMs = Math.floor(v);
+    this.log(
+      `pallet window = ${Math.round(this.togglePalletWindowMs / 1000)}s` +
+        (this._togglePassage ? ' — the pallet already open keeps its original deadline' : '')
+    );
+    return this.togglePalletWindowMs;
   }
 
   _schedulePalletDeadline() {

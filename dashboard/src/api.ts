@@ -58,7 +58,14 @@ export const api = {
     leftOffsetMm?: number;
     dpi?: number;
   }): Promise<{ ok: boolean; palletCode?: string; target?: string; error?: string }> => post('/printer/pallet-test-tag', body),
-  getPower: async (): Promise<{ ok: boolean; dBm: number | null; applied?: Record<number, number> }> => {
+  getPower: async (): Promise<{
+    ok: boolean;
+    dBm: number | null;
+    /** Read back from the reader, per port — present when the firmware answers. */
+    perAntenna?: Record<number, { read: number; write: number }> | null;
+    /** What this bridge process last wrote per port; wins over the read-back. */
+    applied?: Record<number, number>;
+  }> => {
     const res = await fetch(`${BRIDGE_HTTP}/power`);
     return res.json();
   },
@@ -71,6 +78,27 @@ export const api = {
   /** Enable a set of ports. The reader rejects this mid-inventory, so the
    *  bridge pauses and resumes around it. */
   setAntennas: (ports: number[]) => post<{ ok: boolean; enabled: number[]; rc: number }>('/antennas', { ports }),
+  /**
+   * The READER's own buzzer — the hardware chirp on every tag read, not the
+   * board's voice announcements. Persists in the reader, so this is a one-time
+   * press.
+   */
+  getBeep: async (): Promise<{ ok: boolean; on: boolean | null; error?: string }> => {
+    const res = await fetch(`${BRIDGE_HTTP}/beep`);
+    return res.json();
+  },
+  setBeep: (on: boolean) => post<{ ok: boolean; on: boolean | null; error?: string }>('/beep', { on }),
+  /**
+   * Software read-zone floor. Reads weaker than `minRssi` (negative dBm) are
+   * dropped in the bridge — no tag event, no board row, no movement, no
+   * database row. `null` keeps every read.
+   *
+   * Not the same knob as power: power changes the physical field (and weakens
+   * the read you want), this leaves the field alone and discards what comes
+   * back too faint.
+   */
+  setReadFilter: (minRssi: number | null) =>
+    post<{ ok: boolean; minRssi: number | null; weakDropped: number; error?: string }>('/read-filter', { minRssi }),
   /** Power per antenna, e.g. { 3: 20, 4: 26 }. The ports at a gate are not
    *  equivalent — one covers the doorway, another reaches down the aisle — so a
    *  single global dBm is the wrong knob for tuning a read zone. */
@@ -89,6 +117,13 @@ export const api = {
     absenceMs?: number;
     minRssi?: number | null;
     toggleMinReads?: number;
+    /**
+     * How long a pallet stays open for, in ms. With no beams this is the only
+     * thing separating one pallet from the next: anything read inside the window
+     * joins the same pallet code and the same printed label. Takes effect on the
+     * NEXT pallet, never the one already open.
+     */
+    palletWindowMs?: number;
   }): Promise<NexusConfig & { ok: boolean }> => post('/nexus/config', cfg),
   /** The bridge PC's real LAN IPv4 — what a phone on the same network can reach (never localhost). */
   network: async (): Promise<{ ok: boolean; ip: string | null }> => {

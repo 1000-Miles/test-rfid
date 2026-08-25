@@ -18,6 +18,12 @@ export interface NexusConfig {
   absenceMs: number;
   minRssi: number | null;
   toggleMinReads: number;
+  /**
+   * How long a pallet stays open for, in ms. Everything read inside the window
+   * lands on the same pallet code and the same printed label, so this is what
+   * separates one pallet from the next when there are no beams.
+   */
+  palletWindowMs?: number;
 }
 
 export interface GpiState {
@@ -39,6 +45,10 @@ export interface Status {
   mode: Mode;
   irDurationMs: number;
   irMinGapMs: number;
+  /** Software read-zone floor in dBm (negative). null = off, every read kept. */
+  minRssi?: number | null;
+  /** Reads discarded by that floor since the bridge booted. */
+  weakDropped?: number;
   gpi: GpiState;
   udp?: UdpState;
 }
@@ -251,6 +261,22 @@ export interface PrinterConfig {
   palletHeightMm: number;
   palletLeftOffsetMm: number;
   palletDpi: number;
+  palletOrientation?: 'portrait' | 'landscape';
+  /**
+   * How the pallet printer is reached.
+   *   'tcp'     — straight to the printer's own network port. Nothing else has
+   *               to be switched on, so this is the better answer wherever the
+   *               printer has an ethernet socket.
+   *   'sidecar' — through a helper on the PC the printer is plugged into. Only
+   *               needed for a USB-attached printer.
+   */
+  palletTransport?: 'tcp' | 'sidecar';
+  /** Printer's own IP, for palletTransport 'tcp'. */
+  palletHost?: string;
+  palletTcpPort?: number;
+  /** Address of the helper on the printer's PC, for 'sidecar'. Blank = print on
+   *  the bridge's own machine. */
+  palletSidecarUrl?: string;
 }
 
 export interface LastPrint {
