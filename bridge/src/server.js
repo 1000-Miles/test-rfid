@@ -184,6 +184,9 @@ const nexus = new PassageDetector({
 // MOVEMENT_API_KEY is preferred because that is the variable Nexus itself reads;
 // NEXUS_API_KEY is the fallback for deployments that only carry the older name.
 const { Outbox } = require('./outbox');
+const { startControlTower } = require('./control-tower');
+/** Set once the server is listening; stopped on SIGINT with everything else. */
+let controlTower = null;
 // Permanent identity of this gate — the `gateId` half of every movement's
 // immutable event id (`gateId:seq`). Falls back to the location tag so a
 // single-gate site needs no extra config, but a second gate MUST set GATE_ID
@@ -1755,6 +1758,37 @@ server.listen(PORT, () => {
   } else {
     controller.log(`Movement push -> ${ob.url} (queued: ${ob.queueDepth}, dead: ${ob.deadLetters}).`);
   }
+
+  // Hardware health reporting for Nexus → Operations → Control Tower.
+  //
+  // It lives in this process because an ANTENNA has no address of its own — it
+  // is a socket on the back of the reader, and the UR4 accepts one connection,
+  // which this process holds. Nothing outside the bridge can ask
+  // uhf.getAntennaLink() while the gate is running, so nothing outside the
+  // bridge can tell you whether antenna 3 is plugged in.
+  //
+  // `driver` (not `uhf`) is passed for the same reason controller.js uses it:
+  // it resolves to the DLL or the sidecar per UHF_DRIVER, and both expose the
+  // antenna calls.
+  //
+  // Reuses NEXUS_URL's origin and MOVEMENT_API_KEY — no new configuration. Set
+  // CONTROL_TOWER=off to disable.
+  // `printer` is passed so printers are judged by the print path's OWN readiness
+  // check rather than a port knock — the Windows spooler accepts jobs with
+  // nothing attached, so 9100 answering proves almost nothing.
+  //
+  // It also announces this gate's hardware to Nexus (reader, each enabled
+  // antenna port, both printers, the router) so nobody has to type addresses
+  // into a form that goes stale the moment a cable moves.
+  controlTower = startControlTower({
+    controller,
+    uhf: require('./driver'),
+    printer,
+    gateId: GATE_ID,
+    readerIp: DEFAULT_IP,
+    readerPort: DEFAULT_PORT,
+    log: (m, level) => controller.log(`[control-tower] ${m}`, level),
+  });
   if (BURN_IN_ACTIVE) {
     controller.log(`Push cutover burn-in until ${BURN_IN_UNTIL}: legacy direct Supabase write is ALSO active.`);
   } else if (BURN_IN_UNTIL) {
@@ -1844,6 +1878,7 @@ server.listen(PORT, () => {
 process.on('SIGINT', async () => {
   controller.log('Shutting down...');
   outbox.stop(); // journal is already durable; anything unsent resumes on boot
+  if (controlTower) controlTower.stop(); // its pending results are on disk too
   await controller.stop();
   process.exit(0);
 });
