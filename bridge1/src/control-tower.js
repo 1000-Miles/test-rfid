@@ -198,8 +198,8 @@ async function checkAntenna(device, ctx) {
   if (!device.antennaPort) return unknown('No antenna port set for this antenna.');
   if (!ctx.uhf) return unknown('This bridge build has no reader module wired.');
 
-  // Only the bridge holding THIS reader can answer. A second gate's bridge polls
-  // the same global work list and must not touch rows it cannot witness.
+  // Belt and braces: checkDevice already filters foreign gates via
+  // belongsToAnotherGate. Kept so calling checkAntenna directly is still safe.
   if (device.gateId && ctx.gateId && device.gateId !== ctx.gateId) return null;
 
   let connectedPorts = null;
@@ -325,9 +325,34 @@ function checkReaderViaLink(device, ctx) {
  * Check one device. Returns null to mean "not mine, skip it" — used when a
  * second gate's bridge sees rows it cannot witness.
  */
+/**
+ * Is this row another gate's to answer for?
+ *
+ * The work list is global: with gate 1 and gate 2 both running, each bridge sees
+ * every device in Nexus. Reader and antenna rows must only ever be judged by the
+ * bridge that HOLDS that reader's link, for two reasons:
+ *
+ *   1. Only it can answer at all for an antenna — the reader takes one
+ *      connection and that bridge has it.
+ *   2. For a reader it has the BETTER answer. Gate 1's bridge can say "connected
+ *      but not reading"; gate 2 could only knock on the port and call that
+ *      healthy. Letting the weaker check also write means whichever reported
+ *      last wins, and a real warning silently becomes Online.
+ *
+ * Skipping is safe: if the owning bridge is down, nobody reports its devices,
+ * they go stale, and the board says so — which is the truth.
+ */
+function belongsToAnotherGate(device, ctx) {
+  if (device.type !== 'reader' && device.type !== 'antenna') return false;
+  return Boolean(device.gateId && ctx.gateId && device.gateId !== ctx.gateId);
+}
+
 async function checkDevice(device, ctx) {
   const at = new Date().toISOString();
   const wrap = (r) => (r ? Object.assign({ id: device.id, at }, r) : null);
+
+  // Not ours to answer for. Returning null sends nothing at all for this row.
+  if (belongsToAnotherGate(device, ctx)) return null;
 
   // Antennas are not hosts. Ask the reader.
   if (device.type === 'antenna') return wrap(await checkAntenna(device, ctx));
@@ -344,11 +369,26 @@ async function checkDevice(device, ctx) {
     if (viaPrinter) return wrap(viaPrinter);
   }
 
-  // No address: the device IS this bridge (the middleware row). Claiming online
-  // here is sound rather than optimistic — this code is executing inside the
+  // The middleware row: no address because the device IS this bridge. Claiming
+  // online is sound rather than optimistic — this code is executing inside the
   // process being asked about, so its liveness is not in question.
-  if (!device.ip) {
+  //
+  // Restricted to 'software' deliberately. As a blanket "no ip means it's us" it
+  // was wrong the moment a second gate existed: any address-less row from the
+  // other gate would have been reported healthy on the strength of THIS process
+  // being alive.
+  if (device.type === 'software' && !device.ip) {
     return wrap({ status: 'online', issue: null, detail: 'Bridge process is running.', latencyMs: 0 });
+  }
+
+  // Anything else with no address cannot be checked from here at all.
+  if (!device.ip) {
+    return wrap({
+      status: 'unknown',
+      issue: null,
+      detail: 'No address set, and this bridge has no other way to reach it.',
+      latencyMs: null,
+    });
   }
 
   const r = device.port
@@ -574,51 +614,76 @@ async function discoverDevices(ctx) {
     }
   }
 
-  // Printers, from the print path's own config. A USB/spooler printer has no
-  // address at all, and saying so is better than inventing one.
+  // Printers, but ONLY where this gate's .env actually names one.
+  //
+  // printer/index.js gives printerName and palletPrinterName hardcoded fallbacks
+  // ('Chainway CP30', 'Gprinter Test'), so printer.config always LOOKS like a
+  // printer is configured. Trusting it registers two printers on a gate that has
+  // none — gate 2 being exactly that case — and they then sit permanently
+  // offline. A device that was never there is not a fault; inventing one is the
+  // same lie as a fabricated green light, pointed the other way.
+  //
+  // So the env is the source of truth for "this gate HAS a printer", and the
+  // config is only asked WHERE it is.
   const pc = ctx.printer && ctx.printer.config ? ctx.printer.config : null;
-  if (pc) {
+  const hasCartonPrinter = Boolean(
+    process.env.PRINTER_NAME || process.env.PRINTER_HOST || process.env.PRINTER_TRANSPORT
+  );
+  const hasPalletPrinter = Boolean(process.env.PALLET_PRINTER_NAME || process.env.PALLET_HOST);
+
+  if (pc && hasCartonPrinter) {
     const tcp = pc.transport === 'tcp';
     out.push({
       sourceKey: `${gate}:printer:carton`,
       type: 'printer_rfid',
       name: pc.printerName || 'Carton Printer',
       zoneName,
+      // A USB/spooler printer has no address at all, and saying so beats
+      // inventing one.
       ip: tcp ? pc.host || null : null,
       port: tcp ? pc.port || null : null,
       frequencyMinutes: 15,
       checkNote: 'Checks the carton label/RFID printer is attached and accepting jobs.',
     });
-
-    if (pc.palletPrinterName || pc.palletHost) {
-      const palletTcp = pc.palletTransport === 'tcp';
-      out.push({
-        sourceKey: `${gate}:printer:pallet`,
-        type: 'printer_label',
-        name: pc.palletPrinterName || 'Pallet Tag Printer',
-        zoneName,
-        ip: palletTcp ? pc.palletHost || null : null,
-        port: palletTcp ? pc.palletTcpPort || null : null,
-        frequencyMinutes: 15,
-        checkNote: 'Checks the pallet-tag printer is attached and accepting jobs.',
-      });
-    }
   }
 
-  // The router this machine goes through. Registered as the network device it
-  // is; the office link's WiFi/DNS/internet detail rides on the heartbeat.
-  const gw = await defaultGateway();
-  if (gw) {
+  if (pc && hasPalletPrinter) {
+    const palletTcp = pc.palletTransport === 'tcp';
     out.push({
-      sourceKey: `${gate}:gateway`,
-      type: 'wifi',
-      name: 'Network Router',
+      sourceKey: `${gate}:printer:pallet`,
+      type: 'printer_label',
+      name: pc.palletPrinterName || 'Pallet Tag Printer',
       zoneName,
-      ip: gw,
-      port: null,
-      frequencyMinutes: 5,
-      checkNote: 'Pings the default gateway the bridge reaches the network through.',
+      ip: palletTcp ? pc.palletHost || null : null,
+      port: palletTcp ? pc.palletTcpPort || null : null,
+      frequencyMinutes: 15,
+      checkNote: 'Checks the pallet-tag printer is attached and accepting jobs.',
     });
+  }
+
+  // The router, OPT-IN.
+  //
+  // Off by default for two reasons: the dashboard's connection card already
+  // reports each bridge's router from the heartbeat, and with two gates behind
+  // one router this registers the same physical box twice, in two zones, where
+  // one cable pull would raise two alarms about one fault.
+  //
+  // Worth switching on where a gate has its own router or AP that is genuinely
+  // separate hardware: CONTROL_TOWER_ANNOUNCE_ROUTER=1.
+  if (/^(1|true|yes|on)$/i.test(process.env.CONTROL_TOWER_ANNOUNCE_ROUTER || '')) {
+    const gw = await defaultGateway();
+    if (gw) {
+      out.push({
+        sourceKey: `${gate}:gateway`,
+        type: 'wifi',
+        name: 'Network Router',
+        zoneName,
+        ip: gw,
+        port: null,
+        frequencyMinutes: 5,
+        checkNote: 'Pings the default gateway this bridge reaches the network through.',
+      });
+    }
   }
 
   return out;
