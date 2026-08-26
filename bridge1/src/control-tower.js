@@ -592,17 +592,28 @@ async function discoverDevices(ctx) {
   const zoneName = (process.env.CONTROL_TOWER_ZONE || '').trim() || prettyGate(gate);
   const out = [];
 
-  // The bridge itself. No address: the check is that this code is running.
-  out.push({
-    sourceKey: `${gate}:bridge`,
-    type: 'software',
-    name: 'RFID Bridge',
-    zoneName,
-    ip: null,
-    port: null,
-    frequencyMinutes: 5,
-    checkNote: 'Confirms the gate bridge service is running and reporting.',
-  });
+  // The bridge does NOT announce itself as a device.
+  //
+  // It used to, and the row was redundant: the bridge's own liveness is the
+  // heartbeat, and the dashboard's connection card is built from exactly that.
+  // A device row saying "the thing that reports is reporting" adds a line to
+  // every gate and tells you nothing the card above it did not.
+  //
+  // CONTROL_TOWER_ANNOUNCE_SELF=1 puts it back for a site that wants per-gate
+  // bridge rows on the board — worth it if you run several gates and want each
+  // one's service visible in the list rather than only in the header.
+  if (/^(1|true|yes|on)$/i.test(process.env.CONTROL_TOWER_ANNOUNCE_SELF || '')) {
+    out.push({
+      sourceKey: `${gate}:bridge`,
+      type: 'software',
+      name: 'RFID Bridge',
+      zoneName,
+      ip: null,
+      port: null,
+      frequencyMinutes: 5,
+      checkNote: 'Confirms the gate bridge service is running and reporting.',
+    });
+  }
 
   // The reader. Address from the live link where we have one, else the
   // configured default — never a guess.
