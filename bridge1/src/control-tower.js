@@ -535,7 +535,27 @@ async function checkNetwork() {
   };
 }
 
-// ── self-registration ───────────────────────────────────────────────────────
+/**
+ * The printer config this bridge has actually SAVED, or null if it never has.
+ *
+ * Read straight off disk rather than through PrinterManager, because the manager
+ * merges the file over placeholder defaults and that erases the one distinction
+ * that matters here: whether a printer was ever configured at all. Same path the
+ * manager writes (printer/index.js STATE_PATH), one directory shallower because
+ * this file sits in src/ rather than src/printer/.
+ */
+function persistedPrinterConfig() {
+  try {
+    const raw = readFileSync(join(__dirname, '..', 'data', 'printer.json'), 'utf8');
+    const state = JSON.parse(raw);
+    return state && state.config ? state.config : null;
+  } catch {
+    // No file: nothing has been configured or printed on this bridge.
+    return null;
+  }
+}
+
+// -- self-registration ------------------------------------------------------
 
 /**
  * Everything this bridge can truthfully say it has, ready to announce.
@@ -614,22 +634,34 @@ async function discoverDevices(ctx) {
     }
   }
 
-  // Printers, but ONLY where this gate's .env actually names one.
+  // Printers, but only the ones this bridge actually has.
   //
-  // printer/index.js gives printerName and palletPrinterName hardcoded fallbacks
-  // ('Chainway CP30', 'Gprinter Test'), so printer.config always LOOKS like a
-  // printer is configured. Trusting it registers two printers on a gate that has
-  // none — gate 2 being exactly that case — and they then sit permanently
-  // offline. A device that was never there is not a fault; inventing one is the
-  // same lie as a fabricated green light, pointed the other way.
+  // WHERE THE TRUTH LIVES. printer/index.js starts from DEFAULT_CONFIG - env
+  // vars over HARDCODED PLACEHOLDERS ('Chainway CP30', 'Gprinter Test',
+  // 192.168.99.201) - and then overlays data/printer.json, written whenever
+  // someone configures the printer through POST /printer/config. So
+  // printer.config at runtime always LOOKS populated, whether or not a printer
+  // was ever set up.
   //
-  // So the env is the source of truth for "this gate HAS a printer", and the
-  // config is only asked WHERE it is.
+  // An earlier version of this used the env as the signal. That was wrong in
+  // both directions: gate 1's printers are configured through the API and
+  // persisted to the file (a TCP CP30 and a TSC T-4403E, neither of them the
+  // placeholder name), so it would have announced nothing; and a gate with no
+  // printer would still have matched on a stray var.
+  //
+  // The persisted file is the honest signal - it exists only where a printer has
+  // actually been configured or used. Gate 2's data/ is empty, so it announces
+  // no printer. Env is still accepted for a site configured that way instead.
   const pc = ctx.printer && ctx.printer.config ? ctx.printer.config : null;
+  const persisted = persistedPrinterConfig();
   const hasCartonPrinter = Boolean(
-    process.env.PRINTER_NAME || process.env.PRINTER_HOST || process.env.PRINTER_TRANSPORT
+    (persisted && persisted.printerName) || process.env.PRINTER_NAME || process.env.PRINTER_HOST
   );
-  const hasPalletPrinter = Boolean(process.env.PALLET_PRINTER_NAME || process.env.PALLET_HOST);
+  const hasPalletPrinter = Boolean(
+    (persisted && persisted.palletPrinterName) ||
+      process.env.PALLET_PRINTER_NAME ||
+      process.env.PALLET_HOST
+  );
 
   // SHARED, not per-gate. There is one RFID printer for the whole site, so a
   // gate-prefixed sourceKey would file the same physical printer twice — once
