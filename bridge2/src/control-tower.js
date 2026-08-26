@@ -310,15 +310,26 @@ function checkReaderViaLink(device, ctx) {
       latencyMs: null,
     };
   }
-  if (ctx.controller.reading === false) {
-    return {
-      status: 'warning',
-      issue: 'Reader is connected but not reading.',
-      detail: 'Link is open, inventory is stopped.',
-      latencyMs: null,
-    };
-  }
-  return { status: 'online', issue: null, detail: 'Reader link open and reading.', latencyMs: null };
+  // NOT reading is not a fault.
+  //
+  // This gate runs in IR mode (NEXUS_DETECT_MODE defaults to 'ir'), where an
+  // inventory cycle is started by the beam being broken and stops again after the
+  // passage. So `reading === false` is the NORMAL resting state between pallets —
+  // warning on it meant a healthy gate showed amber all day and the word stopped
+  // meaning anything.
+  //
+  // Whether the reader is actually doing its job is answered elsewhere, and
+  // better: Nexus watches the tag traffic for this gate and drops the reader to
+  // warning if nothing has been read for GATE_SILENT_WARN_MS. That is evidence,
+  // where this was a guess about a flag.
+  return {
+    status: 'online',
+    issue: null,
+    detail: ctx.controller.reading
+      ? 'Reader link open, inventory running.'
+      : 'Reader link open, waiting for a passage.',
+    latencyMs: null,
+  };
 }
 
 /**
