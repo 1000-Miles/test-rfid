@@ -1022,7 +1022,16 @@ function startControlTower(opts) {
   loadAntennaReads();
   if (o.controller && typeof o.controller.on === 'function') {
     o.controller.on('message', (msg) => {
-      if (msg && msg.type === 'tag' && msg.antenna != null) noteAntennaRead(msg.antenna);
+      // Wrapped, and this matters more than it looks. This listener sits on the
+      // live tag path: EventEmitter propagates a throwing listener straight out
+      // of emit(), which is called from the controller's own tag handling. A bug
+      // in MONITORING code must never be able to break carton ingestion, so the
+      // worst case here is a lost antenna counter, not a lost read.
+      try {
+        if (msg && msg.type === 'tag' && msg.antenna != null) noteAntennaRead(msg.antenna);
+      } catch {
+        /* counting is best-effort; the gate comes first */
+      }
     });
   } else {
     log('no controller passed — antennas can only be judged by tag traffic, which needs it', 'warn');
