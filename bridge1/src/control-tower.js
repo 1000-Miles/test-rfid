@@ -675,10 +675,14 @@ async function discoverDevices(ctx) {
   // spooler must not report on it (the same rule that stops a bare port knock
   // overwriting a reader's better verdict).
   //
-  // CONTROL_TOWER_PRINTER_ZONE overrides the zone for a site where a gate really
-  // does have its own dedicated printer; setting it to the gate's own name
-  // restores the old per-gate filing.
-  const printerZone = (process.env.CONTROL_TOWER_PRINTER_ZONE || 'Shared').trim() || 'Shared';
+  // Only the CARTON/RFID printer is shared. The site runs one Chainway RFID
+  // printer for both gates, but each gate has its OWN pallet label printer on its
+  // own PC — so only the carton row gets a gate-independent key and the shared
+  // zone. Filing the pallet printers together would collapse two real machines
+  // into one row and hide a fault on whichever lost the race.
+  //
+  // CONTROL_TOWER_PRINTER_ZONE overrides the shared zone name.
+  const sharedZone = (process.env.CONTROL_TOWER_PRINTER_ZONE || 'Shared').trim() || 'Shared';
 
   if (pc && hasCartonPrinter) {
     const tcp = pc.transport === 'tcp';
@@ -686,7 +690,7 @@ async function discoverDevices(ctx) {
       sourceKey: 'shared:printer:carton',
       type: 'printer_rfid',
       name: pc.printerName || 'Carton Printer',
-      zoneName: printerZone,
+      zoneName: sharedZone,
       // A USB/spooler printer has no address at all, and saying so beats
       // inventing one.
       ip: tcp ? pc.host || null : null,
@@ -699,10 +703,12 @@ async function discoverDevices(ctx) {
   if (pc && hasPalletPrinter) {
     const palletTcp = pc.palletTransport === 'tcp';
     out.push({
-      sourceKey: 'shared:printer:pallet',
+      sourceKey: `${gate}:printer:pallet`,
       type: 'printer_label',
       name: pc.palletPrinterName || 'Pallet Tag Printer',
-      zoneName: printerZone,
+      // This gate's own zone, not the shared one: every gate has its own pallet
+      // printer, sitting on that gate's PC.
+      zoneName,
       ip: palletTcp ? pc.palletHost || null : null,
       port: palletTcp ? pc.palletTcpPort || null : null,
       frequencyMinutes: 15,
