@@ -734,29 +734,29 @@ async function discoverDevices(ctx) {
     });
   }
 
-  // The router, OPT-IN.
+  // The local network, as ONE shared device.
   //
-  // Off by default for two reasons: the dashboard's connection card already
-  // reports each bridge's router from the heartbeat, and with two gates behind
-  // one router this registers the same physical box twice, in two zones, where
-  // one cable pull would raise two alarms about one fault.
+  // Both gates sit behind the same router, so this is deliberately keyed
+  // 'shared:lan' rather than per gate: one physical box, one row. An earlier
+  // version filed it per gate and a single cable pull raised two alarms about
+  // one fault.
   //
-  // Worth switching on where a gate has its own router or AP that is genuinely
-  // separate hardware: CONTROL_TOWER_ANNOUNCE_ROUTER=1.
-  if (/^(1|true|yes|on)$/i.test(process.env.CONTROL_TOWER_ANNOUNCE_ROUTER || '')) {
-    const gw = await defaultGateway();
-    if (gw) {
-      out.push({
-        sourceKey: `${gate}:gateway`,
-        type: 'wifi',
-        name: 'Network Router',
-        zoneName,
-        ip: gw,
-        port: null,
-        frequencyMinutes: 5,
-        checkNote: 'Pings the default gateway this bridge reaches the network through.',
-      });
-    }
+  // Both bridges announce the same key, which is idempotent. If a site ever puts
+  // its gates on genuinely separate subnets, set CONTROL_TOWER_LAN_PER_GATE=1 so
+  // each gets its own row instead of the two overwriting each other's address.
+  const gw = await defaultGateway();
+  if (gw) {
+    const perGate = /^(1|true|yes|on)$/i.test(process.env.CONTROL_TOWER_LAN_PER_GATE || '');
+    out.push({
+      sourceKey: perGate ? `${gate}:lan` : 'shared:lan',
+      type: 'wifi',
+      name: perGate ? 'Local LAN' : 'Local LAN',
+      zoneName: perGate ? zoneName : sharedZone,
+      ip: gw,
+      port: null,
+      frequencyMinutes: 5,
+      checkNote: 'Pings the router the warehouse network runs through.',
+    });
   }
 
   return out;
