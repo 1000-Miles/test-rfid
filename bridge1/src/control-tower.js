@@ -631,13 +631,30 @@ async function discoverDevices(ctx) {
   );
   const hasPalletPrinter = Boolean(process.env.PALLET_PRINTER_NAME || process.env.PALLET_HOST);
 
+  // SHARED, not per-gate. There is one RFID printer for the whole site, so a
+  // gate-prefixed sourceKey would file the same physical printer twice — once
+  // under Gate 1 and once under Gate 2 — and one paper jam would raise two
+  // alarms about one machine. Worse, whoever is looking at Gate 2 would not see
+  // the printer they actually use.
+  //
+  // So a printer gets a gate-independent key and lands in its own zone. Only the
+  // bridge whose .env names the printer announces and checks it, which is also
+  // the only bridge that can see its queue — a bridge with no view of the
+  // spooler must not report on it (the same rule that stops a bare port knock
+  // overwriting a reader's better verdict).
+  //
+  // CONTROL_TOWER_PRINTER_ZONE overrides the zone for a site where a gate really
+  // does have its own dedicated printer; setting it to the gate's own name
+  // restores the old per-gate filing.
+  const printerZone = (process.env.CONTROL_TOWER_PRINTER_ZONE || 'Shared').trim() || 'Shared';
+
   if (pc && hasCartonPrinter) {
     const tcp = pc.transport === 'tcp';
     out.push({
-      sourceKey: `${gate}:printer:carton`,
+      sourceKey: 'shared:printer:carton',
       type: 'printer_rfid',
       name: pc.printerName || 'Carton Printer',
-      zoneName,
+      zoneName: printerZone,
       // A USB/spooler printer has no address at all, and saying so beats
       // inventing one.
       ip: tcp ? pc.host || null : null,
@@ -650,10 +667,10 @@ async function discoverDevices(ctx) {
   if (pc && hasPalletPrinter) {
     const palletTcp = pc.palletTransport === 'tcp';
     out.push({
-      sourceKey: `${gate}:printer:pallet`,
+      sourceKey: 'shared:printer:pallet',
       type: 'printer_label',
       name: pc.palletPrinterName || 'Pallet Tag Printer',
-      zoneName,
+      zoneName: printerZone,
       ip: palletTcp ? pc.palletHost || null : null,
       port: palletTcp ? pc.palletTcpPort || null : null,
       frequencyMinutes: 15,
