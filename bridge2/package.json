@@ -1,0 +1,27 @@
+{
+  "name": "ur4-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node bridge for the Chainway UR4 UHF RFID reader (UHFAPI.dll via koffi)",
+  "license": "MIT",
+  "main": "src/server.js",
+  "scripts": {
+    "smoke": "node test/smoke.js",
+    "test-toggle": "node test/passage-toggle.js",
+    "test-outbox": "node test/outbox-offline.js",
+    "test-code128": "node test/code128.js",
+    "print": "node test/print-test.js",
+    "dev": "node src/server.js",
+    "sidecar": "node src/sidecar-server.js",
+    "printer-sidecar": "node src/printer-sidecar.js",
+    "reader": "node src/server-reader.js",
+    "build-printer-dist": "node scripts/build-printer-dist.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "koffi": "^2.10.0",
+    "sharp": "^0.35.3",
+    "ws": "^8.18.0"
+  }
+}
