@@ -201,6 +201,37 @@ async function main() {
     }
   }
 
+  console.log('NO RECEIVING exception: durable locally, never delivered or palletized');
+  {
+    freshScratch();
+    let o = new Outbox({ dataDir: SCRATCH, gateId: 'test-gate', batchUrl: 'http://nexus.test/api/movement/batch' });
+    const accepted = o.enqueue({
+      epc: 'NR01',
+      direction: 'in',
+      method: 'toggle',
+      unexpected: 'no-open-batch',
+      item: { kind: 'carton', sku: 'SKU-NO-BATCH', name: 'No batch product' },
+      timestamp: new Date().toISOString(),
+    });
+    assert(Boolean(accepted.eventId), 'exception receives a stable local event ID');
+    assert(o.pending.length === 0, 'exception never enters the Nexus delivery queue');
+    assert(o.openPallet() === null, 'exception never opens or joins a pallet');
+    assert(o.status().lastAccepted?.unexpected === 'no-open-batch', 'status exposes NO RECEIVING as last accepted');
+    let sendCalls = 0;
+    o._send = async () => { sendCalls += 1; return { ok: true }; };
+    await o._pump();
+    assert(sendCalls === 0, 'delivery pump never sends the exception');
+    o.stop();
+
+    o = new Outbox({ dataDir: SCRATCH, gateId: 'test-gate', batchUrl: 'http://nexus.test/api/movement/batch' });
+    assert(o.pending.length === 0, 'restart does not resurrect exception into delivery queue');
+    assert(o.status().lastAccepted?.unexpected === 'no-open-batch', 'restart restores exception evidence');
+    o.enqueue({ epc: 'OK01', direction: 'in', method: 'toggle', item: { kind: 'carton', sku: 'SKU-OK', name: 'Expected product' }, timestamp: new Date().toISOString() });
+    assert(o.openPallet()?.cartonCount === 1, 'next valid carton opens a clean one-carton pallet');
+    assert(o.openPallet()?.products.every((p) => p.sku !== 'SKU-NO-BATCH'), 'exception product is absent from pallet breakdown');
+    o.stop();
+  }
+
   console.log('passage batching: one IR passage is delivered in one request');
   {
     freshScratch();
@@ -230,7 +261,10 @@ async function main() {
   console.log('no-IR pallet sessions: quiet gaps do not close; print or deadline does');
   {
     freshScratch();
-    const o = new Outbox({ dataDir: SCRATCH, gateId: 'test-gate', batchUrl: 'http://nexus.test/api/movement/batch', toggleBatchQuietMs: 10, togglePalletWindowMs: 80 });
+    // Keep the deadline comfortably above Windows fsync latency. An 80ms test
+    // window raced the durable journal writes and could close before the first
+    // assertion even though production uses 60 seconds.
+    const o = new Outbox({ dataDir: SCRATCH, gateId: 'test-gate', batchUrl: 'http://nexus.test/api/movement/batch', toggleBatchQuietMs: 10, togglePalletWindowMs: 800 });
     const originalFetch = global.fetch;
     const payloads = [];
     global.fetch = async (_url, init) => {
@@ -254,7 +288,7 @@ async function main() {
       o.enqueue({ epc: 'BB04', direction: 'in', method: 'toggle', timestamp: new Date().toISOString() });
       const second = o.openPallet();
       assert(second.requestId !== first.requestId && second.palletCode !== first.palletCode, 'next carton opens a distinct pallet');
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 900));
       assert(payloads.length === 2 && payloads[1].events.length === 1, 'fixed deadline auto-closes and sends the next pallet');
     } finally {
       global.fetch = originalFetch;

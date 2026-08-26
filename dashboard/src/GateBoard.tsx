@@ -71,15 +71,13 @@ export default function GateBoard(props: { board: GateBoardApi; entries: EntryRo
   // Coarse clock, only so the expiry below re-evaluates without a passage. 5s
   // granularity on a 10-minute boundary is invisible and costs one render.
   const [clockTick, setClockTick] = useState(() => Date.now());
-  const [acknowledgedFaults, setAcknowledgedFaults] = useState<Set<string>>(new Set());
   useEffect(() => {
     const t = setInterval(() => setClockTick(Date.now()), 5_000);
     return () => clearInterval(t);
   }, []);
   const latestFault = useMemo(() => props.entries.find((entry) => entry.direction === 'in' && Boolean(entry.unexpected)) ?? null, [props.entries]);
-  const latestFaultKey = latestFault ? String(latestFault.eventId ?? latestFault.id) : null;
   const faultAt = latestFault ? Date.parse(latestFault.timestamp) : NaN;
-  const activeFault = latestFault && latestFaultKey && !acknowledgedFaults.has(latestFaultKey) && Number.isFinite(faultAt) && clockTick - faultAt < 10 * 60_000 ? latestFault : null;
+  const activeFault = latestFault && Number.isFinite(faultAt) && clockTick - faultAt < 10 * 60_000 ? latestFault : null;
 
   // The latest inbound passage, unless the door has been quiet long enough that
   // it is history rather than news — see PALLET_IDLE_CLEAR_MS. Expiring the
@@ -252,18 +250,25 @@ export default function GateBoard(props: { board: GateBoardApi; entries: EntryRo
         </div>
 
         {board.dupMsg && <DupToast message={board.dupMsg} />}
-        {activeFault && (
-          <div role="alert" style={{ position: 'absolute', left: u(28), right: u(28), bottom: u(24), zIndex: 40, display: 'flex', alignItems: 'center', gap: u(20), borderRadius: u(16), border: `${u(3)} solid ${C.redEdge}`, background: C.redBg, padding: `${u(18)} ${u(24)}`, boxShadow: '0 12px 30px rgba(127,29,29,.22)' }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: u(18), fontWeight: 900, letterSpacing: '.08em', color: C.redDk }}>WRONG SKU — SET ASIDE THIS ITEM</div>
-              <div style={{ marginTop: u(5), fontSize: u(18), fontWeight: 700, color: C.fg }}>{activeFault.item?.name || activeFault.item?.sku || activeFault.epc} · not on an open receiving batch</div>
-              <div style={{ marginTop: u(4), fontSize: u(15), fontWeight: 600, color: C.muted }}>It was recorded as an exception and was not credited or added to the pallet. Continue receiving all other goods.</div>
-            </div>
-            <button onClick={() => setAcknowledgedFaults((prev) => new Set(prev).add(String(activeFault.eventId ?? activeFault.id)))} style={{ minHeight: u(54), borderRadius: u(12), border: 0, background: C.redDk, color: 'white', padding: `0 ${u(24)}`, fontSize: u(15), fontWeight: 900, cursor: 'pointer', whiteSpace: 'nowrap' }}>ITEM SET ASIDE</button>
-          </div>
-        )}
+        {activeFault && <NoReceivingCard entry={activeFault} />}
       </div>
 
+    </div>
+  );
+}
+
+function NoReceivingCard({ entry }: { entry: EntryRow }) {
+  return (
+    <div role="status" aria-label={`${entry.item?.name || entry.item?.sku || entry.epc}: no receiving batch`} style={{ position: 'absolute', left: u(42), top: u(38), zIndex: 40, width: u(270), overflow: 'hidden', borderRadius: u(15), border: `${u(3)} solid ${C.redEdge}`, background: C.white, boxShadow: '0 10px 26px rgba(127,29,29,.22)' }}>
+      <div style={{ position: 'relative', height: u(165), display: 'flex', alignItems: 'center', justifyContent: 'center', background: C.surface, color: C.off }}>
+        <Icon.Box size={72} />
+        <div style={{ position: 'absolute', left: u(10), right: u(10), top: '50%', transform: 'translateY(-50%)', minHeight: u(52), display: 'flex', alignItems: 'center', justifyContent: 'center', background: C.redDk, color: C.white, padding: `${u(8)} ${u(12)}`, fontSize: u(20), fontWeight: 950, letterSpacing: '.09em', textAlign: 'center' }}>NO RECEIVING</div>
+      </div>
+      <div style={{ padding: `${u(13)} ${u(15)} ${u(15)}` }}>
+        <div style={{ fontSize: u(18), fontWeight: 800, color: C.fg, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{entry.item?.name || 'Product not on batch'}</div>
+        <div style={{ marginTop: u(5), fontSize: u(14), fontWeight: 700, color: C.redDk }}>{entry.item?.sku || entry.epc}</div>
+        <div style={{ marginTop: u(8), fontSize: u(13), fontWeight: 600, lineHeight: 1.3, color: C.muted }}>Not credited · not added to pallet</div>
+      </div>
     </div>
   );
 }

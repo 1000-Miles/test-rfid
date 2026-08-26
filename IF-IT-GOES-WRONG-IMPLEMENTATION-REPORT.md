@@ -103,12 +103,12 @@ The main design principle is:
 
 **Implemented controls:**
 
-- The gate board displays a red, item-specific exception.
-- The message states that the item is recorded but not credited and must not be palletized.
-- Staff can mark the item **Item Set Aside**.
+- The product remains visible on GateBoard with a solid red **NO RECEIVING** band.
+- The exception is journaled locally but is not delivered to Nexus, credited, or added to the pallet.
+- The Printing page shows the same scanned product and directs staff to add it to an active receiving batch, refresh, and scan again.
 - All other correct goods can continue through receiving.
 
-**Recovery:** Isolate the wrong item, record the exception, and report it to Purchasing while continuing to receive correct goods.
+**Recovery:** If the product legitimately belongs to the delivery, add it to an active receiving batch in Nexus, refresh the gate documents, and scan it again. Continue receiving other goods throughout.
 
 **Code status:** Implemented in `dashboard/src/GateBoard.tsx`; currently uncommitted in the bridge/dashboard repository.
 

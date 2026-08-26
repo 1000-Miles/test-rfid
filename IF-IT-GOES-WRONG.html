@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>If it goes wrong</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --bg:#F8FAFC; --ink:#0F172A; --muted:#64748B; --faint:#94A3B8;
+  --line:#E2E8F0; --line2:#F1F5F9; --amber:#FBBF24;
+  --sans:'Inter',system-ui,-apple-system,sans-serif;
+  --mono:'IBM Plex Mono',ui-monospace,monospace;
+}
+html{background:var(--bg);}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;min-height:100vh;}
+.wrap{max-width:1152px;margin:0 auto;padding:28px 16px 40px;}
+@media(min-width:640px){.wrap{padding:28px 24px 40px;}}
+
+.eyebrow{font-size:11px;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--faint);}
+h1{font-size:26px;font-weight:800;letter-spacing:-.02em;margin-top:4px;}
+@media(min-width:640px){h1{font-size:30px;}}
+
+.grid{display:grid;gap:20px;margin-top:20px;}
+@media(min-width:1024px){.grid{grid-template-columns:236px 1fr;}}
+
+/* —— index —— */
+nav{align-self:start;}
+@media(min-width:1024px){nav{position:sticky;top:24px;}}
+.navscroll{max-height:70vh;overflow-y:auto;padding-right:4px;display:flex;flex-direction:column;gap:16px;}
+.gl{font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);
+  padding:0 4px;margin-bottom:6px;}
+.navbtn{display:flex;align-items:center;gap:8px;width:100%;text-align:left;border:0;cursor:pointer;
+  background:none;border-radius:8px;padding:8px 10px;font-family:var(--sans);font-size:13px;
+  color:var(--muted);transition:background .12s,color .12s;}
+.navbtn:hover{background:#fff;color:var(--ink);}
+.navbtn .n{font-family:var(--mono);font-size:10px;color:#CBD5E1;}
+.navbtn.on{background:var(--ink);color:#fff;font-weight:600;}
+.navbtn.on .n{color:#94A3B8;}
+.navbtn:focus-visible{outline:2px solid #6366F1;outline-offset:2px;}
+
+/* —— view tabs —— */
+.tabs{display:inline-flex;gap:4px;background:var(--line2);border-radius:10px;padding:4px;margin-bottom:14px;}
+.tab{border:0;cursor:pointer;background:none;border-radius:7px;padding:7px 18px;
+  font-family:var(--sans);font-size:12.5px;font-weight:600;color:var(--muted);
+  transition:background .12s,color .12s,box-shadow .12s;}
+.tab:hover{color:var(--ink);}
+.tab.on{background:#fff;color:var(--ink);box-shadow:0 1px 2px rgba(15,23,42,.08),0 0 0 1px var(--line);}
+.tab:focus-visible{outline:2px solid #6366F1;outline-offset:2px;}
+
+/* —— chart panel —— */
+.panel{background:#fff;border-radius:12px;box-shadow:0 0 0 1px var(--line);padding:16px;}
+@media(min-width:640px){.panel{padding:24px;}}
+.phead{display:flex;flex-wrap:wrap;align-items:center;gap:12px;border-bottom:1px solid var(--line2);
+  padding-bottom:12px;margin-bottom:16px;}
+.phead h2{flex:1;font-size:17px;font-weight:700;letter-spacing:-.01em;}
+.sev{border-radius:999px;padding:2px 9px;font-size:10px;font-weight:700;letter-spacing:.04em;
+  text-transform:uppercase;}
+.sev.routine{color:#047857;background:#ECFDF5;box-shadow:0 0 0 1px #A7F3D0;}
+.sev.caution{color:#B45309;background:#FFFBEB;box-shadow:0 0 0 1px #FDE68A;}
+.sev.stop{color:#fff;background:#E11D48;box-shadow:0 0 0 1px #E11D48;}
+svg{width:100%;display:block;}
+
+/* —— workflow scene canvas —— */
+.scene{background:#FBF8EE;border-radius:12px;box-shadow:inset 0 0 0 1px #E7DFC9;padding:10px;}
+
+/* —— implementation (dev) view —— */
+.impl{max-width:680px;display:flex;flex-direction:column;gap:20px;}
+.impl .ih{font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--faint);margin-bottom:8px;}
+.impl ul{list-style:none;display:flex;flex-direction:column;gap:8px;}
+.impl li{font-size:13px;line-height:1.5;color:#1E293B;padding-left:14px;position:relative;}
+.impl li::before{content:"";position:absolute;left:0;top:8px;width:5px;height:5px;
+  border-radius:2px;background:#A5C4E8;}
+.impl .fix li::before{background:#EFC969;}
+.impl code{font-family:var(--mono);font-size:11px;background:var(--line2);
+  padding:1px 5px;border-radius:4px;color:#334155;white-space:nowrap;}
+
+.legend{display:flex;flex-wrap:wrap;gap:8px 20px;border-top:1px solid var(--line2);
+  padding-top:12px;margin-top:16px;}
+.legend span{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:500;color:var(--muted);}
+.legend i{width:10px;height:10px;border-radius:3px;display:block;}
+
+.rules{margin-top:24px;background:var(--ink);border-radius:12px;padding:16px 20px;}
+.rules .eyebrow{color:var(--amber);font-weight:700;}
+.rules p{margin-top:6px;font-size:14px;font-weight:500;color:#E2E8F0;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Nexus Receiving</p>
+    <h1>If it goes wrong</h1>
+  </header>
+
+  <div class="grid">
+    <nav><div class="navscroll" id="nav"></div></nav>
+    <section class="panel">
+      <div class="tabs" role="tablist" aria-label="View">
+        <button class="tab" role="tab" data-v="flow">Flowchart</button>
+        <button class="tab" role="tab" data-v="wf">Workflow</button>
+        <button class="tab" role="tab" data-v="impl">Implementation</button>
+      </div>
+      <div class="phead"><h2 id="title"></h2><span class="sev" id="sev"></span></div>
+      <div id="chart"></div>
+      <div class="legend" id="legend">
+        <span><i style="background:#F0A9A0"></i>Problem</span>
+        <span><i style="background:#EFC969"></i>You do</span>
+        <span><i style="background:#A5C4E8"></i>System does</span>
+        <span><i style="background:#8FD3AE"></i>Result</span>
+      </div>
+    </section>
+  </div>
+
+  <div class="rules">
+    <p class="eyebrow">Three rules, everywhere</p>
+    <p>Never confirm a pallet you know is wrong. Never put goods away without a system or manual outage record. A system failure changes the recording method — it never stops warehouse work.</p>
+  </div>
+</div>
+
+<script>
+/* ——— flowchart data (decision maps) ——— */
+const CASES = [
+ { g:"Infrastructure", name:"Internet drops", sev:"routine", pre:[
+   ["start","Internet connection drops"],
+   ["sys","Gate, app and printer keep running on the local server"],
+   ["you","Carry on receiving as normal"],
+   ["sys","Every gate movement is saved to disk before delivery is attempted"],
+   ["sys","After 5 minutes the board warns; after 30 minutes it says call IT and keep receiving"],
+   ["sys","Connection returns — queued movements push to Nexus in order"],
+   ["end","Nothing lost. Nobody changed how they work."]]},
+
+ { g:"Infrastructure", name:"Power cut", sev:"caution", pre:[
+   ["start","Power out — reader, PC, server and printer all dead"],
+   ["you","Keep receiving. Unload and stage pallets in arrival order"],
+   ["you","Note everything: PO, SKU, carton count, damage, slot"],
+   ["you","Keep the vendor packing list with its own pallet"],
+   ["sys","Power returns — system back online"]],
+   fork:{kind:"decision", q:"Re-scan, or key in your counts?",
+     a:{label:"Re-scan", nodes:[["you","Run each pallet through the gate or handheld"]]},
+     b:{label:"Key in",  nodes:[["you","Manual Receive in Nexus — on the PC or the iPad"]]}},
+   post:[["sys","Counts checked against the packing list"],
+         ["end","Delivery received — receiving never paused"]]},
+
+ { g:"Infrastructure", name:"App crashes", sev:"routine",
+   pre:[["start","Screen freezes mid-receiving"],["you","Refresh or restart the app"],["sys","The bridge restores the last durably accepted movement from its local storage"]],
+   fork:{kind:"decision", q:"What does LAST SAVED show?",
+     a:{label:"Saved", nodes:[["sys","Shows pallet/EPC, time, permanent event ID, and pending or delivered state"],["end","Carry on - do not scan it again"]]},
+     b:{label:"No record", nodes:[["you","Run it through the gate again"],["end","Carry on safely"]]}}},
+
+ { g:"Infrastructure", name:"Gate reader fails", sev:"caution",
+   pre:[["start","Reads 14 tags where there are 20 cartons"],
+        ["you","Enter the physical carton count on the pallet screen"],
+        ["sys","Confirm and print stays disabled while physical and RFID counts differ"],
+        ["you","Re-run the pallet slowly through the gate"]],
+   fork:{kind:"decision", q:"Does the count match now?",
+     a:{label:"Yes", nodes:[["end","Confirm as normal"]]},
+     b:{label:"No", nodes:[["you","Use + Manually receive for only the unread cartons"],["end","Count corrected; warehouse work continues"]]}}},
+
+ { g:"Infrastructure", name:"Local server down", sev:"stop",
+   pre:[["start","App can't reach the server on any device"],
+        ["you","Call IT — they work on the fix"],
+        ["you","Keep receiving. Unload and stage pallets in arrival order"],
+        ["you","Note everything: PO, SKU, carton count, damage, slot"],
+        ["you","Keep the vendor packing list with its own pallet"],
+        ["sys","Local server up again"]],
+   fork:{kind:"decision", q:"Re-scan, or key in your counts?",
+     a:{label:"Re-scan", nodes:[["you","Run each pallet through the gate or handheld"]]},
+     b:{label:"Key in",  nodes:[["you","Manual Receive in Nexus — on the PC or the iPad"]]}},
+   post:[["sys","Counts checked against the packing list"],
+         ["end","Delivery received — receiving never paused"]]},
+
+ { g:"Pallet & Goods", name:"Wrong SKU", sev:"stop", pre:[
+   ["start","Gate reads a known SKU with no active receiving batch"],
+   ["sys","Its product card stays visible with a red NO RECEIVING band"],
+   ["sys","The scan is saved locally but never credited, queued, or added to the pallet"],
+   ["you","On Printing: add it to an active receiving batch in Nexus, refresh, then scan again"],
+   ["end","Other receiving continues throughout"]]},
+
+ { g:"Pallet & Goods", name:"Count mismatch", sev:"caution",
+   pre:[["start","Expected 100, received 97"],
+        ["you","Search the truck and the dock floor"]],
+   fork:{kind:"decision", q:"Were the missing cartons found?",
+     a:{label:"Yes", nodes:[["you","Run them through the gate"],["end","Counts match"]]},
+     b:{label:"No",  nodes:[["you","Receive and palletize the 97 — work continues"],["sys","Before Complete: reason + Purchasing follow-up are required"],["end","Only 97 enter stock · shortage is saved for follow-up"]]}}},
+
+ { g:"Pallet & Goods", name:"Tag won't read", sev:"routine",
+   pre:[["start","One carton's RFID tag is missing or dead"]],
+   fork:{kind:"decision", q:"Is a Box ID printed on the carton?",
+     a:{label:"Yes", nodes:[["you","Manually receive → Box IDs → select the printed ID"],["sys","Nexus records the real EPC and prevents a later duplicate"]]},
+     b:{label:"No",  nodes:[["you","Manually receive → Count"]]}},
+   post:[["you","Keep receiving · set this carton aside for a replacement label"],
+         ["end","Carton is counted now and relabelled before shipping"]]},
+
+ { g:"Process", name:"Printer fails", sev:"routine",
+   pre:[["start","Out of labels, or Bluetooth drops"],
+        ["sys","The pallet is already saved — printing is separate"],
+        ["you","Keep receiving the next pallets as normal"]],
+   fork:{kind:"decision", q:"Printer working again?",
+     a:{label:"Yes", nodes:[["you","Open the saved pallet card → Print tag"]]},
+     b:{label:"Not yet", nodes:[["you","Keep receiving · leave the pallet visibly flagged for labelling"]]}},
+   post:[["end","Pallet is tracked either way — labelled before it ships"]]},
+
+ { g:"Process", name:"Wrong location", sev:"routine", pre:[
+   ["start","Pallet isn't in the slot the system shows"],
+   ["you","Operations → Transfers: choose the pallet and scan its physical slot"],
+   ["sys","Confirm Move validates the slot and records old slot → physical slot"],
+   ["end","System matches the floor again · transfer history remains auditable"]]},
+];
+
+/* ——— flowchart layout engine ——— */
+const W1=320, W2=250, GAP=34, PADY=14, LH=15, DW=230, DH=78, CX=340, BX=168;
+
+function wrapText(text,w){
+  const max=Math.floor(w/6.35); const out=[]; let line="";
+  for(const word of text.split(" ")){
+    if((line+" "+word).trim().length>max && line){ out.push(line); line=word; }
+    else line=(line+" "+word).trim();
+  }
+  if(line) out.push(line);
+  return out;
+}
+const boxH = l => l.length*LH + PADY*2;
+
+function build(c){
+  const boxes=[], edges=[], marks=[];
+  let y=10;
+  const place=(nodes,cx,w)=>{
+    const out=[];
+    nodes.forEach(([kind,text])=>{
+      const lines=wrapText(text,w-26), h=boxH(lines);
+      out.push({kind,lines,x:cx-w/2,y,w,h,cx,cy:y+h/2});
+      y+=h+GAP;
+    });
+    return out;
+  };
+  const arrow=(x1,y1,x2,y2)=>edges.push({pts:[[x1,y1],[x2,y2]]});
+  const finish=()=>({boxes,edges,marks,w:680,h:Math.max(...boxes.map(b=>b.y+b.h),y)+16});
+
+  const pre=place(c.pre,CX,W1); boxes.push(...pre);
+  for(let i=0;i<pre.length-1;i++) arrow(CX,pre[i].y+pre[i].h,CX,pre[i+1].y);
+  if(!c.fork) return finish();
+
+  const last=pre[pre.length-1], isDec=c.fork.kind==="decision", fy=y;
+  if(isDec){
+    marks.push({type:"diamond",cx:CX,cy:fy+DH/2,w:DW,h:DH,lines:wrapText(c.fork.q,DW-60)});
+    arrow(CX,last.y+last.h,CX,fy); y=fy+DH+GAP;
+  } else {
+    marks.push({type:"dot",cx:CX,cy:fy+8});
+    arrow(CX,last.y+last.h,CX,fy+8); y=fy+16+GAP;
+  }
+  const forkBottom=isDec?fy+DH/2:fy+8, branchTop=y;
+
+  const run=side=>{
+    y=branchTop;
+    const cx=CX+(side==="a"?-BX:BX);
+    const placed=place(c.fork[side].nodes,cx,W2); boxes.push(...placed);
+    for(let i=0;i<placed.length-1;i++) arrow(cx,placed[i].y+placed[i].h,cx,placed[i+1].y);
+    const xEdge=isDec?CX+(side==="a"?-DW/2:DW/2):CX;
+    edges.push({pts:[[xEdge,forkBottom],[cx,forkBottom],[cx,placed[0].y]],
+      label:c.fork[side].label, lx:(xEdge+cx)/2, ly:forkBottom-7});
+    return {placed,endY:y-GAP,cx};
+  };
+  const A=run("a"), B=run("b");
+  y=Math.max(A.endY,B.endY);
+
+  if(c.post && c.post.length){
+    const mergeY=y+GAP;
+    [A,B].forEach(br=>{
+      const lb=br.placed[br.placed.length-1];
+      edges.push({pts:[[br.cx,lb.y+lb.h],[br.cx,mergeY-18],[CX,mergeY-18],[CX,mergeY]]});
+    });
+    y=mergeY;
+    const post=place(c.post,CX,W1); boxes.push(...post);
+    for(let i=0;i<post.length-1;i++) arrow(CX,post[i].y+post[i].h,CX,post[i+1].y);
+    y=post[post.length-1].y+post[post.length-1].h;
+  }
+  return finish();
+}
+
+/* ——— flowchart render ——— */
+const FILL={
+  start:{bg:"#FEF2F2",stroke:"#F0A9A0",text:"#8C2418"},
+  you:  {bg:"#FFFBEB",stroke:"#EFC969",text:"#7A4500"},
+  sys:  {bg:"#EFF6FF",stroke:"#A5C4E8",text:"#0C447C"},
+  end:  {bg:"#ECFDF5",stroke:"#8FD3AE",text:"#0A5B3A"},
+};
+const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+function drawFlow(c){
+  const L=build(c);
+  let s=`<svg viewBox="0 0 ${L.w} ${L.h}" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="3.2" orient="auto">
+    <path d="M0,0 L7,3.2 L0,6.4 z" fill="#94A3B8"/></marker></defs>`;
+
+  for(const e of L.edges){
+    s+=`<polyline points="${e.pts.map(p=>p.join(",")).join(" ")}" fill="none" stroke="#CBD5E1"
+      stroke-width="1.6" marker-end="url(#ah)"/>`;
+    if(e.label) s+=`<text x="${e.lx}" y="${e.ly}" text-anchor="middle" font-size="10.5"
+      font-weight="700" fill="#64748B" letter-spacing=".6" font-family="Inter,sans-serif"
+      >${esc(e.label.toUpperCase())}</text>`;
+  }
+  for(const m of L.marks){
+    if(m.type==="diamond"){
+      s+=`<path d="M${m.cx},${m.cy-m.h/2} L${m.cx+m.w/2},${m.cy} L${m.cx},${m.cy+m.h/2} L${m.cx-m.w/2},${m.cy} Z"
+        fill="#F8FAFC" stroke="#94A3B8" stroke-width="1.6"/>`;
+      m.lines.forEach((ln,j)=>{
+        s+=`<text x="${m.cx}" y="${m.cy-(m.lines.length-1)*7+j*14+4}" text-anchor="middle"
+          font-size="12" font-weight="600" fill="#334155" font-family="Inter,sans-serif">${esc(ln)}</text>`;
+      });
+    } else {
+      s+=`<circle cx="${m.cx}" cy="${m.cy}" r="5.5" fill="#94A3B8"/>`;
+    }
+  }
+  for(const b of L.boxes){
+    const f=FILL[b.kind];
+    s+=`<rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="9" fill="${f.bg}"
+      stroke="${f.stroke}" stroke-width="1.5"/>`;
+    s+=`<rect x="${b.x}" y="${b.y}" width="4" height="${b.h}" rx="2" fill="${f.stroke}"/>`;
+    b.lines.forEach((ln,j)=>{
+      s+=`<text x="${b.cx}" y="${b.y+PADY+11+j*LH}" text-anchor="middle" font-size="12.5"
+        font-weight="${b.kind==="end"?600:500}" fill="${f.text}" font-family="Inter,sans-serif"
+        >${esc(ln)}</text>`;
+    });
+  }
+  return s+"</svg>";
+}
+
+/* ——— workflow scenes (the notebook style) ——— */
+const C={ink:"#243447",arr:"#3A4A5E",mut:"#8592A6",tan:"#EBE2C8",tanB:"#C7B98E",spine:"#B2A57B",
+ grn:"#2F7D4F",gld:"#B58A1E",card:"#FDFCF6",red:"#8C2418",
+ pillA:{bg:"#F6E7BE",br:"#C9A54D",tx:"#7A5A12"},
+ pillG:{bg:"#ECF4EC",br:"#8FB894",tx:"#2F6B3C"},
+ pillR:{bg:"#F9ECEA",br:"#D5A69D",tx:"#8C2418"}};
+
+function tx(x,y,t,o={}){
+  return `<text x="${x}" y="${y}" font-family="${o.m?"'IBM Plex Mono',monospace":"Inter,sans-serif"}"`+
+    ` font-size="${o.s||12}" font-weight="${o.w||500}" fill="${o.c||C.ink}"`+
+    ` text-anchor="${o.a||"start"}"${o.ls?` letter-spacing="${o.ls}"`:""}>${esc(t)}</text>`;
+}
+const cap=(cx,y,t)=>tx(cx,y,t.toUpperCase(),{a:"middle",w:700,s:12,ls:1.6});
+const badge=(x,y,n)=>`<circle cx="${x}" cy="${y}" r="10" fill="${C.ink}"/>`+
+  tx(x,y+3.5,String(n),{a:"middle",c:"#fff",w:700,s:10.5});
+function arr(d,o={}){
+  return `<path d="${d}" fill="none" stroke="${o.g?C.gld:C.arr}" stroke-width="1.8"`+
+    `${o.g?' stroke-dasharray="5 5"':''} marker-end="url(#${o.g?"ag":"ai"})"/>`;
+}
+function pill(cx,cy,t,tone){
+  const p=tone||C.pillA, w=t.length*6.4+34;
+  return `<rect x="${cx-w/2}" y="${cy-14}" width="${w}" height="28" rx="14" fill="${p.bg}" stroke="${p.br}" stroke-width="1.4"/>`+
+    tx(cx,cy+4,t,{a:"middle",w:600,s:11.5,c:p.tx});
+}
+/* a numbered step label, centered on cx */
+function step(cx,y,n,text,sub){
+  const x0=cx-text.length*2.9;
+  let s=badge(x0-16,y-4,n)+tx(x0,y,text,{w:600,s:11.5});
+  if(sub)s+=tx(cx,y+16,sub,{a:"middle",c:C.mut,s:10.5});
+  return s;
+}
+function card(x,y,w,h,name,sub,rows){
+  let s=`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10" fill="${C.card}" stroke="${C.ink}" stroke-width="1.5"/>`+cap(x+w/2,y+26,name);
+  let yy=y+44;
+  if(sub){s+=tx(x+w/2,yy,sub,{a:"middle",c:C.mut,s:10.5});yy+=8;}
+  yy+=22;
+  for(const r of rows||[]){
+    s+=tx(x+18,yy,r.l,{m:1,s:12,c:r.lc||C.ink});
+    if(r.r!=null)s+=tx(x+w-16,yy,r.r,{m:1,s:12,a:"end",c:r.rc||C.grn});
+    yy+=25;
+  }
+  return s;
+}
+function notebook(x,y,w,h,rows,footer){
+  let s=`<rect x="${x-9}" y="${y+6}" width="14" height="${h-12}" rx="3" fill="${C.spine}"/>`+
+   `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="8" fill="${C.tan}" stroke="${C.tanB}" stroke-width="1.5"/>`+
+   cap(x+w/2,y+28,"Local Storage");
+  let yy=y+60;
+  for(const r of rows||[]){
+    s+=tx(x+22,yy,r.l,{m:1,s:12.5,w:600});
+    if(r.r!=null)s+=tx(x+w-16,yy,r.r,{m:1,s:12.5,a:"end",c:r.rc||C.grn});
+    yy+=28;
+  }
+  if(footer)s+=tx(x+w/2,y+h-16,footer,{a:"middle",c:C.mut,s:10.5});
+  return s;
+}
+function gate(x,y,dim){
+  return `<g${dim?' opacity="0.35"':''}>`+
+   `<rect x="${x}" y="${y}" width="12" height="106" rx="6" fill="none" stroke="${C.ink}" stroke-width="2.2"/>`+
+   `<rect x="${x+84}" y="${y}" width="12" height="106" rx="6" fill="none" stroke="${C.ink}" stroke-width="2.2"/>`+
+   `<rect x="${x+27}" y="${y+38}" width="42" height="30" rx="3" fill="${C.tan}" stroke="${C.tanB}" stroke-width="1.5"/>`+
+   `<line x1="${x+48}" y1="${y+38}" x2="${x+48}" y2="${y+68}" stroke="${C.tanB}" stroke-width="1.2"/></g>`;
+}
+const bolt=(x,y,s=1)=>`<path transform="translate(${x},${y}) scale(${s})" d="M14,0 L34,0 L22,26 L36,26 L4,66 L16,34 L2,34 Z" fill="#D4A017"/>`;
+const tvStand=(cx,y)=>`<line x1="${cx}" y1="${y}" x2="${cx}" y2="${y+12}" stroke="${C.ink}" stroke-width="2"/>`+
+  `<line x1="${cx-26}" y1="${y+13}" x2="${cx+26}" y2="${y+13}" stroke="${C.ink}" stroke-width="2"/>`;
+function scene(h,inner){
+  return `<div class="scene"><svg viewBox="0 0 1000 ${h}" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+   <marker id="ai" markerWidth="9" markerHeight="9" refX="7" refY="3.2" orient="auto"><path d="M0,0 L7,3.2 L0,6.4 z" fill="${C.arr}"/></marker>
+   <marker id="ag" markerWidth="9" markerHeight="9" refX="7" refY="3.2" orient="auto"><path d="M0,0 L7,3.2 L0,6.4 z" fill="${C.gld}"/></marker>
+  </defs>${inner}</svg></div>`;
+}
+
+/* — scene 1 · internet drops — */
+function sInternet(){
+ let s="";
+ s+=gate(60,150);
+ s+=cap(108,288,"The Gate")+tx(108,305,"sees every box",{a:"middle",c:C.mut,s:10.5});
+ s+=arr("M175,205 L320,205");
+ s+=tx(248,188,"SAVED FIRST",{a:"middle",c:C.mut,w:700,s:10,ls:.6});
+ s+=notebook(330,120,200,180,[
+   {l:"#549 IN",r:"✓ sent"},
+   {l:"#550 OUT",r:"✓ sent"},
+   {l:"#551 IN",r:"waiting…",rc:C.gld}],"saved to disk · numbered");
+ s+=arr("M535,205 L755,205");
+ s+=tx(645,188,"BACK ONLINE — IN ORDER, ONCE EACH",{a:"middle",c:C.grn,w:700,s:10,ls:.6});
+ s+=pill(645,245,"5 min · amber warning");
+ s+=pill(645,278,"30 min · call IT · keep working",C.pillR);
+ s+=tx(645,313,"saved locally · never thrown away",{a:"middle",c:C.mut,s:10.5});
+ s+=card(760,130,200,150,"Nexus","the office records",[
+   {l:"Received +2",r:"✓"},{l:"Shipped +1",r:"✓"}]);
+ s+=pill(500,340,"nothing lost, nothing doubled",C.pillG);
+ return scene(370,s);
+}
+
+/* — scene 2 · power cut — */
+function sPower(){
+ let s="";
+ s+=bolt(45,40,0.8)+tx(95,65,"POWER CUT",{w:700,s:13,ls:1})
+   +tx(95,83,"reader, PC, server, printer — off at once",{c:C.mut,s:10.5});
+ /* door 1 — the notebook: automatic, for everything already recorded */
+ s+=notebook(70,100,200,160,[
+   {l:"#547 IN",r:"✓ safe"},{l:"#548 IN",r:"✓ safe"}],"on disk — needs no power");
+ s+=arr("M275,175 L765,175");
+ s+=tx(500,157,"POWER BACK — RESUMES ON ITS OWN",{a:"middle",c:C.mut,w:700,s:10,ls:.6});
+ s+=card(770,110,200,150,"Nexus","counts checked — every route",[
+   {l:"backlog",r:"✓ in order"},{l:"manual",r:"✓ + slot"}]);
+ /* door 2 — goods moved in the dark: paper → device → the wizard */
+ s+=tx(172,300,"1 · WHILE POWER IS OUT",{a:"middle",c:C.mut,w:700,s:10,ls:.6});
+ s+=card(70,310,205,125,"Paper first","write it down · keep it with the pallet",[
+   {l:"PO · SKU · count · slot",r:null}]);
+ s+=arr("M280,375 L325,375");
+ s+=tx(437,300,"2 · WHEN POWER IS BACK",{a:"middle",c:C.mut,w:700,s:10,ls:.6});
+ s+=card(330,310,215,125,"iPad or PC","open Nexus in the browser",[
+   {l:"Operations → Receiving",r:null}]);
+ s+=arr("M435,440 C435,470 250,460 160,478");
+ s+=card(70,485,170,130,"Source","pick the purchase orders",[
+   {l:"batch",r:"RB-2026…",rc:C.ink}]);
+ s+=arr("M245,550 L285,550");
+ s+=card(290,485,170,130,"Received","+ Manually receive",[
+   {l:"counts",r:"✓ typed"}]);
+ s+=arr("M465,550 L505,550");
+ s+=card(510,485,170,130,"Pallets","place on the floorplan",[
+   {l:"slot",r:"✓ D-03"}]);
+ s+=arr("M685,550 L725,550");
+ s+=card(730,485,170,130,"Sync","post stock · Complete",[
+   {l:"batch",r:"✓ completed"}]);
+ s+=arr("M815,480 C850,420 865,330 868,265");
+ s+=pill(500,655,"nothing recorded before the cut is lost",C.pillG);
+ return scene(685,s);
+}
+
+/* — scene 3 · app crashes — */
+function sApp(){
+ let s="";
+ s+=card(40,110,190,130,"The Screen","just a window",[{l:"frozen",r:"✕",rc:C.gld}]);
+ s+=notebook(400,100,200,180,[{l:"#551 IN",r:"✓ saved"}],"saved before the screen showed it");
+ s+=arr("M395,240 L240,240");
+ s+=tx(315,222,"RELOAD RE-FILLS IT",{a:"middle",c:C.mut,w:700,s:10,ls:.6});
+ s+=pill(500,340,"the screen was never the record",C.pillG);
+ return scene(370,s);
+}
+
+/* — scene 4 · gate reader fails — */
+function sReader(){
+ let s="";
+ s+=gate(60,140);
+ s+=cap(108,278,"The Gate")+tx(108,298,"reads 14 / 20",{m:1,a:"middle",c:C.gld,w:600,s:12});
+ s+=arr("M175,195 L675,195");
+ s+=tx(430,178,"RE-RUN OR MANUAL RECEIVE — EACH BOX COUNTS ONCE",{a:"middle",c:C.mut,w:700,s:10,ls:.6});
+ s+=notebook(690,120,200,170,[{l:"20 boxes",r:"✓ once"}],"one carton = one row");
+ s+=pill(500,350,"however it gets read, the count comes out right",C.pillG);
+ return scene(380,s);
+}
+
+/* — scene 5 · local server down — */
+function sServer(){
+ let s="";
+ s+=card(40,120,190,130,"The Server","down on every device",[{l:"process",r:"✕ dead",rc:C.gld}]);
+ s+=arr("M235,185 L390,185");
+ s+=notebook(400,110,200,180,[
+   {l:"local storage",r:"✓ intact"},{l:"counter",r:"✓ intact"}],"the box died — the disk did not");
+ s+=arr("M605,185 L735,185");
+ s+=tx(670,168,"AFTER RESTART",{a:"middle",c:C.mut,w:700,s:10,ls:.6});
+ s+=card(740,120,205,130,"Nexus","catches up",[{l:"backlog",r:"✓ arrives"}]);
+ s+=pill(500,340,"IT restarts the box — the rest is automatic",C.pillG);
+ return scene(370,s);
+}
+
+/* — scene 6 · wrong SKU — */
+function sSku(){
+ let s="";
+ s+=gate(60,130);
+ s+=cap(108,268,"The Gate")+tx(108,288,"SKU not on PO",{m:1,a:"middle",c:C.red,w:600,s:12});
+ s+=arr("M175,185 L525,185");
+ s+=tx(345,168,"LOCAL EXCEPTION — NO STOCK CREDIT",{a:"middle",c:C.mut,w:700,s:10,ls:.6});
+ s+=card(530,130,210,130,"NO RECEIVING","add batch, then scan again",[
+   {l:"credit",r:"✕ none",rc:C.red},{l:"pallet",r:"✕ kept off",rc:C.red}]);
+ s+=pill(500,340,"product stays visible — other receiving continues",C.pillG);
+ return scene(370,s);
+}
+
+/* — scene 7 · count mismatch — */
+function sCount(){
+ let s="";
+ s+=card(40,120,190,130,"The Count",null,[
+   {l:"expected",r:"100",rc:C.ink},{l:"received",r:"97",rc:C.gld}]);
+ s+=arr("M235,185 L695,185");
+ s+=tx(465,168,"COUNTS ONLY WHAT WAS SCANNED — NEVER PAST EXPECTED",{a:"middle",c:C.mut,w:700,s:10,ls:.6});
+ s+=card(700,120,210,130,"The Batch",null,[
+   {l:"line",r:"97 / 100",rc:C.gld},{l:"stock",r:"+97 ✓"}]);
+ s+=pill(500,320,"only the 97 enter stock — warehouse work continues",C.pillG);
+ s+=pill(500,355,"Complete requires a reason + Purchasing follow-up status",C.pillA);
+ return scene(370,s);
+}
+
+/* — scene 8 · tag won't read — */
+function sTag(){
+ let s="";
+ s+=card(40,120,190,130,"One Carton","tag missing or dead",[{l:"RFID",r:"✕ silent",rc:C.gld}]);
+ s+=arr("M235,185 L680,185");
+ s+=tx(455,168,"MANUALLY RECEIVE → SELECT ITS PRINTED BOX ID",{a:"middle",c:C.mut,w:700,s:10,ls:.6});
+ s+=card(690,120,210,130,"The Batch",null,[
+   {l:"MAN row",r:"✓ counted"},{l:"line",r:"+1 ✓"}]);
+ s+=pill(500,320,"the real EPC is credited once — warehouse work continues",C.pillG);
+ s+=pill(500,355,"set the carton aside for a replacement label before shipping",C.pillA);
+ return scene(370,s);
+}
+
+/* — scene 9 · printer fails — */
+function sPrinter(){
+ let s="";
+ s+=card(40,120,190,130,"Printer","labels out · bluetooth gone",[{l:"label",r:"✕ none",rc:C.gld}]);
+ s+=arr("M395,185 L240,185");
+ s+=tx(315,168,"PRINTING IS A SEPARATE STEP",{a:"middle",c:C.mut,w:700,s:10,ls:.6});
+ s+=notebook(400,110,200,180,[{l:"#552 IN",r:"✓ saved"}],"saved before printing starts");
+ s+=pill(500,340,"the record was never at risk — labels can wait",C.pillG);
+ return scene(370,s);
+}
+
+/* — scene 10 · wrong location — */
+function sLocation(){
+ let s="";
+ s+=card(40,100,190,110,"The Screen","what the system shows",[{l:"slot",r:"B-12",rc:C.ink}]);
+ s+=card(40,245,190,110,"The Floor","where it actually is",[{l:"slot",r:"D-03",rc:C.gld}]);
+ s+=arr("M235,160 L420,170",{g:1});
+ s+=tx(330,148,"OLD SLOT — RETAINED IN TRANSFER HISTORY",{a:"middle",c:C.gld,w:700,s:10,ls:.6});
+ s+=arr("M235,300 C310,300 350,235 422,210");
+ s+=tx(320,345,"OPERATIONS → TRANSFERS",{a:"middle",c:C.mut,w:700,s:10,ls:.6});
+ s+=card(430,130,230,140,"Transfers","scan the slot barcode — or click the map",[
+   {l:"move",r:"✓ confirmed"},{l:"slot",r:"✓ D-03"}]);
+ s+=pill(500,415,"the floor is the source of truth — Confirm Move fixes the map and keeps the audit trail",C.pillG);
+ return scene(445,s);
+}
+
+const SCENES=[sInternet,sPower,sApp,sReader,sServer,sSku,sCount,sTag,sPrinter,sLocation];
+
+/* ——— implementation (dev) data — how each safeguard is built, and the fix plan ——— */
+const IMPL=[
+ {built:[
+   ["Every event is written and fsynced to disk before any network attempt","bridge/src/outbox.js"],
+   ["Permanent event ID (gate + generation + sequence) — Nexus dedupes on it","operations_gate_ingest"],
+   ["Retry pump: backoff 1s→60s, a 15s timer re-wakes it, drains oldest-first at ~5/s"],
+   ["An event leaves the queue only on a verified \"applied\" acknowledgement with a matching ID"],
+   ["The board warns at 5 min; at 30 min it says call IT and keep receiving on the local queue","dashboard/src/App.tsx"],
+   ["If local saving fails, the alert switches workers to the manual outage log instead of stopping work","dashboard/src/App.tsx"],
+   ["Board credits retire per exact event ID — pending or rejected IDs stay visible","dashboard/src/documents.ts"],
+   ["The document feed exposes exact pending and dead-letter event IDs","bridge/src/server.js"]],
+  fix:[
+   ["Check /status: queueDepth, oldestPendingAt, lastError"],
+   ["replay() re-sends any range of history — dedupe makes it safe"],
+   ["No remote paging yet — someone has to see the board"]]},
+ {built:[
+   ["fsync before anything is acknowledged — a cut can't lose an accepted event","outbox.enqueue"],
+   ["Cursor and counters written atomically (temp file + rename)","atomic-write.js"],
+   ["Boot repair: a torn last line is quarantined and the local storage truncated clean","_repairlocal storage"],
+   ["Pallet numbers hit disk before they're handed out — no reuse after a reboot"],
+   ["/power-cut prints a standard outage sheet and separates SCANNED rows from NOT SCANNED manual catch-up","dashboard/src/PowerCutRecoveryPage.tsx"]],
+  fix:[
+   ["After boot, use the recovery checklist before entering any paper rows"],
+   ["Never manually enter SCANNED rows; only NOT SCANNED rows use Manual Receive"],
+   ["Keep blank printed outage sheets at the gate — no device can record while all power is off"]]},
+ {built:[
+   ["All state lives on the bridge — the browser is only a viewer","dashboard/src/useBridge.ts"],
+   ["A silent socket is detected and reconnected automatically"],
+   ["Movements broadcast only after the local storage append succeeds"],
+   ["Bridge status reconstructs the last accepted event from the durable local storage after restart","bridge/src/outbox.js"],
+   ["LAST SAVED shows pallet/EPC, time, event ID, and pending/delivered/not-credited state","dashboard/src/App.tsx"]],
+  fix:[
+   ["After a reload, use LAST SAVED - only re-scan when there is no durable record"],
+   ["If LAST SAVED says Nexus pending, keep working; the outbox owns delivery"]]},
+ {built:[
+   ["One EPC counts once per batch — replays come back \"duplicate\"","recordReceiveScanCore"],
+   ["Box-level dedupe: a reprinted label still counts as the same physical carton"],
+   ["Gate and handheld feed the identical credit path"],
+   ["Confirm and print requires the operator's physical count to equal the RFID count","dashboard/src/PalletPrintingPage.tsx"],
+   ["A mismatch names both totals and directs re-run or Manual Receive without stopping work"]],
+  fix:[
+   ["Tune antenna power and the read zone","bridge/test/calibrate-signal.js"],
+   ["Fall back to + Manually receive for the last stragglers"]]},
+ {built:[
+   ["local storage, cursor, counters — all on disk; a dead process loses nothing"],
+   ["Boot restores the pending queue from local storage + cursor","outbox._restore"]],
+  fix:[
+   ["Restart the service; confirm /status shows the local storage healthy"],
+   ["enqueueFailures > 0 in /status = the disk itself is failing — escalate"]]},
+ {built:[
+   ["A tag with no open batch is stamped unexpected by the bridge's live receiving verdict"],
+   ["Unexpected events are stored locally but never queued, credited, or palletized","bridge/src/outbox.js"],
+   ["The gate board keeps the product visible with a solid red NO RECEIVING card","dashboard/src/GateBoard.tsx"],
+   ["The Printing page carries the same item and explains how to add it to receiving","dashboard/src/PalletPrintingPage.tsx"]],
+  fix:[
+   ["Add the SKU to an active receiving batch in Nexus, refresh the gate documents, then re-scan"]]},
+ {built:[
+   ["Line counts come from a recount RPC — never client math","operations_recount_received"],
+   ["Manual receive is capped at the expected count — 101 of 100 is impossible"],
+   ["Stock posts only what was actually received"]],
+  fix:[
+   ["Short delivery panel requires a reason before Complete","receiving-client.tsx"],
+   ["Server rechecks the shortage and saves who reported it and when","completeReceivingBatchCore"],
+   ["Purchasing follow-up is stored as pending, reported, or resolved — receiving work continues"]]},
+ {built:[
+   ["Box ID mode credits the carton's real EPC through the normal scan path","recordReceiveScan"],
+   ["A later reader pass is a duplicate, so the carton cannot enter stock twice"],
+   ["Count mode remains available only for cartons with no printed Box ID","recordManualReceiveCore"]],
+  fix:[
+   ["Keep receiving and set the unreadable carton aside for a replacement label before shipping"]]},
+ {built:[
+   ["The record is complete before printing starts — printing is fully decoupled"],
+   ["A print failure says the pallet is already saved and work can continue","pallet-tag-print-modal.tsx"],
+   ["Every saved pallet card has a Print tag recovery action","pallet-card.tsx"]],
+  fix:[
+   ["Use Print tag on the saved pallet card when the printer is ready"],
+   ["Check the printer sidecar and label stock — records survive printer downtime"]]},
+ {built:[
+   ["Placement in receiving is first-time-only; every later move is a Transfer","transfers-client.tsx"],
+   ["Occupied slots remain selectable because a slot may hold multiple pallets"],
+   ["The server verifies the destination is a live slot in that warehouse","transferPalletCore"],
+   ["Every confirmed move records from/to slots, carton count, worker, and time","operations_transfer"]],
+  fix:[
+   ["Move it in Operations → Transfers: select the pallet, scan its physical slot or click the map, then Confirm Move"]]},
+];
+
+function drawImpl(i){
+ const d=IMPL[i];
+ const li=(rows)=>rows.map(([t,ref])=>`<li>${esc(t)}${ref?` <code>${esc(ref)}</code>`:""}</li>`).join("");
+ return `<div class="impl">
+   <div><p class="ih">How it's built</p><ul>${li(d.built)}</ul></div>
+   <div class="fix"><p class="ih">If it still breaks — the plan</p><ul>${li(d.fix)}</ul></div>
+ </div>`;
+}
+
+/* ——— app ——— */
+let idx=0, view="flow";
+const nav=document.getElementById("nav");
+const tabs=[...document.querySelectorAll(".tab")];
+
+function renderNav(){
+  const groups=[...new Set(CASES.map(c=>c.g))];
+  nav.innerHTML=groups.map(g=>`
+    <div>
+      <p class="gl">${esc(g)}</p>
+      <div>${CASES.map((c,i)=>c.g!==g?"":`
+        <button class="navbtn${i===idx?" on":""}" data-i="${i}">
+          <span class="n">${String(i+1).padStart(2,"0")}</span>${esc(c.name)}
+        </button>`).join("")}</div>
+    </div>`).join("");
+}
+
+function renderChart(){
+  const c=CASES[idx];
+  document.getElementById("title").textContent=c.name;
+  const sev=document.getElementById("sev");
+  sev.className="sev "+c.sev;
+  sev.textContent={routine:"Routine",caution:"Caution",stop:"Fallback required"}[c.sev];
+  tabs.forEach(t=>{
+    const on=t.dataset.v===view;
+    t.classList.toggle("on",on);
+    t.setAttribute("aria-selected",on?"true":"false");
+  });
+  document.getElementById("chart").innerHTML =
+    view==="flow" ? drawFlow(c) : view==="wf" ? SCENES[idx]() : drawImpl(idx);
+  document.getElementById("legend").style.display = view==="flow" ? "" : "none";
+}
+
+nav.addEventListener("click",e=>{
+  const b=e.target.closest(".navbtn"); if(!b) return;
+  idx=+b.dataset.i; renderNav(); renderChart();
+});
+tabs.forEach(t=>t.addEventListener("click",()=>{ view=t.dataset.v; renderChart(); }));
+
+renderNav(); renderChart();
+</script>
+</body>
+</html>

@@ -48,6 +48,7 @@ type PalletPrinterInfo = {
 
 export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) {
   const workflow = bridge.palletWorkflow;
+  const noReceiving = bridge.entries.find((entry) => entry.direction === 'in' && entry.unexpected === 'no-open-batch') ?? null;
   const synced = Boolean(workflow && bridge.passageComplete?.passageId === workflow.passageId);
   const [printing, setPrinting] = useState(false);
   const [reprinting, setReprinting] = useState<string | null>(null);
@@ -335,6 +336,20 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
             <GearIcon />
           </button>
         </header>
+
+        {noReceiving && (
+          <section className="mb-6 overflow-hidden rounded-2xl border-2 border-[#b91c1c] bg-white shadow-sm">
+            <div className="bg-[#b91c1c] px-5 py-3 text-center text-lg font-black tracking-[0.12em] text-white">NO RECEIVING</div>
+            <div className="p-5 md:flex md:items-center md:justify-between md:gap-6">
+              <div>
+                <div className="text-xl font-extrabold">{noReceiving.item?.name || noReceiving.item?.sku || noReceiving.epc}</div>
+                <div className="mt-1 font-mono text-sm font-bold text-[#b91c1c]">{noReceiving.item?.sku || noReceiving.epc}</div>
+                <p className="mt-3 text-sm font-medium text-[#737373]">This scan was not credited and is not on the pallet. Add the product to an active receiving batch in Nexus, refresh the gate documents, then scan the carton again.</p>
+              </div>
+              <div className="mt-4 shrink-0 rounded-xl border border-[#f0a1a2] bg-[#fef2f2] px-5 py-3 text-sm font-extrabold text-[#b41c1e] md:mt-0">Continue other receiving</div>
+            </div>
+          </section>
+        )}
 
         <section className="overflow-hidden rounded-2xl border border-[#e5e5e5] bg-white shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#e5e5e5] px-4 py-4 md:px-6 md:py-5">

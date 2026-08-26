@@ -101,14 +101,15 @@ async function main() {
     assert(why(d)['unknown-tag'] === 1, 'counted as unknown-tag');
   }
 
-  console.log('the rule: a product on no open batch is ignored');
+  console.log('the rule: a product on no open batch is shown locally but not received');
   {
     const { d, events } = makeDetector({ receivable: ['SOMETHING-ELSE'] });
     d.catalog = { AA02: fresh() };
     await burst(d, 'AA02');
     await sleep(250);
-    assert(events.length === 0, 'no event');
-    assert(why(d)['not-on-open-batch'] === 1, 'counted as not-on-open-batch');
+    assert(events.length === 1, 'one local exception event');
+    assert(events[0]?.unexpected === 'no-open-batch', 'marked NO RECEIVING');
+    assert(d.inventory.get('AA02')?.status !== 'INSIDE', 'not received into local inventory');
   }
 
   console.log('the rule: a carton Nexus already has is ignored');
@@ -338,16 +339,17 @@ async function main() {
     assert(d.inventory.get('RS02')?.status === 'INSIDE', 'a failed state read changes nothing');
   }
 
-  console.log('summary(): every ignore is answerable without reading the logs');
+  console.log('summary(): ignores are counted and exceptions stay visible');
   {
-    const { d } = makeDetector({ receivable: ['A-1'] });
+    const { d, events } = makeDetector({ receivable: ['A-1'] });
     d.catalog = { S1: fresh(), S2: fresh('A-9', 'BOX-9') };
     await burst(d, 'S1');
     await burst(d, 'S2');
     await burst(d, 'S3'); // unknown
     await sleep(300);
     const s = d.summary();
-    assert(s.ignored['not-on-open-batch'] === 1 && s.ignored['unknown-tag'] === 1, 'reasons are counted');
+    assert(s.ignored['unknown-tag'] === 1, 'silent ignore reasons are counted');
+    assert(events.some((event) => event.unexpected === 'no-open-batch'), 'off-batch exception is visible as an event');
     assert(s.allowShipping === false, 'shipping reads as off');
   }
 

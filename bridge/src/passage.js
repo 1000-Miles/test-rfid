@@ -602,7 +602,8 @@ class PassageDetector extends EventEmitter {
    *   4. Nexus says already received  -> ignore. Catches cartons taken in by a
    *                                      handheld, or by this gate before a
    *                                      restart.
-   *   5. product on no open batch     -> ignore. Nothing is expecting it.
+   *   5. product on no open batch     -> local exception. Show it to the
+   *                                      worker, but never credit or deliver it.
    *   6. otherwise                    -> RECEIVE.
    *
    * Every ignore is SILENT on the boards, deliberately: a doorway that
@@ -616,7 +617,7 @@ class PassageDetector extends EventEmitter {
    * and 449 arrivals against no open batch. Neither is reachable from here any
    * more — an event now needs a positive reason to exist at all.
    *
-   * @returns {{action: 'receive'|'ignore', reason: string}}
+   * @returns {{action: 'receive'|'exception'|'ignore', reason: string}}
    */
   _decideReceiving(item, known, rec) {
     if (!known) return { action: 'ignore', reason: 'unknown-tag' };
@@ -626,7 +627,7 @@ class PassageDetector extends EventEmitter {
     if (!this.receivableSku) return { action: 'ignore', reason: 'no-batch-data' };
     const batch = this.receivableSku(item.sku);
     if (!batch || batch.source === 'none') return { action: 'ignore', reason: 'no-batch-data' };
-    if (!batch.ok) return { action: 'ignore', reason: 'not-on-open-batch' };
+    if (!batch.ok) return { action: 'exception', reason: 'not-on-open-batch' };
     return { action: 'receive', reason: batch.source === 'live' ? 'on-open-batch' : 'on-open-batch-cached' };
   }
 
@@ -837,11 +838,12 @@ class PassageDetector extends EventEmitter {
     const direction = 'in';
     const method = firstDir ? 'ir' : 'toggle';
     const basis = decision.reason;
-    // Nothing questionable is emitted any more: a passage either earns a receipt
-    // or never becomes an event. The field stays on the wire — Nexus and the
-    // boards both read it — but it can only ever be null now.
-    const unexpected = null;
-    this.emit('log', `RECEIVE ${epc} (${item.sku}) [${basis}] from ${p.reads.length} read(s)`);
+    // Off-batch cartons are local-only exception events. The Outbox journals
+    // them for evidence but deliberately does not queue them for Nexus or add
+    // them to a pallet. The dashboard can therefore show NO RECEIVING without
+    // turning the warning into stock.
+    const unexpected = decision.action === 'exception' ? 'no-open-batch' : null;
+    this.emit('log', `${unexpected ? 'NO RECEIVING' : 'RECEIVE'} ${epc} (${item.sku}) [${basis}] from ${p.reads.length} read(s)`);
 
     const timestamp = new Date(now).toISOString();
     const scanStartedAt = new Date(Math.min(...p.reads.map((read) => read.t))).toISOString();
@@ -855,10 +857,12 @@ class PassageDetector extends EventEmitter {
     // — resetForReceiving() wipes the inventory, forgetEpcs() flips the named
     // tags back to OUTSIDE. Without that, a redo after a Nexus reset would find
     // every carton already received and take nothing in.
-    rec.status = 'INSIDE';
-    rec.lastSeen = timestamp;
-    rec.lastMoveAt = now;
-    rec.entries += 1;
+    if (!unexpected) {
+      rec.status = 'INSIDE';
+      rec.lastSeen = timestamp;
+      rec.lastMoveAt = now;
+      rec.entries += 1;
+    }
 
     const strongest = p.reads.reduce((a, b) => ((b.rssi ?? -999) > (a.rssi ?? -999) ? b : a));
     const event = {
