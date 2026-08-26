@@ -184,6 +184,81 @@ async function ping(host) {
   }
 }
 
+
+// -- per-antenna read activity -----------------------------------------------
+//
+// This is the ONLY trustworthy antenna signal on this firmware, and it is a good
+// one: the reader stamps every tag read with the port it came in on, so a port
+// that is producing reads is demonstrably working — cable, connector, bracket and
+// all. No self-report call can say as much.
+//
+// The reader's own introspection is documented as unreliable here (uhf.js):
+//   UHFGetAntennaLinkStatus  returns non-zero on this unit -> null
+//   UHFGetANT                returns 0 but leaves the buffer unwritten
+//   UHFGetAntennaPower       returns non-zero, cannot be read back
+// which is why "physically connected?" came back Unchecked. It was not a missing
+// feature; the hardware would not answer.
+//
+// Kept on disk so a bridge restart does not blind every antenna until the next
+// pallet goes through.
+const ANTENNA_STATE_FILE = 'control-tower-antennas.json';
+
+/** Ports quiet this long, WHILE OTHERS ARE READING, are treated as faulty. */
+const ANTENNA_QUIET_MS = 2 * 60 * 60 * 1000;
+
+const antennaReads = new Map(); // port -> { last: epochMs, count: number }
+let antennaDirty = false;
+
+function antennaStatePath() {
+  return join(__dirname, '..', 'data', ANTENNA_STATE_FILE);
+}
+
+function loadAntennaReads() {
+  try {
+    const raw = JSON.parse(readFileSync(antennaStatePath(), 'utf8'));
+    for (const [port, v] of Object.entries(raw.ports || {})) {
+      const n = Number(port);
+      if (Number.isFinite(n) && v && Number.isFinite(v.last)) {
+        antennaReads.set(n, { last: v.last, count: Number(v.count) || 0 });
+      }
+    }
+  } catch {
+    // first run, or the file is unreadable — start from nothing
+  }
+}
+
+function saveAntennaReads(log) {
+  if (!antennaDirty) return;
+  antennaDirty = false;
+  try {
+    mkdirSync(dirname(antennaStatePath()), { recursive: true });
+    const ports = {};
+    for (const [port, v] of antennaReads) ports[port] = v;
+    writeFileSync(antennaStatePath(), JSON.stringify({ ports }), 'utf8');
+  } catch (err) {
+    log(`could not save antenna read state: ${err.message}`, 'warn');
+  }
+}
+
+/** Called for every tag the reader reports. Hot path — keep it trivial. */
+function noteAntennaRead(port) {
+  const n = Number(port);
+  if (!Number.isFinite(n) || n <= 0) return;
+  const cur = antennaReads.get(n);
+  if (cur) {
+    cur.last = Date.now();
+    cur.count += 1;
+  } else {
+    antennaReads.set(n, { last: Date.now(), count: 1 });
+  }
+  antennaDirty = true;
+}
+
+/** Ports seen reading at all — the honest answer to "how many antennas?". */
+function portsSeenReading() {
+  return [...antennaReads.keys()].sort((a, b) => a - b);
+}
+
 /**
  * The antenna check — the one that only works from in here.
  *
@@ -196,6 +271,45 @@ async function checkAntenna(device, ctx) {
   const unknown = (detail) => ({ status: 'unknown', issue: null, detail, latencyMs: null });
 
   if (!device.antennaPort) return unknown('No antenna port set for this antenna.');
+  const port = Number(device.antennaPort);
+
+  // ---- 1. read activity, the evidence that beats every self-report ---------
+  // A port producing reads is working. A port silent while its siblings read is
+  // broken. Those two cover the cases that matter, and neither depends on a
+  // firmware call this reader refuses to answer.
+  const now = Date.now();
+  const mine = antennaReads.get(port);
+  const others = [...antennaReads.entries()].filter(([p]) => p !== port);
+  const othersActive = others.filter(([, v]) => now - v.last < ANTENNA_QUIET_MS);
+
+  if (mine && now - mine.last < ANTENNA_QUIET_MS) {
+    const mins = Math.max(1, Math.round((now - mine.last) / 60000));
+    return {
+      status: 'online',
+      issue: null,
+      detail: `Read a tag ${mins}m ago (${mine.count} reads on this port).`,
+      latencyMs: null,
+    };
+  }
+
+  if (othersActive.length > 0) {
+    // Somebody is reading and this port is not. That is a real finding.
+    const lastSeen = mine
+      ? `last read ${Math.round((now - mine.last) / 3600000)}h ago`
+      : 'never read a tag';
+    return {
+      status: 'offline',
+      issue: `No reads on port ${port} while port${othersActive.length > 1 ? 's' : ''} ${othersActive
+        .map(([p]) => p)
+        .join(', ')} ${othersActive.length > 1 ? 'are' : 'is'} reading.`,
+      detail: `This port ${lastSeen}. Check its cable, connector and that the port is enabled.`,
+      latencyMs: null,
+    };
+  }
+
+  // ---- 2. nothing is reading anywhere -------------------------------------
+  // An idle gate cannot prove an antenna works. Fall through to asking the
+  // reader, and if that will not answer either, say so rather than guess.
   if (!ctx.uhf) return unknown('This bridge build has no reader module wired.');
 
   // Belt and braces: checkDevice already filters foreign gates via
@@ -219,10 +333,13 @@ async function checkAntenna(device, ctx) {
   }
 
   if (!Array.isArray(connectedPorts)) {
-    return unknown('The reader would not report antenna link status.');
+    // Expected on this firmware — see the note above the read tracker.
+    return unknown(
+      'No tag traffic at this gate to judge by, and this reader will not report ' +
+        'antenna link status. Send a pallet through and it will resolve.',
+    );
   }
 
-  const port = Number(device.antennaPort);
   if (!connectedPorts.includes(port)) {
     return {
       status: 'offline',
@@ -645,13 +762,36 @@ async function discoverDevices(ctx) {
   // Antennas: one row per ENABLED port. Enabled is the right list — those are
   // the ports the gate is meant to be using, so a cable pulled from one of them
   // is a fault. A port nobody enabled is not a missing antenna.
-  if (ctx.uhf) {
-    let ports = null;
+  // How many antennas this gate has.
+  //
+  // getAntennas() is NOT reliable here: uhf.js records that UHFGetANT returns 0
+  // while leaving the output buffer unwritten on this firmware, which is why a
+  // four-antenna gate announced one antenna. So the order of preference is:
+  //   1. CONTROL_TOWER_ANTENNAS  — what the site says it installed, e.g. 4
+  //   2. ports actually seen reading tags
+  //   3. whatever getAntennas() claims
+  let ports = null;
+  const declared = (process.env.CONTROL_TOWER_ANTENNAS || '').trim();
+  if (declared) {
+    ports = /^\d+$/.test(declared)
+      ? Array.from({ length: Math.min(16, Number(declared)) }, (_, i) => i + 1)
+      : declared
+          .split(',')
+          .map((x) => Number(x.trim()))
+          .filter((n) => Number.isFinite(n) && n >= 1 && n <= 16);
+  }
+  if (!ports || ports.length === 0) {
+    const seen = portsSeenReading();
+    if (seen.length > 0) ports = seen;
+  }
+  if ((!ports || ports.length === 0) && ctx.uhf) {
     try {
       ports = await ctx.uhf.getAntennas();
     } catch {
       ports = null; // reader link down; try again on the next announce
     }
+  }
+  {
     if (Array.isArray(ports)) {
       for (const port of ports) {
         out.push({
@@ -664,7 +804,7 @@ async function discoverDevices(ctx) {
           gateId: gate,
           antennaPort: port,
           frequencyMinutes: 5,
-          checkNote: 'Asks the reader whether an antenna is physically connected on this port.',
+          checkNote: 'Watches whether this antenna port is still reading tags.',
         });
       }
     }
@@ -878,6 +1018,16 @@ function startControlTower(opts) {
   /** When each device was last checked BY US, so per-device cadence is honoured. */
   const lastChecked = new Map();
 
+  // Every tag read carries the port it arrived on. This is the antenna check.
+  loadAntennaReads();
+  if (o.controller && typeof o.controller.on === 'function') {
+    o.controller.on('message', (msg) => {
+      if (msg && msg.type === 'tag' && msg.antenna != null) noteAntennaRead(msg.antenna);
+    });
+  } else {
+    log('no controller passed — antennas can only be judged by tag traffic, which needs it', 'warn');
+  }
+
   async function fetchWorkList() {
     const res = await fetch(`${base}/api/operations/control-tower/devices`, {
       headers: { Authorization: `Bearer ${apiKey}` },
@@ -1041,10 +1191,15 @@ function startControlTower(opts) {
   void announce().then(() => run());
   const timer = setInterval(() => void run(), tickMs);
   const announceTimer = setInterval(() => void announce(), ANNOUNCE_MS);
+  // Throttled: the antenna read counters change on every tag, the file does not
+  // need to. Flushed again on stop so a clean shutdown loses nothing.
+  const saveTimer = setInterval(() => saveAntennaReads(log), 60_000);
   return {
     stop() {
       clearInterval(timer);
       clearInterval(announceTimer);
+      clearInterval(saveTimer);
+      saveAntennaReads(log);
     },
   };
 }
