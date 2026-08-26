@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import QRCode from 'qrcode';
-import { api } from './api';
+import { api, BRIDGE_PORT } from './api';
 import { C, u } from './boardKit';
 
 /**
@@ -33,7 +33,12 @@ export default function Qr(props: { path?: string; size?: number }) {
         const { ok, ip } = await api.network();
         if (!ok || !ip) throw new Error('no LAN address');
         const path = props.path ?? window.location.pathname;
-        const url = `${window.location.protocol}//${ip}:${window.location.port}${path}`;
+        // Carry the bridge target along: with two gate bridges on one machine
+        // (ports 3001/3002), a phone that opened gate 2's board must keep
+        // talking to gate 2's bridge. The kiosk's own ?bridge= value can't be
+        // reused verbatim — its host half is often 'localhost', meaningless on
+        // the phone — so re-anchor it to the LAN IP plus the resolved port.
+        const url = `${window.location.protocol}//${ip}:${window.location.port}${path}?bridge=${ip}:${BRIDGE_PORT}`;
         const png = await QRCode.toDataURL(url, { margin: 0, color: { dark: C.fg, light: '#ffffff' } });
         if (!cancelled) setDataUrl(png);
       } catch {

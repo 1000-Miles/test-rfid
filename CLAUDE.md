@@ -64,7 +64,10 @@ the only correct way to create a gate copy.
   `bridge/test/` which stub the reader). Movements journal to
   `bridge/data/movement-log.jsonl` before delivery — the outbox
   (`bridge/src/outbox.js`) is the only path allowed to write movements.
-- `dashboard/`: `npm run dev`, opens on :5173, resolves the bridge host from
-  the page URL or the `?bridge=` query param (`dashboard/src/api.ts`).
+- `dashboard/`: `npm run dev`, opens on :5173. The dashboard runs ONCE (both
+  gates share it — never run a copy per gate); each gate's screen selects its
+  bridge via `?bridge=<host[:port]>` (`dashboard/src/api.ts`), e.g.
+  `?bridge=:3002` for gate 2 on the same machine. The phone QR (`Qr.tsx`)
+  carries that target along.
 - The bridge process model is **one process = one reader**. Do not try to make
   a single process drive two readers; the DLL cannot do it.

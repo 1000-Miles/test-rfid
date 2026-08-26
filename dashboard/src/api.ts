@@ -1,18 +1,24 @@
 import type { DetectMode, Mode, NexusConfig, PrinterConfig, PrinterStatusInfo, PrintResult, Status } from './types';
 
-// Bridge host: ?bridge=<ip> in the URL targets a genuinely remote bridge (e.g.
-// a Raspberry Pi / VM elsewhere on the network).
+// Bridge target: ?bridge=<host[:port]> in the URL picks which bridge this page
+// talks to. The host half targets a genuinely remote bridge (e.g. a Raspberry
+// Pi / VM elsewhere on the network); the port half picks between the two gate
+// bridges on one machine (gate 1 on 3001, gate 2 on 3002 — see CLAUDE.md).
+// `?bridge=:3002` is valid shorthand for "this same machine, gate 2".
 //
-// The default is the PAGE'S OWN hostname, not a hardcoded 'localhost' — the
-// bridge always runs on the same physical PC that serves this page, just on a
-// different port. Opened as localhost:5173 on the kiosk itself, that resolves
-// to localhost:3001, same as before. Opened from a phone via the QR code
-// (Qr.tsx) at e.g. 192.168.254.125:5173, 'localhost' would mean the PHONE
+// The default host is the PAGE'S OWN hostname, not a hardcoded 'localhost' —
+// the bridge always runs on the same physical PC that serves this page, just
+// on a different port. Opened as localhost:5173 on the kiosk itself, that
+// resolves to localhost:3001, same as before. Opened from a phone via the QR
+// code (Qr.tsx) at e.g. 192.168.254.125:5173, 'localhost' would mean the PHONE
 // itself and every bridge call would fail — the page's own hostname is
 // 192.168.254.125 either way, so it reaches the right machine automatically.
-const BRIDGE_HOST = new URLSearchParams(window.location.search).get('bridge') || window.location.hostname;
-export const BRIDGE_HTTP = `http://${BRIDGE_HOST}:3001`;
-export const BRIDGE_WS = `ws://${BRIDGE_HOST}:3001/ws`;
+const bridgeParam = new URLSearchParams(window.location.search).get('bridge') || '';
+const [paramHost, paramPort] = bridgeParam.split(':');
+const BRIDGE_HOST = paramHost || window.location.hostname;
+export const BRIDGE_PORT = Number(paramPort) || 3001;
+export const BRIDGE_HTTP = `http://${BRIDGE_HOST}:${BRIDGE_PORT}`;
+export const BRIDGE_WS = `ws://${BRIDGE_HOST}:${BRIDGE_PORT}/ws`;
 
 async function post<T = any>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BRIDGE_HTTP}${path}`, {
