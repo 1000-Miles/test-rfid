@@ -575,7 +575,21 @@ function persistedPrinterConfig() {
  */
 async function discoverDevices(ctx) {
   const gate = ctx.gateId || 'gate';
-  const zoneName = prettyGate(gate);
+
+  // The zone NAME is deliberately separate from the gate's identity.
+  //
+  // GATE_ID is permanent: it is half of every movement's immutable event id
+  // (`gateId:seq`), so it cannot be renamed to suit a board. Deriving the zone
+  // from it meant a site whose gates are called 'yiwu-main-gate' and
+  // 'yiwu-gate-2' got zones named after those ids, sitting alongside the Gate 1
+  // and Gate 2 zones people actually wanted to read.
+  //
+  // CONTROL_TOWER_ZONE is that board label, set per bridge:
+  //   bridge1/.env  CONTROL_TOWER_ZONE=Gate 1
+  //   bridge2/.env  CONTROL_TOWER_ZONE=Gate 2
+  // Unset, it falls back to the prettified id, which is right for a site whose
+  // ids already read well.
+  const zoneName = (process.env.CONTROL_TOWER_ZONE || '').trim() || prettyGate(gate);
   const out = [];
 
   // The bridge itself. No address: the check is that this code is running.
@@ -681,8 +695,12 @@ async function discoverDevices(ctx) {
   // zone. Filing the pallet printers together would collapse two real machines
   // into one row and hide a fault on whichever lost the race.
   //
-  // CONTROL_TOWER_PRINTER_ZONE overrides the shared zone name.
-  const sharedZone = (process.env.CONTROL_TOWER_PRINTER_ZONE || 'Shared').trim() || 'Shared';
+  // Site-wide kit goes in one zone that is not a gate. Named 'All' by default
+  // because that is what it means to whoever is reading the board: applies to
+  // all gates. CONTROL_TOWER_SHARED_ZONE renames it.
+  const sharedZone =
+    (process.env.CONTROL_TOWER_SHARED_ZONE || process.env.CONTROL_TOWER_PRINTER_ZONE || 'All').trim() ||
+    'All';
 
   if (pc && hasCartonPrinter) {
     const tcp = pc.transport === 'tcp';
