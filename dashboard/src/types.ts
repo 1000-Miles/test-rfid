@@ -19,6 +19,14 @@ export interface NexusConfig {
   minRssi: number | null;
   toggleMinReads: number;
   /**
+   * No-IR only: count a carton on the read that decides it, instead of holding
+   * it for the decision window. The window cannot change a no-IR outcome —
+   * direction is inferred, not read — so what it buys is a fuller telemetry
+   * picture on the receipt, at the cost of cartons reaching the board one at a
+   * time. Undefined on a bridge that predates the control.
+   */
+  toggleFastCount?: boolean;
+  /**
    * How long a pallet stays open for, in ms. Everything read inside the window
    * lands on the same pallet code and the same printed label, so this is what
    * separates one pallet from the next when there are no beams.

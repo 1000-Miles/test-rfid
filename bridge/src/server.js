@@ -153,6 +153,10 @@ const nexus = new PassageDetector({
   absenceMs: Number(process.env.NEXUS_ABSENCE_MS || 30_000),
   minRssi: process.env.NEXUS_MIN_RSSI ? Number(process.env.NEXUS_MIN_RSSI) : null,
   toggleMinReads: Number(process.env.NEXUS_TOGGLE_MIN_READS || 1),
+  // Count a no-IR carton on the deciding read instead of holding it for the
+  // window — see toggleFastCount in passage.js for what that trades away.
+  // Defaults OFF; the console's No-IR trial tab flips it live.
+  toggleFastCount: /^(1|true|yes|on)$/i.test(process.env.NEXUS_TOGGLE_FAST_COUNT || ''),
   location: process.env.NEXUS_LOCATION || 'WH-ENTRANCE-1',
   // Tag registry: catalog is loaded from operations_label_tag in this
   // Supabase project (and cached to data/catalog.json for offline boots).
@@ -1124,6 +1128,8 @@ app.get('/nexus/events', (req, res) => res.json({ ok: true, events: nexus.getEve
 const RESET_POLL_URL = (process.env.NEXUS_RESET_URL || '').trim();
 const RESET_POLL_MS = Math.max(1000, Number(process.env.NEXUS_RESET_POLL_MS || 5000));
 const RESET_POLL_KEY = (process.env.MOVEMENT_API_KEY || process.env.NEXUS_API_KEY || '').trim();
+/** Just for the log line — the real interval is read at boot. */
+const CATALOG_REFRESH_MS_LABEL = `${Math.round(Number(process.env.NEXUS_CATALOG_REFRESH_MS || 60_000) / 1000)}s`;
 
 /**
  * The cursor, PERSISTED.
@@ -1384,6 +1390,22 @@ async function applyReceivingReset({ epcs, batches, skus, reason, source, refres
   }
   controller.log(`[reset] ${source}: ${reason} — ${scope}`);
 
+  // Re-read carton state NOW. This is the lag that bit a live run: the marker
+  // poll is seconds, but WHICH cartons Nexus has withdrawn is only learned on
+  // the catalogue refresh — and a reset that names no epcs is detected solely by
+  // rows disappearing from that read. Up to CATALOG_REFRESH_MS passed between
+  // the reset landing and the gate acting on it, and cartons counted inside that
+  // window were still at the door when they became receivable again, so they
+  // counted twice. Asking immediately closes the window.
+  //
+  // Awaited before the board refresh so the figures and the carton state the
+  // screens are told about come from the same moment.
+  try {
+    await nexus.loadCatalogRemote();
+  } catch (err) {
+    controller.log(`[reset] carton state refresh after ${source} failed (${err.message}) — the ${CATALOG_REFRESH_MS_LABEL} poll will catch it`, 'warn');
+  }
+
   // The screens still need telling either way — a Nexus that is briefly
   // unreachable does not make the reset any less real.
   if (refreshBoard) await refreshBoardAfterReset(source);
@@ -1408,7 +1430,20 @@ app.post('/admin/wipe-local', (req, res) => {
     });
   }
   const outboxResult = outbox.wipeLocalState();
-  nexus.reset();
+  // resetForReceiving(), NOT the blunt reset(): it KEEPS `_lastReadAt`, the
+  // absence gate, and reset() clears it.
+  //
+  // That difference double-counted a real pallet. Wiping while the reader is
+  // running, with tags still in the read zone, left nothing to say those tags
+  // had never left: local memory gone, Nexus's rows deleted by the same redo,
+  // and the absence gate cleared too. Each carton's re-arm window expired and
+  // it was received a SECOND time without moving an inch — 44 of 76 EPCs, every
+  // one of them exactly twice.
+  //
+  // Keeping the gate means a carton still has to leave the field and come back,
+  // which is what physically happens in a redo. resetForReceiving also stamps
+  // the durable forget cutoff, so the wipe survives a restart.
+  nexus.resetForReceiving();
   board.clearCache?.();
   controller.log('LOCAL STATE WIPED by /admin/wipe-local — queue, cursor, dead letters, pallet numbering and live inventory are all gone.', 'warn');
   // Reuse the EXISTING reset signal rather than inventing a second one. Every
@@ -1501,7 +1536,8 @@ app.post('/nexus/config', (req, res) => {
   const summary = nexus.setConfig(req.body || {});
   controller.log(
     `[nexus] config: detect=${summary.detectMode} dedup=${summary.dedupMs}ms quiet=${summary.quietMs}ms maxWindow=${summary.maxWindowMs}ms` +
-      ` | no-IR: rearm=${summary.toggleDedupMs}ms absence=${summary.absenceMs}ms minRssi=${summary.minRssi ?? 'off'} minReads=${summary.toggleMinReads}`
+      ` | no-IR: rearm=${summary.toggleDedupMs}ms absence=${summary.absenceMs}ms minRssi=${summary.minRssi ?? 'off'} minReads=${summary.toggleMinReads}` +
+      ` fastCount=${summary.toggleFastCount ? 'on' : 'off'}`
   );
   res.json({ ok: true, ...summary, palletWindowMs: outbox.togglePalletWindowMs });
 });
@@ -1773,7 +1809,11 @@ server.listen(PORT, () => {
   // what keeps the check honest — and _outboundCheck stops judging entirely
   // once the state is older than stateMaxAgeMs, so a failing refresh degrades
   // to silence rather than to false accusations.
-  const CATALOG_REFRESH_MS = Number(process.env.NEXUS_CATALOG_REFRESH_MS || 120_000);
+  // 60s, not 120s. This is how the gate learns a carton has been withdrawn when
+  // the reset did not name it, so the interval is the worst-case delay before a
+  // redo is possible — and every second of it is a second in which an
+  // already-counted carton can be counted again.
+  const CATALOG_REFRESH_MS = Number(process.env.NEXUS_CATALOG_REFRESH_MS || 60_000);
   if (CATALOG_REFRESH_MS > 0) {
     setInterval(() => void nexus.loadCatalogRemote(), CATALOG_REFRESH_MS).unref();
   }

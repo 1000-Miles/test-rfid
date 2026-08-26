@@ -92,7 +92,7 @@ const nameSlug = (name: string) => name.trim().split(/\s+/).slice(0, 3).join(' '
 export function Tile(props: { line: DocLine; dir: Direction; doc?: { label: string; due: number }; compact?: boolean; large?: boolean; focused?: boolean; onClick?: () => void }) {
   const a = accent(props.dir);
   const { line, doc } = props;
-  const done = line.received >= line.expected;
+  const done = !line.countOnly && line.received >= line.expected;
   const started = line.received > 0;
   const due = doc ? dueChip(doc.due) : null;
 
@@ -153,7 +153,7 @@ export function Tile(props: { line: DocLine; dir: Direction; doc?: { label: stri
         {/* Cartons moved off the photo — the badge obstructed the product
             image, so the pair now reads as a labelled row. */}
         <div style={{ fontSize: u(s.qty), padding: props.large ? `${u(8)} ${u(10)}` : 0, borderRadius: props.large ? u(8) : 0, background: props.large ? (done ? C.greenBg : started ? a.soft : C.surface) : 'transparent' }}>
-          <Qty label="CTN" received={line.received} expected={line.expected} prominent={props.large} accent={done ? C.greenDk : a.text} />
+          <Qty label="CTN" received={line.received} expected={line.countOnly ? null : line.expected} prominent={props.large} accent={done ? C.greenDk : a.text} />
         </div>
 
         <div style={{ marginTop: 'auto', height: u(props.large ? 10 : 6), borderRadius: u(5), background: '#e9ebee', overflow: 'hidden' }}>
@@ -166,12 +166,41 @@ export function Tile(props: { line: DocLine; dir: Direction; doc?: { label: stri
 
 /** One labelled `received / expected` pair on a tile. Fixed-width label so the
  *  numbers line up between the carton row and the unit row. */
-function Qty(props: { label: string; received: number; expected: number; prominent?: boolean; accent?: string }) {
+function Qty(props: { label: string; received: number; expected: number | null; prominent?: boolean; accent?: string }) {
   return (
     <div style={{ display: 'flex', alignItems: 'baseline', gap: u(props.prominent ? 9 : 6), whiteSpace: 'nowrap', lineHeight: 1 }}>
-      <span style={{ fontWeight: 800, letterSpacing: '0.08em', color: props.prominent ? C.muted : C.faint, flex: '0 0 auto', minWidth: u(props.prominent ? 52 : 38) }}>{props.label}</span>
-      <span style={{ fontWeight: 800, color: props.prominent ? props.accent : C.fg, fontVariantNumeric: 'tabular-nums' }}>{props.received.toLocaleString()}</span>
-      <span style={{ fontWeight: props.prominent ? 700 : 600, color: props.prominent ? C.muted : C.faint, fontVariantNumeric: 'tabular-nums' }}>/ {props.expected.toLocaleString()}</span>
+      <span
+        style={{
+          fontWeight: 800,
+          letterSpacing: '0.08em',
+          color: props.prominent ? C.muted : C.faint,
+          flex: '0 0 auto',
+          minWidth: u(props.prominent ? 52 : 38),
+          // Deliberately NOT scaled with the count: the word is a unit label,
+          // and growing both makes the pair compete instead of the number
+          // leading.
+          fontSize: props.expected == null ? '0.85em' : undefined,
+        }}
+      >
+        {props.label}
+      </span>
+      <span
+        style={{
+          fontWeight: 800,
+          color: props.prominent ? props.accent : C.fg,
+          fontVariantNumeric: 'tabular-nums',
+          // With no denominator beside it the count can take the space the
+          // fraction used to occupy. 2.4em is the largest that still clears the
+          // tile at the narrowest column width — the row is nowrap, so a bigger
+          // figure pushes the product name out rather than wrapping.
+          fontSize: props.expected == null ? '2.4em' : undefined,
+        }}
+      >
+        {props.received.toLocaleString()}
+      </span>
+      {props.expected != null && (
+        <span style={{ fontWeight: props.prominent ? 700 : 600, color: props.prominent ? C.muted : C.faint, fontVariantNumeric: 'tabular-nums' }}>/ {props.expected.toLocaleString()}</span>
+      )}
     </div>
   );
 }

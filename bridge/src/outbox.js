@@ -80,6 +80,8 @@ class Outbox extends EventEmitter {
     this.toggleBatchQuietMs = opts.toggleBatchQuietMs ?? 1_500;
     // 60s. Must match the default in server.js — a caller that omits the option
     // and one that reads it from the env should not get different pallets.
+    // A value saved from the console overrides this at the end of the
+    // constructor, once dataDir is known — see _loadPalletWindow.
     this.togglePalletWindowMs = opts.togglePalletWindowMs ?? 60_000;
     this.log = opts.log || (() => {});
     // Permanent identity of THIS gate. Together with the journal seq it forms
@@ -101,6 +103,20 @@ class Outbox extends EventEmitter {
     // start at 1 and count pallets — the movement seq counts cartons and was
     // already past 300 on day one.
     this._palletSeqPath = path.join(this.dataDir, 'pallet-seq.json');
+    /**
+     * The pallet window an operator last set, kept across restarts.
+     *
+     * Without this the console's setting lived only in memory: the gate ran a
+     * two-minute window all afternoon, and the next restart silently put it back
+     * to whatever the env said. Nothing on any screen reported the change —
+     * pallets simply started splitting at a minute again, which reads as the
+     * gate mis-grouping rather than as a setting that expired.
+     *
+     * A saved value WINS over the env/option: the env is the boot default for a
+     * fresh install, this is the most recent human decision. Survives the local
+     * wipe on purpose — it is a setting, not receiving state.
+     */
+    this._palletWindowPath = path.join(this.dataDir, 'pallet-window.json');
     // Survives wipes ON PURPOSE — see _loadGeneration.
     this._generationPath = path.join(this.dataDir, 'movement-generation.json');
     this.generation = this._loadGeneration();
@@ -153,6 +169,7 @@ class Outbox extends EventEmitter {
     this._togglePassage = null;
 
     this._restore();
+    this._loadPalletWindow();
     this._restoreOpenPallet();
   }
 
@@ -671,11 +688,38 @@ class Outbox extends EventEmitter {
       throw new Error(`pallet window must be 10000..900000 ms (got ${ms})`);
     }
     this.togglePalletWindowMs = Math.floor(v);
+    this._savePalletWindow();
     this.log(
       `pallet window = ${Math.round(this.togglePalletWindowMs / 1000)}s` +
         (this._togglePassage ? ' — the pallet already open keeps its original deadline' : '')
     );
     return this.togglePalletWindowMs;
+  }
+
+  /** The console's last pallet window, if one was ever set. See _palletWindowPath. */
+  _loadPalletWindow() {
+    let saved;
+    try { saved = JSON.parse(fs.readFileSync(this._palletWindowPath, 'utf8')); }
+    catch { return; } // never set from the console — the env/option default stands
+    const v = Number(saved?.togglePalletWindowMs);
+    // Re-validated on the way in: a hand-edited or truncated file must not be
+    // able to set a window the setter itself would have refused.
+    if (!Number.isFinite(v) || v < 10_000 || v > 900_000) {
+      this.log(`saved pallet window is not usable (${saved?.togglePalletWindowMs}) — using ${Math.round(this.togglePalletWindowMs / 1000)}s`, 'warn');
+      return;
+    }
+    this.togglePalletWindowMs = Math.floor(v);
+  }
+
+  _savePalletWindow() {
+    try {
+      fs.mkdirSync(this.dataDir, { recursive: true });
+      writeFileAtomic(this._palletWindowPath, JSON.stringify({ togglePalletWindowMs: this.togglePalletWindowMs }) + '\n');
+    } catch (err) {
+      // Not fatal, but it means the next restart forgets — say so now rather
+      // than letting the window quietly revert days later.
+      this.log(`pallet window write failed (${err.message}) — this will not survive a restart`, 'warn');
+    }
   }
 
   _schedulePalletDeadline() {

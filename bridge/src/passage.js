@@ -127,6 +127,35 @@ class PassageDetector extends EventEmitter {
     this.absenceMs = opts.absenceMs ?? 30_000;
     this.minRssi = Number.isFinite(opts.minRssi) ? opts.minRssi : null;
     this.toggleMinReads = opts.toggleMinReads ?? 1; // 1 = accept a single read; see the note above
+    /**
+     * Count a no-IR carton the MOMENT it is decidable, instead of holding it
+     * for the decision window.
+     *
+     * The window earns its keep in IR mode, where it waits for a directioned
+     * read. In toggle mode it cannot change the outcome: the direction is not
+     * inferred from the reads at all (see _fire — `direction` is 'in', and the
+     * verdict comes from _decideReceiving, which reads the catalogue and the
+     * open batch), and the only thing the reads themselves decide is the
+     * toggleMinReads noise floor. So once that many reads are in, every extra
+     * millisecond is latency and nothing else.
+     *
+     * That latency is what the floor sees as cartons TRICKLING onto the board:
+     * the reader runs continuously in toggle mode, so a pallet sitting in the
+     * field keeps re-arming each tag's quiet timer, and every carton ends up
+     * firing at its own maxWindowMs — staggered by whenever that tag was first
+     * seen, one every few seconds, rather than as a pallet.
+     *
+     * The cost is telemetry, not correctness: the movement event carries the
+     * reads it had at firing time, so `reads`, `antennas` and the strongest
+     * RSSI narrow to the deciding read(s). The console's tag feed is unaffected
+     * (the controller emits every read on its own, floor tuning included), and
+     * the trailing reads are still absorbed by the re-arm and absence gates —
+     * they simply no longer pad the receipt.
+     *
+     * OFF by default: this changes when a live gate commits a carton, and that
+     * is the floor's call to make, not a default to inherit.
+     */
+    this.toggleFastCount = opts.toggleFastCount === true;
     this._lastReadAt = new Map(); // epc -> ms epoch of last accepted read (feeds the absence gate)
     this.location = opts.location ?? 'WH-ENTRANCE-1';
     this.catalogUrl = opts.catalogUrl || ''; // Supabase project URL for the tag registry
@@ -158,6 +187,16 @@ class PassageDetector extends EventEmitter {
     // it, so why didn't it receive it?" — without which the only honest reply is
     // "read the logs". Exposed in summary().
     this._ignored = new Map();
+    /**
+     * The last few reads that were declined, WITH the tag and the reason.
+     *
+     * Counts alone could not answer the only question anyone actually asks —
+     * "the gate saw that carton, why didn't it count?" — because the answer is
+     * per-tag and the counters are per-reason. Worse, they survive a wipe, so
+     * after a redo they mix two runs together and the arithmetic stops adding
+     * up. Bounded, newest first, and cleared by a reset along with the counts.
+     */
+    this._ignoredRecent = [];
     /**
      * When each carton was FORGOTTEN, and when everything was.
      *
@@ -201,6 +240,12 @@ class PassageDetector extends EventEmitter {
     if (cfg.minRssi === null) this.minRssi = null;
     else if (Number.isFinite(cfg.minRssi)) this.minRssi = cfg.minRssi;
     if (Number.isFinite(cfg.toggleMinReads) && cfg.toggleMinReads >= 1) this.toggleMinReads = Math.floor(cfg.toggleMinReads);
+    if (typeof cfg.toggleFastCount === 'boolean') {
+      if (cfg.toggleFastCount !== this.toggleFastCount) {
+        this.emit('log', `no-IR fast count -> ${cfg.toggleFastCount ? 'ON (count on the deciding read)' : 'OFF (hold for the decision window)'}`);
+      }
+      this.toggleFastCount = cfg.toggleFastCount;
+    }
     return this.summary();
   }
 
@@ -656,6 +701,17 @@ class PassageDetector extends EventEmitter {
   /** Record an ignored read: counted for summary(), logged once, never shown. */
   _ignore(epc, item, known, reason, reads) {
     this._ignored.set(reason, (this._ignored.get(reason) || 0) + 1);
+    this._ignoredRecent.unshift({
+      epc,
+      sku: known ? item?.sku ?? null : null,
+      name: known ? item?.name ?? null : null,
+      reason,
+      reads,
+      at: new Date().toISOString(),
+    });
+    // Bounded: this is a diagnostic tail, not a log. A pallet parked in the read
+    // zone produces these by the hundred.
+    if (this._ignoredRecent.length > 300) this._ignoredRecent.length = 300;
     this.emit('log', `ignored ${epc} (${known ? item.sku : 'unregistered'}) — ${reason} [${reads} read(s)]`);
     return null;
   }
@@ -748,6 +804,13 @@ class PassageDetector extends EventEmitter {
     if (p.quiet) clearTimeout(p.quiet);
     p.quiet = setTimeout(() => this._decide(epc), this.quietMs);
     p.reads.push(read);
+
+    // NO-IR FAST PATH — see toggleFastCount. The noise floor is the only thing
+    // the reads decide here, so the instant it is satisfied the answer is final
+    // and holding the carton any longer only delays the board.
+    if (toggle && this.toggleFastCount && p.reads.length >= this.toggleMinReads) {
+      return this._decide(epc);
+    }
     return null;
   }
 
@@ -927,6 +990,7 @@ class PassageDetector extends EventEmitter {
       absenceMs: this.absenceMs,
       minRssi: this.minRssi,
       toggleMinReads: this.toggleMinReads,
+      toggleFastCount: this.toggleFastCount,
       location: this.location,
       catalogSize: Object.keys(this.catalog).length,
       catalogSource: this.catalogSource,
@@ -934,6 +998,9 @@ class PassageDetector extends EventEmitter {
       // Ignored reads by reason since boot — the only place "why was that carton
       // not received?" can be answered without trawling the log.
       ignored: Object.fromEntries(this._ignored),
+      // The per-tag tail behind those counts: which carton, and why it was
+      // declined. Answers "the gate saw it, so why is it not on the label?"
+      ignoredRecent: this._ignoredRecent.slice(0, 60),
     };
   }
 
@@ -973,6 +1040,11 @@ class PassageDetector extends EventEmitter {
   }
 
   reset() {
+    // Cleared with everything else: ignore counts that outlive a wipe mix the
+    // old run into the new one, and "59 received, 119 ignored" stops being
+    // arithmetic anyone can check.
+    this._ignored.clear();
+    this._ignoredRecent.length = 0;
     this.inventory.clear();
     this.events.length = 0;
     this._lastEventAt.clear();

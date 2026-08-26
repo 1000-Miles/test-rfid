@@ -20,10 +20,13 @@
  */
 
 const EventEmitter = require('events');
+const fs = require('fs');
+const path = require('path');
 const net = require('net');
 const os = require('os');
 const uhf = require('./driver'); // dll or sidecar, per UHF_DRIVER
 const { UdpListener } = require('./udp-listener');
+const { writeFileAtomic } = require('./atomic-write');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -59,7 +62,25 @@ class Controller extends EventEmitter {
      * carton passing the gate gets dropped too. Tune it against the RSSI column
      * in the console's tag feed, not by guessing.
      */
+    /**
+     * Persisted, because a floor an operator set from the console used to live
+     * only in memory: the next restart dropped it silently and the gate went
+     * back to reading the whole room. Nothing on any screen said so — the box
+     * simply read "off" again, which looks like someone turned it off.
+     *
+     * A value saved here WINS over READ_MIN_RSSI: the env is the boot default
+     * for a fresh install, the saved value is the most recent human decision.
+     */
+    this._minRssiPath = path.join(__dirname, '..', 'data', 'read-floor.json');
     this.minRssi = Number.isFinite(opts.minRssi) ? opts.minRssi : null;
+    try {
+      const saved = JSON.parse(fs.readFileSync(this._minRssiPath, 'utf8'));
+      // `null` is a real, deliberate setting ("keep every read"), so only an
+      // absent/unreadable file falls back to the env default.
+      if ('minRssi' in saved) this.minRssi = Number.isFinite(saved.minRssi) ? saved.minRssi : null;
+    } catch {
+      /* never set from the console — the env default stands */
+    }
     this._weakDropped = 0; // count since boot, so a too-tight floor is visible
 
     // 150ms: hardware shows beam breaks as short as ~100ms; 300ms missed fast swipes.
@@ -279,6 +300,14 @@ class Controller extends EventEmitter {
       // would drop EVERY read — the gate would look dead, not misconfigured.
       if (v > 0) throw new Error(`minRssi must be negative dBm (got ${v}); a gate floor is typically -70..-55`);
       this.minRssi = v;
+    }
+    try {
+      fs.mkdirSync(path.dirname(this._minRssiPath), { recursive: true });
+      writeFileAtomic(this._minRssiPath, JSON.stringify({ minRssi: this.minRssi }) + '\n');
+    } catch (err) {
+      // Not fatal, but it means the next restart forgets — say so rather than
+      // letting the floor quietly vanish later.
+      this.log(`read-floor write failed (${err.message}) — this will not survive a restart`, 'warn');
     }
     this.log(`Read floor = ${this.minRssi == null ? 'off (every read kept)' : `${this.minRssi}dBm`}.`);
     this._emitStatus();
