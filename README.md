@@ -5,30 +5,33 @@ Test rig for the warehouse RFID stack: a **Chainway UR4** UHF gate reader (Ether
 Android handheld for in-facility stock audits.
 
 ```
-dashboard/   React + Vite + TS + Tailwind UI for the UR4 gate  (browser)
-bridge/      Node.js Express + WebSocket server that drives UHFAPI.dll (koffi)
+dashboard/   React + Vite + TS + Tailwind UI for the UR4 gate  (browser, ONE instance)
+bridge1/     Gate 1's bridge — Node.js Express + WebSocket server, one process = one reader
+bridge2/     Gate 2's bridge — a DUPLICATE of bridge1's source; only .env and data/ differ
 handheld/    Android app (Kotlin + WebView) for the C5P handheld reader
 docs/        architecture docs (C5P handheld design, shared Supabase schema)
 ```
 
 ```
- UR4 reader ──Ethernet──► bridge (loads UHFAPI.dll) ──WebSocket/REST──► dashboard
- 192.168.99.202:8888        localhost:3001                              localhost:5173
+ gate 1 UR4 ──Ethernet──► bridge1 (port 3001) ──┐
+ gate 2 UR4 ──Ethernet──► bridge2 (port 3002) ──┴──WebSocket/REST──► dashboard (5173)
+
+ Each screen picks its bridge with ?bridge=host:port — see CLAUDE.md.
 ```
 
 ## Prerequisites
 
 - Windows 10/11, **Node.js 18+** (built & tested on Node 24).
 - Laptop NIC set to static **192.168.99.100 / 255.255.255.0**, UR4 at **192.168.99.202**, direct Ethernet cable.
-- `bridge/lib/` already contains `UHFAPI.dll` + `libusb-1.0.dll` (copied from the SDK). No compiler needed — koffi ships prebuilt binaries.
+- `bridge1/lib/` already contains `UHFAPI.dll` + `libusb-1.0.dll` (copied from the SDK). No compiler needed — koffi ships prebuilt binaries.
 
 ## Run it
 
 Two terminals:
 
 ```bash
-# 1) bridge
-cd bridge
+# 1) bridge (gate 1; use bridge2 for gate 2, which serves :3002)
+cd bridge1
 npm install
 npm run dev            # http://localhost:3001  (WS: ws://localhost:3001/ws)
 
@@ -43,7 +46,7 @@ Open **http://localhost:5173**, enter the reader IP/port (defaults prefilled), c
 ## Prove the DLL layer without the UI
 
 ```bash
-cd bridge
+cd bridge1
 npm run smoke                              # loads UHFAPI.dll, binds exports
 node test/smoke.js 192.168.99.202 8888 3   # + connect & 3s inventory if reader is live
 ```
@@ -106,7 +109,7 @@ curl -X POST http://localhost:3001/debug/gpi-config \
   -d '{"gpi1Byte":1,"activeHigh":false}'
 ```
 
-Config keys: `gpi1Byte`, `gpi2Byte`, `activeHigh`. Once confirmed, bake the values into `bridge/src/uhf.js` (`gpiConfig`).
+Config keys: `gpi1Byte`, `gpi2Byte`, `activeHigh`. Once confirmed, bake the values into `bridge1/src/uhf.js` (`gpiConfig`).
 
 ## Bridge REST API
 
@@ -159,7 +162,7 @@ bridge is served by running `sidecar-server.js` next to the reader:
 
 ```bash
 # on the READER PC (needs this repo + Node; hosts UHFAPI.dll):
-cd bridge && npm run sidecar          # listens on 0.0.0.0:3010 (SIDECAR_PORT to change)
+cd bridge1 && npm run sidecar          # listens on 0.0.0.0:3010 (SIDECAR_PORT to change)
 # allow inbound 3010 in Windows Firewall on this machine
 
 # on the BRIDGE PC:
@@ -170,7 +173,7 @@ The bridge's REST/WS surface is unchanged — Nexus keeps pointing at the bridge
 on the sidecar reuses `reader-connect.js`'s `autoConnect` (UsbOpen, then a COM sweep), so it
 inherits the phantom-link rejection; the sidecar's `/version` is gated on `isReaderAlive` so a
 dead reader cannot look alive to the bridge's liveness poll. The Java sidecar
-(`bridge/sidecar/`, Linux/Pi) speaks the same contract but is TCP-readers-only.
+(`bridge1/sidecar/`, Linux/Pi) speaks the same contract but is TCP-readers-only.
 
 ## Chainway CP30 printer — print + RFID encode
 
@@ -191,7 +194,7 @@ The CP30 speaks **ZPL**, so encoding a chip is just `^RFW,H^FD<hex EPC>^FS` insi
   read the printer's IP off its touchscreen and switch the transport in the dashboard.
 
 Test EPCs are sequential 96-bit values `<prefix><zero-padded hex counter>` (default prefix `AA00`),
-persisted in `bridge/data/printer.json` so they stay unique across restarts.
+persisted in `bridge1/data/printer.json` so they stay unique across restarts.
 
 ### Dashboard flow
 
@@ -203,7 +206,7 @@ the freshly printed EPC. A collapsible **raw ZPL console** is there for tuning e
 ### CLI (no UI needed)
 
 ```bash
-cd bridge
+cd bridge1
 npm run print                                   # next auto test EPC -> USB queue "Chainway CP30"
 node test/print-test.js AA0000000000000000000123  # explicit EPC (24 hex chars)
 node test/print-test.js --tcp 192.168.99.201:9100 # network transport instead
@@ -236,7 +239,7 @@ the line. Three CLI tools, run in order. All of them auto-detect the transport:
 `UsbOpen()` first, then every registered COM port.
 
 ```bash
-cd bridge
+cd bridge1
 node test/probe-reader.js      # 1. is a reader there, and what is it set to
 node test/tag-info.js          # 2. what chip is this tag, how big, is it locked
 node test/encode-tags.js       # 3. dry run — show what would be written
@@ -362,7 +365,7 @@ the shared Supabase schema both systems will meet at:
 
 ## Optional: Supabase forwarding
 
-Copy `bridge/.env.example` → `bridge/.env` and set:
+Copy `bridge1/.env.example` → `bridge1/.env` and set:
 
 ```
 SUPABASE_URL=https://xxxx.supabase.co

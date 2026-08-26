@@ -14,7 +14,7 @@ import java.util.concurrent.Executors
 /**
  * Thin wrapper around Chainway's UHF SDK (`RFIDWithUHFUART`), modelled on the verified
  * uhf-uart-demo (DeviceAPI build 20251103). This plays the same role the Node
- * `bridge/src/controller.js` plays for the UR4 gate: it owns ALL reader access and
+ * `bridge1/src/controller.js` plays for the UR4 gate: it owns ALL reader access and
  * serialises control calls on a single-thread executor so SDK calls never overlap.
  *
  * The SDK is callback-driven (not polling like the gate): inventory + location results

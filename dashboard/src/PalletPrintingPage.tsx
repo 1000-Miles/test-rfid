@@ -16,7 +16,7 @@ type ProductArt = { photoUrl: string | null; emoji: string | null };
  * The durable code (PLT-YIWU-MAIN-GATE-00000319) is what Nexus and the RFID tag
  * carry, and it stays the identity everywhere that matters. Nobody at a doorway
  * reads it aloud, though, so the screen shows the trailing sequence the same way
- * the printed label does (see palletCaption in bridge/src/printer/tspl.js) —
+ * the printed label does (see palletCaption in bridge1/src/printer/tspl.js) —
  * screen and label MUST agree or an operator holding the tag cannot match it to
  * the card in front of them.
  */
@@ -143,7 +143,7 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
   /** Product artwork, by SKU.
    *
    *  The pallet card's product lines come from the tag catalogue (sku, name,
-   *  cartons — see productBreakdown in bridge/src/outbox.js), which carries no
+   *  cartons — see productBreakdown in bridge1/src/outbox.js), which carries no
    *  picture. Nexus already resolves one per receiving line and the bridge
    *  passes it through as photoUrl on every DocLine, so the board feed is the
    *  source of truth for it rather than a second lookup of our own.

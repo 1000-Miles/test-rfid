@@ -11,4 +11,4 @@ build/
 *.jks
 keystore.properties
 # NOTE: app/libs/*.aar (the Chainway DeviceAPI SDK) IS committed on purpose,
-# mirroring how the gate repo commits bridge/lib/UHFAPI.dll.
+# mirroring how the gate repo commits bridge1/lib/UHFAPI.dll.
