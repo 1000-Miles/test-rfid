@@ -21,7 +21,7 @@ import type { EntryRow } from './types';
  *   DocumentView  — one document, opened from a tile
  *
  * RECEIVING ONLY. Shipping is out of scope for this gate, so nothing outbound
- * is fetched (bridge/src/board.js), counted (documents.ts) or drawn here: an
+ * is fetched (bridge1/src/board.js), counted (documents.ts) or drawn here: an
  * outbound passage leaves the board exactly as it was.
  *
  * Layout is a port of warehousePrototypeLayout/, expressed in the fluid unit

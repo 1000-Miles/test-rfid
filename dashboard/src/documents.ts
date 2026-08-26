@@ -3,7 +3,7 @@
  * received carton counts.
  *
  * RECEIVING ONLY. Shipping is out of scope for this gate: the bridge does not
- * fetch shipments (see bridge/src/board.js), nothing outbound is rendered, and
+ * fetch shipments (see bridge1/src/board.js), nothing outbound is rendered, and
  * an outbound passage is not counted here. `Direction` survives because the
  * bridge still STAMPS a direction on every passage — the board simply only
  * deals with the inbound half. Every filter that enforces that is marked
@@ -11,7 +11,7 @@
  *
  * ─────────────────────────────────────────────────────────────────────────
  * THE SEAM IS NOW WIRED. Today's board comes from real Nexus documents via
- * the bridge (`GET /board/documents`, see bridge/src/board.js), which proxies
+ * the bridge (`GET /board/documents`, see bridge1/src/board.js), which proxies
  * the receiving-batch feed and caches the last good response so a doorway with
  * no WAN still shows a board.
  *
@@ -179,7 +179,7 @@ export async function fetchDocuments(): Promise<FeedResponse> {
  * The SKU list is derived from whatever documents are currently loaded rather
  * than from a fixed table, so the simulator follows the live board. `AA00` +
  * a 20-hex counter matches the bridge's own test-label format
- * (bridge/src/printer/zpl.js `testEpc`); each SKU owns 100 counters starting at
+ * (bridge1/src/printer/zpl.js `testEpc`); each SKU owns 100 counters starting at
  * (index+1)*100, leaving 1–99 free for throwaway test prints.
  */
 const EPCS_PER_SKU = 100;

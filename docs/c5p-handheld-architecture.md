@@ -1,6 +1,6 @@
 # Chainway C5P Handheld — Architecture
 
-Companion to the UR4 gate (`bridge/` + `dashboard/`). This document specifies the
+Companion to the UR4 gate (`bridge1/` + `dashboard/`). This document specifies the
 in‑facility stock‑audit handheld: its **screens**, the **Supabase schema** shared with
 the gate, and the **Kotlin ↔ WebView bridge contract** that lets the existing React
 dashboard run on‑device.
@@ -273,7 +273,7 @@ Serialize *control* calls (start/stop/power) on a single dispatcher, as the gate
   then `startInventoryTag(InventoryParameter)` → `boolean`; end with `stopInventory()`.
   Single shot: `inventorySingleTag()` → `UHFTAGInfo`.
 - **Tag data:** `UHFTAGInfo` → `getEPC()`, `getTid()`, `getRssi()` (String, dBm), `getCount()`,
-  `getReserved()`. No manual frame parsing (unlike the gate's `bridge/src/uhf.js` `parseTag`).
+  `getReserved()`. No manual frame parsing (unlike the gate's `bridge1/src/uhf.js` `parseTag`).
 - **Locate / geiger — CONFIRMED present:**
   `startLocation(context, String epc, IUHF.Bank_EPC, 32, IUHFLocationCallback)` → `boolean`;
   callback `getLocationValue(int value, boolean valid)` where **`value` is 0–100 proximity**

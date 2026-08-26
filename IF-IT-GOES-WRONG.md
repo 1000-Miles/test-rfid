@@ -15,7 +15,7 @@ Interactive version (flowchart / workflow / implementation tabs): https://claude
 **The problem.** The warehouse WAN link dies mid-receiving. Every carton crossing the gate still has to end up in Nexus, exactly once, in the order it happened — hours or days later.
 
 **Already implemented**
-- Every gate event is appended and fsynced to `data/movement-log.jsonl` **before any network attempt**; the write is the record, the network is just delivery (`bridge/src/outbox.js`).
+- Every gate event is appended and fsynced to `data/movement-log.jsonl` **before any network attempt**; the write is the record, the network is just delivery (`bridge1/src/outbox.js`).
 - Each event carries a permanent ID (`gateId:generation:seq`) stamped before journaling; Nexus dedupes on it (`operations_gate_ingest` keys idempotency on `source_event_id`).
 - Retry pump: backoff 1s→60s cap, a 15-second timer re-wakes it forever, no retry limit, no expiry. Drain is strictly oldest-first, throttled ~5 events/s.
 - An event leaves the queue only on a verified `applied` acknowledgement with the matching event ID. Permanent rejections (HTTP 400) go to `movement-dead.jsonl`, never silently dropped.
@@ -32,7 +32,7 @@ Interactive version (flowchart / workflow / implementation tabs): https://claude
 
 **Already implemented**
 - fsync-before-acknowledge: an event shown on screen is already on disk, so a cut cannot lose an accepted event.
-- Cursor and pallet counters are written atomically (temp file + rename, `bridge/src/atomic-write.js`); pallet numbers hit disk before they are handed out, so a reboot can't reissue one.
+- Cursor and pallet counters are written atomically (temp file + rename, `bridge1/src/atomic-write.js`); pallet numbers hit disk before they are handed out, so a reboot can't reissue one.
 - Boot repair: a journal line torn mid-write is quarantined and the file truncated to the last complete record; interior corruption pauses delivery on purpose and demands a human (`_repairJournal`).
 - Recovery on power-return is automatic: journal + cursor restore the exact queue and the pump resumes alone.
 - The catch-up path exists in Nexus: Operations → Receiving → the batch → 4-step wizard (Source → Received with **+ Manually receive** → Pallets with floorplan slot placement → Sync/Complete).
@@ -48,7 +48,7 @@ Interactive version (flowchart / workflow / implementation tabs): https://claude
 **The problem.** The receiving screen freezes or the browser dies mid-shift, and the operator can't tell whether the last pallet was recorded.
 
 **Already implemented**
-- The browser is only a viewer. A movement is broadcast to dashboards **only after** the journal append succeeds — a disk failure means "not counted, not broadcast", loudly (`bridge/src/server.js:363`).
+- The browser is only a viewer. A movement is broadcast to dashboards **only after** the journal append succeeds — a disk failure means "not counted, not broadcast", loudly (`bridge1/src/server.js:363`).
 - The dashboard detects a silent WebSocket and reconnects itself (`dashboard/src/useBridge.ts`).
 
 **Not implemented**
@@ -62,7 +62,7 @@ Interactive version (flowchart / workflow / implementation tabs): https://claude
 - Re-reads can never double: the bridge counts one carton once, and Nexus dedupes per EPC-per-batch **and** per physical box (a reprinted label's sibling EPCs collapse onto the same carton — `recordReceiveScanCore`).
 - Gate and handheld feed the identical credit path; slow re-runs just add the tags that were missed.
 - Expected vs received is tracked per line, so the shortfall is visible on the batch.
-- Signal tuning tooling exists (`bridge/test/calibrate-signal.js`).
+- Signal tuning tooling exists (`bridge1/test/calibrate-signal.js`).
 
 **Not implemented**
 - **No undercount alarm.** The system shows 14/20 but doesn't flag or block anything; noticing is on the operator (count by eye, check the packing list).
@@ -86,7 +86,7 @@ Interactive version (flowchart / workflow / implementation tabs): https://claude
 
 **Already implemented**
 - Each tag resolves to its product; if the batch has no line for it, the scan lands as status **`unexpected`** — logged, but the line is never credited (`recordReceiveScanCore`).
-- On the bridge, contested cartons are journaled but never queued, never counted into a pallet session, and never printed on a pallet tag (`bridge/src/outbox.js`).
+- On the bridge, contested cartons are journaled but never queued, never counted into a pallet session, and never printed on a pallet tag (`bridge1/src/outbox.js`).
 
 **Not implemented**
 - **There is no "Confirm blocked" button** — that flowchart phrase is shorthand. The real mechanism is "never credited, kept off pallets"; nothing visibly locks a screen.
@@ -142,4 +142,4 @@ Interactive version (flowchart / workflow / implementation tabs): https://claude
 
 ---
 
-*Verified 2026-08-25 against `bridge/src/outbox.js`, `bridge/src/server.js`, `dashboard/src/useBridge.ts`, `dashboard/src/PalletPrintingPage.tsx` (this repo) and `src/app/operations/receiving/receiving-client.tsx`, `src/lib/operations-receiving-write.ts`, `src/app/operations/transfers/transfers-client.tsx` (1000m-nexus).*
+*Verified 2026-08-25 against `bridge1/src/outbox.js`, `bridge1/src/server.js`, `dashboard/src/useBridge.ts`, `dashboard/src/PalletPrintingPage.tsx` (this repo) and `src/app/operations/receiving/receiving-client.tsx`, `src/lib/operations-receiving-write.ts`, `src/app/operations/transfers/transfers-client.tsx` (1000m-nexus).*

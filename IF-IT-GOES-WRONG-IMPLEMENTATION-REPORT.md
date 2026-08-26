@@ -93,7 +93,7 @@ The main design principle is:
 - Linux deployment documentation includes installation and health-check instructions.
 - If automatic restart does not restore service, staff can continue with controlled manual receiving while the bridge is recovered.
 
-**Deployment requirement:** Run `bridge/scripts/install-systemd.sh` on the production Linux bridge and verify the service health endpoint.
+**Deployment requirement:** Run `bridge1/scripts/install-systemd.sh` on the production Linux bridge and verify the service health endpoint.
 
 **Code status:** Implemented and committed in `c2a4d07`.
 
@@ -110,7 +110,7 @@ The main design principle is:
 
 **Recovery:** If the product legitimately belongs to the delivery, add it to an active receiving batch in Nexus, refresh the gate documents, and scan it again. Continue receiving other goods throughout.
 
-**Code status:** Implemented in `dashboard/src/GateBoard.tsx`; currently uncommitted in the bridge/dashboard repository.
+**Code status:** Implemented in `dashboard/src/GateBoard.tsx`; currently uncommitted in the bridge1/dashboard repository.
 
 ### 7. Expected and received counts do not match
 

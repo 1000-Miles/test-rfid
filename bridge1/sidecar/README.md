@@ -13,14 +13,14 @@ Needs a JDK (`javac`), not just a runtime. This machine ships only a JRE:
 
 ```bash
 sudo apt install -y openjdk-21-jdk-headless      # one time
-cd bridge/sidecar
+cd bridge1/sidecar          # or bridge2/sidecar
 javac -cp ReaderAPI20240822.jar UhfSidecar.java  # writes UhfSidecar*.class
 ```
 
 Then restart the sidecar so it loads the new classes:
 
 ```bash
-pkill -f 'UhfSidecar' && cd bridge && npm run sidecar
+pkill -f 'UhfSidecar' && cd bridge1 && npm run sidecar   # or bridge2
 ```
 
 ## Symptom of a stale build

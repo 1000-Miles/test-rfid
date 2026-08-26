@@ -30,7 +30,7 @@ needed). `UHF_DRIVER=sidecar` forces it on Windows too, for testing.
 sudo apt install -y nodejs npm default-jre-headless   # Node 18+, Java 11+
 
 # 2. Bridge deps
-cd bridge && npm install
+cd bridge1 && npm install        # ...and again in bridge2 for the second gate
 
 # 3. Compile the sidecar once (or copy the .class files from a Windows checkout)
 cd sidecar && javac -cp ReaderAPI20240822.jar UhfSidecar.java && cd ..
@@ -75,7 +75,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-WorkingDirectory=/opt/test-rfid/bridge
+WorkingDirectory=/opt/test-rfid/bridge1   # bridge2 for the second gate
 ExecStart=/usr/bin/node src/server.js
 Restart=always
 RestartSec=5

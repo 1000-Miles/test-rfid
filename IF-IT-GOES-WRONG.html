@@ -570,14 +570,14 @@ const SCENES=[sInternet,sPower,sApp,sReader,sServer,sSku,sCount,sTag,sPrinter,sL
 /* ——— implementation (dev) data — how each safeguard is built, and the fix plan ——— */
 const IMPL=[
  {built:[
-   ["Every event is written and fsynced to disk before any network attempt","bridge/src/outbox.js"],
+   ["Every event is written and fsynced to disk before any network attempt","bridge1/src/outbox.js"],
    ["Permanent event ID (gate + generation + sequence) — Nexus dedupes on it","operations_gate_ingest"],
    ["Retry pump: backoff 1s→60s, a 15s timer re-wakes it, drains oldest-first at ~5/s"],
    ["An event leaves the queue only on a verified \"applied\" acknowledgement with a matching ID"],
    ["The board warns at 5 min; at 30 min it says call IT and keep receiving on the local queue","dashboard/src/App.tsx"],
    ["If local saving fails, the alert switches workers to the manual outage log instead of stopping work","dashboard/src/App.tsx"],
    ["Board credits retire per exact event ID — pending or rejected IDs stay visible","dashboard/src/documents.ts"],
-   ["The document feed exposes exact pending and dead-letter event IDs","bridge/src/server.js"]],
+   ["The document feed exposes exact pending and dead-letter event IDs","bridge1/src/server.js"]],
   fix:[
    ["Check /status: queueDepth, oldestPendingAt, lastError"],
    ["replay() re-sends any range of history — dedupe makes it safe"],
@@ -596,7 +596,7 @@ const IMPL=[
    ["All state lives on the bridge — the browser is only a viewer","dashboard/src/useBridge.ts"],
    ["A silent socket is detected and reconnected automatically"],
    ["Movements broadcast only after the local storage append succeeds"],
-   ["Bridge status reconstructs the last accepted event from the durable local storage after restart","bridge/src/outbox.js"],
+   ["Bridge status reconstructs the last accepted event from the durable local storage after restart","bridge1/src/outbox.js"],
    ["LAST SAVED shows pallet/EPC, time, event ID, and pending/delivered/not-credited state","dashboard/src/App.tsx"]],
   fix:[
    ["After a reload, use LAST SAVED - only re-scan when there is no durable record"],
@@ -608,7 +608,7 @@ const IMPL=[
    ["Confirm and print requires the operator's physical count to equal the RFID count","dashboard/src/PalletPrintingPage.tsx"],
    ["A mismatch names both totals and directs re-run or Manual Receive without stopping work"]],
   fix:[
-   ["Tune antenna power and the read zone","bridge/test/calibrate-signal.js"],
+   ["Tune antenna power and the read zone","bridge1/test/calibrate-signal.js"],
    ["Fall back to + Manually receive for the last stragglers"]]},
  {built:[
    ["local storage, cursor, counters — all on disk; a dead process loses nothing"],
@@ -618,7 +618,7 @@ const IMPL=[
    ["enqueueFailures > 0 in /status = the disk itself is failing — escalate"]]},
  {built:[
    ["A tag with no open batch is stamped unexpected by the bridge's live receiving verdict"],
-   ["Unexpected events are stored locally but never queued, credited, or palletized","bridge/src/outbox.js"],
+   ["Unexpected events are stored locally but never queued, credited, or palletized","bridge1/src/outbox.js"],
    ["The gate board keeps the product visible with a solid red NO RECEIVING card","dashboard/src/GateBoard.tsx"],
    ["The Printing page carries the same item and explains how to add it to receiving","dashboard/src/PalletPrintingPage.tsx"]],
   fix:[

@@ -24,8 +24,8 @@
 ### Bridge and dashboard
 
 ```text
-node bridge/test/outbox-offline.js
-node bridge/test/passage-toggle.js
+node bridge1/test/outbox-offline.js
+node bridge1/test/passage-toggle.js
 npx tsc --noEmit             (dashboard)
 ```
 
