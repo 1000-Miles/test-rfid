@@ -274,6 +274,16 @@ export function useBridge(): BridgeState {
           case 'receiving-reset':
             // Timestamp, not a flag: consumers react to it CHANGING.
             setReceivingResetAt(msg.timestamp);
+            // The console's own read tallies are per-page-load and nothing ever
+            // cleared them, so after a wipe they kept counting from the previous
+            // run. That is not cosmetic: "75 unique EPCs" on screen against 59
+            // received sent us hunting for 16 cartons the gate had refused, when
+            // the 75 was simply both runs added together and this run had only
+            // ever seen 59 tags. A counter that outlives the data it counts is
+            // worse than no counter.
+            setTotalReads(0);
+            setUniqueEpcs(0);
+            seenRef.current = new Set();
             // The open pallet card and the last passage summary both describe
             // cartons Nexus has just un-received, so they are now claims about
             // something that no longer exists. Nothing else clears them — they

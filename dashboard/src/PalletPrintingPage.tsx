@@ -3,6 +3,7 @@ import { BRIDGE_HTTP } from './api';
 import { fetchDocuments } from './documents';
 import type { BridgeState } from './useBridge';
 import type { PalletProduct } from './types';
+import { COUNT_SETTLE, useSettled } from './useSettled';
 
 type Notice = { kind: 'success' | 'error'; text: string } | null;
 
@@ -47,8 +48,33 @@ type PalletPrinterInfo = {
 };
 
 export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) {
-  const workflow = bridge.palletWorkflow;
   const noReceiving = bridge.entries.find((entry) => entry.direction === 'in' && entry.unexpected === 'no-open-batch') ?? null;
+  /**
+   * `liveWorkflow` is the bridge's current truth; `workflow` is what the card
+   * SHOWS. They differ by at most one settle window, and the split is deliberate.
+   *
+   * The bridge re-announces the open pallet on every carton, and cartons arrive
+   * about one every 270ms — so the Cartons figure and the product lines used to
+   * climb 1, 2, 3 … in front of whoever was waiting to press Print, never
+   * holding still long enough to read. The card now shows the settled figure.
+   *
+   * ACTIONS keep using `liveWorkflow`. A printed label and a closed pallet must
+   * carry the bridge's count, not the one that happened to be on screen — the
+   * operator presses Print while cartons may still be arriving, and the page
+   * already says so when the two disagree (see ProductLines).
+   *
+   * A new pallet, a print result, or a count that went DOWN all bypass the hold:
+   * those are not a figure accumulating, they are a different subject, and
+   * showing the previous one for even half a second is wrong.
+   */
+  const liveWorkflow = bridge.palletWorkflow;
+  const workflow = useSettled(liveWorkflow, {
+    ...COUNT_SETTLE,
+    immediate: (next, shown) =>
+      next?.type !== shown?.type ||
+      next?.requestId !== shown?.requestId ||
+      (next?.cartonCount ?? 0) < (shown?.cartonCount ?? 0),
+  });
   const synced = Boolean(workflow && bridge.passageComplete?.passageId === workflow.passageId);
   const [printing, setPrinting] = useState(false);
   const [reprinting, setReprinting] = useState<string | null>(null);
@@ -223,6 +249,7 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
     : null;
 
   const closeAndPrint = async () => {
+    const workflow = liveWorkflow; // the bridge's count, not the settled display
     if (!workflow || workflow.type !== 'pallet-open') return;
     const checked = Math.floor(Number(physicalCount));
     if (!Number.isFinite(checked) || checked < 1) {
@@ -260,6 +287,7 @@ export default function PalletPrintingPage({ bridge }: { bridge: BridgeState }) 
 
   /** Reprint the pallet currently sitting on the gate card. */
   const printCurrent = async () => {
+    const workflow = liveWorkflow; // as above — the label carries the real count
     if (!workflow?.palletCode) return;
     setPrinting(true);
     setNotice(null);

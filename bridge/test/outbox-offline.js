@@ -170,7 +170,7 @@ async function main() {
     freshScratch();
     const o = makeOutbox();
     o.url = 'http://nexus.test/api/movement';
-    const entry = { event: { eventId: 'test-gate:9' } };
+    const entry = { event: { eventId: 'test-gate:g1:9' } };
     const originalFetch = global.fetch;
     try {
       global.fetch = async () => new Response('<html>proxy page</html>', { status: 200 });
@@ -181,18 +181,18 @@ async function main() {
       r = await o._send(entry);
       assert(!r.ok && /mismatch/.test(r.error), 'mismatched eventId is retryable');
 
-      global.fetch = async () => Response.json({ ok: true, state: 'mystery', eventId: 'test-gate:9' });
+      global.fetch = async () => Response.json({ ok: true, state: 'mystery', eventId: 'test-gate:g1:9' });
       r = await o._send(entry);
       assert(!r.ok && /invalid acknowledgement/.test(r.error), 'unknown state is retryable');
 
       global.fetch = async () => Response.json(
-        { ok: true, state: 'accepted', eventId: 'test-gate:9' },
+        { ok: true, state: 'accepted', eventId: 'test-gate:g1:9' },
         { status: 202 }
       );
       r = await o._send(entry);
       assert(!r.ok, 'durable-but-pending 202 stays queued until effects apply');
 
-      global.fetch = async () => Response.json({ ok: true, state: 'applied', eventId: 'test-gate:9' });
+      global.fetch = async () => Response.json({ ok: true, state: 'applied', eventId: 'test-gate:g1:9' });
       r = await o._send(entry);
       assert(r.ok && r.state === 'applied', 'matching applied acknowledgement is delivered');
     } finally {
@@ -261,10 +261,12 @@ async function main() {
   console.log('no-IR pallet sessions: quiet gaps do not close; print or deadline does');
   {
     freshScratch();
-    // Keep the deadline comfortably above Windows fsync latency. An 80ms test
-    // window raced the durable journal writes and could close before the first
-    // assertion even though production uses 60 seconds.
-    const o = new Outbox({ dataDir: SCRATCH, gateId: 'test-gate', batchUrl: 'http://nexus.test/api/movement/batch', toggleBatchQuietMs: 10, togglePalletWindowMs: 800 });
+    // The window has to outlast the journal fsyncs (three here, and Windows
+    // fsync latency is the worst case), or the deadline is already in the past
+    // by the time it is scheduled and the pallet closes on the spot — which
+    // looked like "quiet gaps close the pallet" on any slow disk. Production
+    // uses 60 seconds.
+    const o = new Outbox({ dataDir: SCRATCH, gateId: 'test-gate', batchUrl: 'http://nexus.test/api/movement/batch', toggleBatchQuietMs: 10, togglePalletWindowMs: 4_000 });
     const originalFetch = global.fetch;
     const payloads = [];
     global.fetch = async (_url, init) => {
@@ -288,8 +290,12 @@ async function main() {
       o.enqueue({ epc: 'BB04', direction: 'in', method: 'toggle', timestamp: new Date().toISOString() });
       const second = o.openPallet();
       assert(second.requestId !== first.requestId && second.palletCode !== first.palletCode, 'next carton opens a distinct pallet');
-      await new Promise((resolve) => setTimeout(resolve, 900));
+      // Nobody presses Print on this one: the fixed deadline must close it and
+      // deliver it anyway, pallet code and all. This is the unattended path.
+      const openedAt = Date.parse(second.openedAt);
+      await new Promise((resolve) => setTimeout(resolve, Math.max(50, openedAt + 4_000 - Date.now()) + 200));
       assert(payloads.length === 2 && payloads[1].events.length === 1, 'fixed deadline auto-closes and sends the next pallet');
+      assert(payloads[1].palletCode === second.palletCode, 'the unattended pallet is delivered WITH its pallet code');
     } finally {
       global.fetch = originalFetch;
       o.stop();
@@ -314,6 +320,32 @@ async function main() {
     } finally {
       secondProcess.stop();
     }
+  }
+
+  console.log('pallet window: an operator setting outlives the restart that used to erase it');
+  {
+    freshScratch();
+    const first = new Outbox({ dataDir: SCRATCH, gateId: 'test-gate', log: () => {}, togglePalletWindowMs: 60_000 });
+    assert(first.togglePalletWindowMs === 60_000, 'starts on the configured default');
+    first.setPalletWindowMs(120_000);
+    first.stop();
+
+    // Same env/option as before — only the operator's choice should differ.
+    const second = new Outbox({ dataDir: SCRATCH, gateId: 'test-gate', log: () => {}, togglePalletWindowMs: 60_000 });
+    assert(second.togglePalletWindowMs === 120_000, 'the saved window wins over the env default');
+    // ...and it decides real pallets, not just the reported number.
+    second.enqueue({ epc: 'DD01', direction: 'in', method: 'toggle', timestamp: new Date().toISOString(), palletSession: false });
+    second.stop();
+
+    fs.writeFileSync(path.join(SCRATCH, 'pallet-window.json'), '{"togglePalletWindowMs":50}\n');
+    const third = new Outbox({ dataDir: SCRATCH, gateId: 'test-gate', log: () => {}, togglePalletWindowMs: 60_000 });
+    assert(third.togglePalletWindowMs === 60_000, 'a saved window the setter would refuse is ignored, not obeyed');
+    third.stop();
+
+    fs.writeFileSync(path.join(SCRATCH, 'pallet-window.json'), 'not json at all');
+    const fourth = new Outbox({ dataDir: SCRATCH, gateId: 'test-gate', log: () => {}, togglePalletWindowMs: 60_000 });
+    assert(fourth.togglePalletWindowMs === 60_000, 'an unreadable file falls back to the default');
+    fourth.stop();
   }
 
   fs.rmSync(SCRATCH, { recursive: true, force: true });

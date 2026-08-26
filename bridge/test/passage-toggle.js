@@ -248,6 +248,68 @@ async function main() {
     assert(events.length === 1 && events[0]?.direction === 'in', 'strong reads receive normally right after');
   }
 
+  // --- fast count (toggleFastCount) -----------------------------------------
+  // The window cannot change a no-IR outcome: direction is not inferred from
+  // the reads, and the noise floor is the only thing they decide. These pin
+  // down that firing early skips the WAIT and nothing else — same receipt, same
+  // gates, and the floor still holds.
+
+  console.log('fast count: OFF by default — the carton waits for the window');
+  {
+    const { d, events } = makeDetector();
+    d.catalog = { AF01: fresh() };
+    assert(d.toggleFastCount === false, 'a detector built without the option holds the carton');
+    await burst(d, 'AF01', 2); // minReads satisfied, but ~40ms < quietMs
+    assert(events.length === 0, 'nothing has fired yet');
+    await sleep(250);
+    assert(events.length === 1, 'and it arrives when the window closes');
+  }
+
+  console.log('fast count: ON — the carton counts on the read that decides it');
+  {
+    const { d, events } = makeDetector({ toggleFastCount: true });
+    d.catalog = { AF02: fresh() };
+    await burst(d, 'AF02', 2); // ~40ms, well inside quietMs=100 and maxWindow=500
+    assert(events.length === 1, 'it fired without waiting for the window');
+    assert(events[0]?.basis === 'on-open-batch' && events[0]?.unexpected === null, 'the receipt is the same one');
+    assert(events[0]?.reads === 2, 'and it carries the reads it decided on');
+    await sleep(250);
+    assert(events.length === 1, 'the window closing does not fire it again');
+  }
+
+  console.log('fast count: ON — the noise floor still decides, it just decides sooner');
+  {
+    const { d, events, dropped } = makeDetector({ toggleFastCount: true });
+    d.catalog = { AF03: fresh() };
+    read(d, 'AF03'); // one read, below toggleMinReads=2
+    assert(events.length === 0, 'a single ghost read does not fire early');
+    await sleep(250);
+    assert(events.length === 0 && dropped.length === 1, 'it is still dropped as noise, and still reported');
+  }
+
+  console.log('fast count: ON — the trailing RF tail is still swallowed by the re-arm');
+  {
+    const { d, events } = makeDetector({ toggleFastCount: true });
+    d.catalog = { AF04: fresh() };
+    await burst(d, 'AF04', 2);
+    assert(events.length === 1, 'counted immediately');
+    await burst(d, 'AF04', 6); // the 10-20s tail, compressed
+    await sleep(250);
+    assert(events.length === 1, 'the tail never becomes a second receipt');
+  }
+
+  console.log('fast count: live-switchable, and reported in summary()');
+  {
+    const { d } = makeDetector();
+    assert(d.summary().toggleFastCount === false, 'summary answers for it');
+    d.setConfig({ toggleFastCount: true });
+    assert(d.toggleFastCount === true && d.summary().toggleFastCount === true, 'setConfig turns it on');
+    d.setConfig({ quietMs: 120 });
+    assert(d.toggleFastCount === true, 'an unrelated tuning save leaves it alone');
+    d.setConfig({ toggleFastCount: false });
+    assert(d.toggleFastCount === false, 'and back off again');
+  }
+
   console.log('restart: a carton received before the restart is not received again');
   {
     const { d, events } = makeDetector();

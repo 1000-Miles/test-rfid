@@ -42,6 +42,13 @@ export interface DocLine {
   name: string;
   expected: number;
   received: number;
+  /**
+   * True when `received` is a LIVE COUNT of cartons read, not progress toward
+   * `expected`. The board renders it bare — no denominator, no bar, no percent —
+   * because a doorway is being asked "how many have gone through", and a
+   * fraction invites the reader to work out what is missing instead.
+   */
+  countOnly?: boolean;
   /** Product photo, resolved by Nexus from the linked idea's icon_image_url. */
   photoUrl?: string | null;
   /** Emoji fallback when there's no photo yet — same precedence Nexus itself uses. */

@@ -4,6 +4,7 @@ import { accent, C, dueChip, Icon, Tile, u } from './boardKit';
 import DirectionView from './DirectionView';
 import Qr from './Qr';
 import type { SoundState } from './useAudioGate';
+import { COUNT_SETTLE, useSettled } from './useSettled';
 import type { EntryRow } from './types';
 
 /**
@@ -46,6 +47,13 @@ const IDLE_TIMEOUT_MS = 45_000;
 const PALLET_IDLE_CLEAR_MS = 10 * 60_000;
 /** How long a just-counted product stays highlighted on the board. */
 const FOCUS_MS = 9_000;
+/**
+ * The live figures SETTLE rather than ticking: cartons reach this panel about
+ * one every 270ms, so without it the pallet figure counts 1, 2, 3 … up to its
+ * total in front of the operator and is only trustworthy once it stops. The
+ * timings, and why they are what they are, live with the hook — see
+ * COUNT_SETTLE in useSettled.ts.
+ */
 
 export default function GateBoard(props: { board: GateBoardApi; entries: EntryRow[]; sound: SoundState; onOpenControls: () => void }) {
   const { board } = props;
@@ -64,10 +72,28 @@ export default function GateBoard(props: { board: GateBoardApi; entries: EntryRo
   // A contested carton also carries no passageId, so it used to become its own
   // `liveBatchId` and REPLACE the panel — one stray tag wiping a real passage
   // off the screen.
-  const inboundEntries = useMemo(
+  const arrivingEntries = useMemo(
     () => props.entries.filter((entry) => entry.direction === 'in' && !entry.unexpected && entry.known),
     [props.entries]
   );
+  /**
+   * The panel reads from the SETTLED list, never the live one.
+   *
+   * Settling here rather than on the rendered figures keeps the one-source-of-
+   * truth property the rest of this component depends on: the batch id, the
+   * totals, the product tiles, the pallet caption and the focus highlight are
+   * all derived from this array, so they move together in a single step instead
+   * of the number jumping while the caption still describes the carton before.
+   *
+   * A list that got SHORTER is never held: that is a receiving reset or a
+   * cleared board withdrawing cartons, and a figure that has been taken back
+   * must go immediately — holding it would leave the panel showing stock Nexus
+   * no longer thinks was received.
+   */
+  const inboundEntries = useSettled(arrivingEntries, {
+    ...COUNT_SETTLE,
+    immediate: (next, shown) => next.length < shown.length,
+  });
   // Coarse clock, only so the expiry below re-evaluates without a passage. 5s
   // granularity on a 10-minute boundary is invisible and costs one render.
   const [clockTick, setClockTick] = useState(() => Date.now());
@@ -111,35 +137,37 @@ export default function GateBoard(props: { board: GateBoardApi; entries: EntryRo
    */
   const liveDocs = useMemo<GateDoc[]>(() => {
     if (!latestEntry || !liveBatchId) return [];
-    const skusRead = new Set(liveEntries.map((entry) => entry.item?.sku).filter(Boolean));
-    const passageNote = `${liveEntries.length} carton${liveEntries.length === 1 ? '' : 's'} this passage`;
-    const touched = docs.filter((doc) => doc.lines.some((line) => skusRead.has(line.sku)));
-    if (touched.length) {
-      return touched.map((doc) => ({
-        ...doc,
-        meta: latestEntry.palletCode ? `${latestEntry.palletCode} · ${passageNote}` : passageNote,
-      }));
-    }
+    const passageNote = `${liveEntries.length} carton${liveEntries.length === 1 ? '' : 's'} read`;
 
-    // Nothing matched a document — the feed has not answered yet (cold start).
-    // Synthesise from the passage rather than paint an empty panel, which would
-    // read as "nothing arrived".
+    // THIS PALLET's cartons, counted here — deliberately not the batch's running
+    // total. A doorway is asked "how many have gone through", and answering with
+    // a fraction invites the reader to work out what is missing, when the rest
+    // may simply be on the next pallet. The batch totals still live in Nexus and
+    // on the kiosk; they are not this panel's job.
     const counts = new Map<string, { count: number; entry: EntryRow }>();
     for (const entry of liveEntries) {
       const sku = entry.item?.sku || entry.epc;
       const previous = counts.get(sku);
       counts.set(sku, { count: (previous?.count ?? 0) + 1, entry });
     }
-    const lines: DocLine[] = [...counts.entries()].map(([sku, value]) => ({
-      sku,
-      name: value.entry.item?.name || sku,
-      expected: value.count,
-      received: value.count,
-      photoUrl: null,
-      emoji: null,
-      unitsPerCarton: null,
-    }));
-    return [{ id: liveBatchId, title: latestEntry.palletCode || `BATCH ${liveBatchId}`, dir: 'in', party: 'Current gate reading', meta: passageNote, due: 0, lines }];
+    // Artwork and the proper product name come from the document feed when it
+    // knows the SKU; the passage alone only carries what the catalogue gave it.
+    const fromDocs = new Map<string, DocLine>();
+    for (const doc of docs) for (const line of doc.lines) if (!fromDocs.has(line.sku)) fromDocs.set(line.sku, line);
+    const lines: DocLine[] = [...counts.entries()].map(([sku, value]) => {
+      const known = fromDocs.get(sku);
+      return {
+        sku,
+        name: known?.name || value.entry.item?.name || sku,
+        expected: value.count,
+        received: value.count,
+        countOnly: true,
+        photoUrl: known?.photoUrl ?? null,
+        emoji: known?.emoji ?? null,
+        unitsPerCarton: null,
+      };
+    });
+    return [{ id: liveBatchId, title: latestEntry.palletCode || 'CURRENT PALLET', dir: 'in', party: 'Reading now', meta: passageNote, due: 0, lines }];
   }, [docs, latestEntry, liveBatchId, liveEntries]);
   const liveTotals = useMemo(() => sumTotals(liveDocs), [liveDocs]);
   const liveFocus = latestEntry && liveDocs[0] ? `${liveDocs[0].id}-${latestEntry.item?.sku || latestEntry.epc}` : null;
@@ -458,6 +486,9 @@ const bucketOf = (line: DocLine): (typeof BUCKETS)[number]['key'] =>
 function DirectionSection(props: { dir: Direction; docs: GateDoc[]; totals: { received: number; expected: number }; focus: string | null; onOpen: (id: string) => void }) {
   const a = accent(props.dir);
   const p = pct(props.totals.received, props.totals.expected);
+  // Every line on this panel is a live count, so the header must not imply a
+  // target either — a bare number and a bar disagreeing looks like a fault.
+  const countOnly = props.docs.length > 0 && props.docs.every((d) => d.lines.every((l) => l.countOnly));
   const noun = 'POs';
   const late = props.docs.filter((d) => d.due < 0).length;
   const dueToday = props.docs.filter((d) => d.due === 0).length;
@@ -482,23 +513,46 @@ function DirectionSection(props: { dir: Direction; docs: GateDoc[]; totals: { re
   // The TV is for live progress, not the future backlog: unstarted products
   // remain represented in the total above, while the canvas focuses on cartons
   // actively arriving or already received.
-  const visibleBuckets = BUCKETS.filter((bucket) => bucket.key !== 'todo');
+  // A live count has no part/full distinction to draw — every line is simply a
+  // carton that has gone through. Splitting it across two columns asked the
+  // reader to compare against a target this panel deliberately does not show,
+  // and left one column empty for most of a pallet.
+  const visibleBuckets = countOnly
+    ? ([{ key: 'part', label: { in: 'CURRENTLY RECEIVING', out: 'CURRENTLY LOADING' }, empty: { in: 'Nothing yet', out: 'Nothing yet' } }] as const)
+    : BUCKETS.filter((bucket) => bucket.key !== 'todo');
 
   return (
     <div style={{ flex: empty ? '0 0 auto' : 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: u(10) }}>
       <div style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: u(18) }}>
         <div style={{ fontSize: u(15), fontWeight: 800, letterSpacing: '0.18em', color: a.text, flex: '0 0 auto' }}>
-          · EXPECTED ARRIVAL
+          {countOnly ? '· READING NOW' : '· EXPECTED ARRIVAL'}
         </div>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: u(10), flex: '0 0 auto' }}>
-          <div style={{ fontSize: u(46), fontWeight: 800, lineHeight: 1, letterSpacing: u(-2), fontVariantNumeric: 'tabular-nums' }}>{props.totals.received}</div>
-          <div style={{ fontSize: u(26), fontWeight: 700, color: C.faint, fontVariantNumeric: 'tabular-nums' }}>/ {props.totals.expected}</div>
-          <div style={{ fontSize: u(13), fontWeight: 700, letterSpacing: '0.14em', color: C.faint }}>CARTONS</div>
+          <div
+            style={{
+              // Much larger when it is the ONLY number on the panel: this is
+              // read from across a warehouse, and with the fraction, bar and
+              // percent gone there is room for it to carry the header alone.
+              fontSize: u(countOnly ? 140 : 46),
+              fontWeight: 800,
+              lineHeight: 1,
+              letterSpacing: u(countOnly ? -7 : -2),
+              fontVariantNumeric: 'tabular-nums',
+            }}
+          >
+            {props.totals.received}
+          </div>
+          {!countOnly && <div style={{ fontSize: u(26), fontWeight: 700, color: C.faint, fontVariantNumeric: 'tabular-nums' }}>/ {props.totals.expected}</div>}
+          <div style={{ fontSize: u(countOnly ? 22 : 13), fontWeight: 700, letterSpacing: '0.14em', color: C.faint }}>CARTONS</div>
         </div>
-        <div style={{ flex: '0 0 auto', width: u(260), height: u(12), borderRadius: u(8), background: C.track, overflow: 'hidden' }}>
-          <div style={{ height: '100%', borderRadius: u(8), width: `${p}%`, background: p >= 100 ? C.green : a.fill, transition: 'width .3s ease' }} />
-        </div>
-        <div style={{ fontSize: u(19), fontWeight: 800, color: a.text, fontVariantNumeric: 'tabular-nums', flex: '0 0 auto' }}>{p}%</div>
+        {!countOnly && (
+          <>
+            <div style={{ flex: '0 0 auto', width: u(260), height: u(12), borderRadius: u(8), background: C.track, overflow: 'hidden' }}>
+              <div style={{ height: '100%', borderRadius: u(8), width: `${p}%`, background: p >= 100 ? C.green : a.fill, transition: 'width .3s ease' }} />
+            </div>
+            <div style={{ fontSize: u(19), fontWeight: 800, color: a.text, fontVariantNumeric: 'tabular-nums', flex: '0 0 auto' }}>{p}%</div>
+          </>
+        )}
         <div style={{ flex: 1 }} />
         <div style={{ fontSize: u(17), fontWeight: 600, color: C.muted, flex: '0 0 auto' }}>{docLabel}</div>
       </div>
@@ -516,7 +570,7 @@ function DirectionSection(props: { dir: Direction; docs: GateDoc[]; totals: { re
               empty={b.empty[props.dir]}
               tone={tone[b.key]}
               dir={props.dir}
-              items={items.filter(({ line }) => bucketOf(line) === b.key)}
+              items={countOnly ? items : items.filter(({ line }) => bucketOf(line) === b.key)}
               focus={props.focus}
               onOpen={props.onOpen}
               roomy

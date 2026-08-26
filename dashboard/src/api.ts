@@ -117,6 +117,7 @@ export const api = {
     absenceMs?: number;
     minRssi?: number | null;
     toggleMinReads?: number;
+    toggleFastCount?: boolean;
     /**
      * How long a pallet stays open for, in ms. With no beams this is the only
      * thing separating one pallet from the next: anything read inside the window

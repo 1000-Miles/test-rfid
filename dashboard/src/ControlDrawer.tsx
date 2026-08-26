@@ -373,6 +373,7 @@ function NoIrPanel(props: { bridge: BridgeState }) {
   const [rearmSec, setRearmSec] = useState(60);
   const [minRssiText, setMinRssiText] = useState(''); // blank = floor off
   const [minReads, setMinReads] = useState(2);
+  const [fastCount, setFastCount] = useState(false);
   const [palletWindowSec, setPalletWindowSec] = useState(60);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -387,6 +388,7 @@ function NoIrPanel(props: { bridge: BridgeState }) {
         setRearmSec(Math.round((s.toggleDedupMs ?? 60000) / 1000));
         setMinRssiText(s.minRssi != null ? String(s.minRssi) : '');
         setMinReads(s.toggleMinReads ?? 2);
+        setFastCount(s.toggleFastCount === true);
         setPalletWindowSec(Math.round((s.palletWindowMs ?? 60000) / 1000));
       })
       .catch(() => {});
@@ -437,6 +439,7 @@ function NoIrPanel(props: { bridge: BridgeState }) {
         palletWindowMs: Math.max(10, palletWindowSec) * 1000,
         minRssi: rssi === '' ? null : Number(rssi),
         toggleMinReads: Math.max(1, minReads),
+        toggleFastCount: fastCount,
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -540,6 +543,19 @@ function NoIrPanel(props: { bridge: BridgeState }) {
             hint="Visits with fewer reads are dropped as noise — one multipath ghost read must not flip warehouse state."
           />
         </div>
+        <label className="flex items-start gap-2.5 mt-3 rounded-md border border-white/10 bg-black/20 px-3 py-2 cursor-pointer">
+          <input type="checkbox" checked={fastCount} onChange={(e) => setFastCount(e.target.checked)} className="mt-0.5 accent-emerald-500" />
+          <span className="text-xs">
+            <span className="text-slate-200">Count on the deciding read</span>
+            <span className="block text-[11px] text-slate-500 mt-0.5 leading-relaxed">
+              Off, each carton is held for the decision window (Console tab → Max window, {'currently the 4s cap in most setups'}) before it reaches the
+              board — and because the reader runs continuously here, a pallet standing in the field re-arms that timer, so cartons land one at a time
+              rather than as a pallet. On, a carton counts the instant it clears “Min reads / visit”, which in no-IR mode is the only thing the reads
+              decide: direction is inferred, not read. The trade is telemetry — the receipt then carries the deciding read(s) rather than the whole
+              visit, so its read count, antenna list and strongest RSSI narrow. The tag feed and the RSSI floor are unaffected.
+            </span>
+          </span>
+        </label>
         <div className="flex items-center gap-3 mt-2">
           <button onClick={applyTuning} disabled={busy} className="flex-1 rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-3 py-1.5 text-sm">
             Apply tuning
