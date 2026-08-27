@@ -22,7 +22,7 @@ import java.util.concurrent.Executors;
  * UHF sidecar: exposes the Chainway Java SDK (pure-Java TCP path — works on
  * Windows AND Raspberry Pi/ARM) as a tiny local HTTP API for the Node bridge.
  *
- * Build:  javac -cp ReaderAPI20240822.jar UhfSidecar.java com/rscja/deviceapi/AntennaLink.java
+ * Build:  javac -cp ReaderAPI20240822.jar UhfSidecar.java
  * Run:    java -cp "ReaderAPI20240822.jar;." UhfSidecar [port]     (Windows)
  *         java -cp "ReaderAPI20240822.jar:." UhfSidecar [port]     (Linux)
  *
@@ -33,7 +33,6 @@ import java.util.concurrent.Executors;
  *   GET  /gpi                    GET /version
  *   GET  /power                  POST /power?dbm=&ants=1,2
  *   GET  /antennas               POST /antennas?ports=1,3
- *   GET  /antenna-link           (which ports have an antenna plugged in)
  *   GET  /workmode               POST /workmode?mode=0
  *   GET  /beep                   POST /beep?on=0        (0 = silence the reader)
  *   GET  /tag/single             (singulate ONE tag: pc + epc)
@@ -160,31 +159,6 @@ public class UhfSidecar {
                   .append(",\"dbm\":").append(p.getPower()).append('}');
             }
             return sb.append("]}").toString();
-        }));
-
-        // Which ports have an antenna PHYSICALLY connected. See AntennaLink.
-        //
-        // Named '/antenna-link' and NOT '/antennas/link' on purpose, and this is
-        // not cosmetic. Java's HttpServer matches the LONGEST registered prefix,
-        // so on a sidecar built before this endpoint existed, '/antennas/link'
-        // silently falls through to the '/antennas' handler — which sends a real
-        // command to the reader. A new bridge talking to an old sidecar was
-        // therefore poking the reader on a path nobody had guarded, and it cost
-        // a gate its reader link. A path with no shared prefix cannot fall
-        // through: an old build answers 404 and touches no hardware at all.
-        //
-        // Never asked while tags are flowing. An antenna only changes when
-        // somebody unplugs one, so there is no reason for a monitoring question
-        // to share the wire with a pallet going through — it answers `busy` and
-        // the caller keeps its previous reading. This is why the check does NOT
-        // use withInventoryPaused the way GET /antennas does: pausing a live
-        // gate to light a status dot is the wrong trade.
-        server.createContext("/antenna-link", ex -> handle(ex, q -> {
-            if (!connected) return "{\"ok\":false,\"error\":\"not connected\"}";
-            if (inventoryRunning) return "{\"ok\":false,\"busy\":true}";
-            byte[] raw = com.rscja.deviceapi.AntennaLink.ask(uhf);
-            if (raw == null) return "{\"ok\":false,\"error\":\"no reply from reader\"}";
-            return "{\"ok\":true,\"raw\":" + jstr(hex(raw)) + "}";
         }));
 
         server.createContext("/antennas", ex -> handle(ex, q -> {
@@ -324,13 +298,6 @@ public class UhfSidecar {
                ",\"ant\":" + jstr(info.getAnt()) +
                ",\"rssi\":" + jstr(info.getRssi()) +
                ",\"ts\":" + System.currentTimeMillis() + "}";
-    }
-
-    /** Bytes as uppercase hex, so the Node side can parse a reply this build has never seen. */
-    static String hex(byte[] b) {
-        StringBuilder sb = new StringBuilder(b.length * 2);
-        for (byte x : b) sb.append(String.format("%02X", x));
-        return sb.toString();
     }
 
     static String jstr(String s) {
