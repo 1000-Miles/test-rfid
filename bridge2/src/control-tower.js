@@ -139,6 +139,38 @@ function tcpConnect(host, port) {
  * being the usual case. Shells out because raw ICMP needs elevated privileges
  * and this runs as whatever account the bridge already runs as.
  */
+/**
+ * Output that means "this machine could not send the packet", not "the device
+ * did not answer".
+ *
+ * tcpConnect already draws this line via CANT_TELL_CODES (ENETUNREACH and
+ * friends). ping() did not, and the difference showed: an 'Office WiFi' row
+ * pointing at 192.168.0.1 was reported "No response from access point —
+ * connection lost" by gate PCs that are wired to 192.168.1.x and have no route
+ * to that network at all. The access point was fine. The bridge simply cannot
+ * see it from where it stands, and saying anything else is inventing a fault.
+ *
+ * 'Destination host unreachable' is deliberately NOT here: that comes from a
+ * router that COULD reach the network and found nothing at the address, which
+ * is real evidence about the device.
+ */
+const NO_ROUTE_OUTPUT = [
+  'network is unreachable',   // linux: no route off this machine
+  'no route to host',
+  'name or service not known', // dns failed; nothing was ever sent
+  'unknown host',
+  'could not find host',
+  'general failure',           // windows: no usable interface
+  'transmit failed',
+  'operation not permitted',   // raw socket refused by policy
+  'permission denied',
+];
+
+function pingCouldNotSend(output) {
+  const text = String(output || '').toLowerCase();
+  return NO_ROUTE_OUTPUT.find((phrase) => text.includes(phrase)) || null;
+}
+
 async function ping(host) {
   const isWindows = process.platform === 'win32';
   const args = isWindows
@@ -151,6 +183,15 @@ async function ping(host) {
     // Match on TTL rather than exit code: Windows' ping exits 0 even for
     // "Destination host unreachable", so the exit status is not a verdict.
     const ok = /ttl[=\s]/i.test(stdout);
+    const blocked = ok ? null : pingCouldNotSend(stdout);
+    if (blocked) {
+      return {
+        ok: false,
+        cantTell: true,
+        latencyMs: null,
+        detail: `This bridge has no route to ${host} (${blocked}), so it cannot be checked from here.`,
+      };
+    }
     return {
       ok,
       cantTell: false,
@@ -161,9 +202,21 @@ async function ping(host) {
     // execFile rejects both when ping RAN and reported failure (non-zero exit,
     // which still carries stdout) and when ping could not run at all. Only the
     // first is a verdict about the device.
-    const out = (err && err.stdout) || '';
+    const out = `${(err && err.stdout) || ''}\n${(err && err.stderr) || ''}`.trim();
     if (out) {
       const ok = /ttl[=\s]/i.test(out);
+      // Same line as above: could-not-send is not a verdict. ping writes this to
+      // stdout AND exits non-zero, so it arrives here rather than in the success
+      // path — which is exactly how it was being read as "the device is down".
+      const blocked = ok ? null : pingCouldNotSend(out);
+      if (blocked) {
+        return {
+          ok: false,
+          cantTell: true,
+          latencyMs: null,
+          detail: `This bridge has no route to ${host} (${blocked}), so it cannot be checked from here.`,
+        };
+      }
       const m = out.match(/[=<]\s*(\d+(?:\.\d+)?)\s*ms/i);
       return {
         ok,
@@ -439,6 +492,53 @@ async function checkAntenna(device, ctx) {
  * jobs with no printer attached, so port 9100 answering proves almost nothing —
  * checkReady() is the verdict the print path itself gates on.
  */
+/**
+ * Is a queue-backed printer actually PLUGGED IN?
+ *
+ * The readiness check the print path uses answers a different question than the
+ * one this light asks. `lpstat -p` on an enabled queue with nothing in it says
+ * "idle" whether or not a printer is on the end of the cable, so an empty queue
+ * on a gate with no label printer at all reported Online. That is the worst kind
+ * of green: it says a thing exists that does not.
+ *
+ * CUPS does know, it just does not say it there. `lpstat -v <queue>` gives the
+ * queue's device URI and `lpinfo -v` lists the devices actually present right
+ * now — an unplugged USB printer drops out of the second list while keeping its
+ * queue in the first. Comparing them is the presence check.
+ *
+ * Deliberately implemented HERE rather than in printer/index.js: that file is
+ * the path that prints real labels, and a monitoring question has no business
+ * being added to it.
+ *
+ * @returns {Promise<boolean|null>} null means "could not find out" — never false.
+ */
+async function cupsPrinterPresent(queueName) {
+  if (!queueName || process.platform === 'win32') return null;
+  let uri = null;
+  try {
+    const { stdout } = await execFileAsync('lpstat', ['-v', queueName], { timeout: 8000 });
+    const m = stdout.match(/device for [^:]+:\s*(\S+)/i);
+    uri = m ? m[1].trim() : null;
+  } catch {
+    return null; // no lpstat, or the queue vanished — checkPrinter's own probe covers that
+  }
+  if (!uri) return null;
+
+  // Only local attachments are answerable this way. A networked queue points at
+  // socket:// or ipp:// and is judged by its address, which is a better check.
+  if (!/^(usb|serial|parallel|hp|hpfax):/i.test(uri)) return null;
+
+  try {
+    const { stdout } = await execFileAsync('lpinfo', ['-v'], { timeout: 10000 });
+    // URIs carry a ?serial=... suffix that can differ between the two commands,
+    // so compare the part before the query string.
+    const base = uri.split('?')[0];
+    return stdout.split('\n').some((line) => line.includes(base));
+  } catch {
+    return null; // lpinfo is often root-only; not knowing is not evidence
+  }
+}
+
 async function checkPrinter(device, ctx) {
   // ---- a printer with an address is judged by the address ------------------
   //
@@ -487,20 +587,51 @@ async function checkPrinter(device, ctx) {
   // on, so here the queue really is the check: no queue means no way to print.
   if (!ctx.printer) return null;
   const isPallet = printerIsPallet(device);
+  let r;
   try {
-    const r = isPallet ? await ctx.printer.checkPalletReady() : await ctx.printer.checkReady();
-    if (!r || typeof r.ready !== 'boolean') return null;
-    return r.ready
-      ? { status: 'online', issue: null, detail: r.detail || 'Printer ready.', latencyMs: null }
-      : {
-          status: 'offline',
-          issue: OFFLINE_HINT[device.type] || 'Printer not ready.',
-          detail: r.detail || 'Printer reported not ready.',
-          latencyMs: null,
-        };
+    r = isPallet ? await ctx.printer.checkPalletReady() : await ctx.printer.checkReady();
   } catch {
     return null; // fall through to the plain network check
   }
+  if (!r || typeof r.ready !== 'boolean') return null;
+
+  if (!r.ready) {
+    return {
+      status: 'offline',
+      issue: OFFLINE_HINT[device.type] || 'Printer not ready.',
+      detail: r.detail || 'Printer reported not ready.',
+      latencyMs: null,
+    };
+  }
+
+  // The queue says it would accept a job. That is not the same as a printer
+  // being on the end of it, so ask whether the device is actually attached.
+  const queueName = isPallet
+    ? ctx.printer.config && ctx.printer.config.palletPrinterName
+    : ctx.printer.config && ctx.printer.config.printerName;
+  const present = await cupsPrinterPresent(queueName);
+
+  if (present === false) {
+    return {
+      status: 'offline',
+      issue: `Queue "${queueName}" is set up, but no printer is attached to this PC.`,
+      detail: `${r.detail || 'Queue ready.'} The device is not in lpinfo -v, so nothing is plugged in.`,
+      latencyMs: null,
+    };
+  }
+
+  if (present === null) {
+    return {
+      status: 'unknown',
+      issue: null,
+      detail:
+        `${r.detail || 'Queue ready.'} A queue accepts jobs whether or not a printer is plugged ` +
+        `into it, and this machine could not be asked which — so being ready is not proof it is there.`,
+      latencyMs: null,
+    };
+  }
+
+  return { status: 'online', issue: null, detail: r.detail || 'Printer ready.', latencyMs: null };
 }
 
 /**

@@ -36,6 +36,10 @@ async function call(method, pathname, params = {}) {
   const url = new URL(pathname, SIDECAR_URL);
   for (const [k, v] of Object.entries(params)) if (v != null) url.searchParams.set(k, String(v));
   const res = await fetch(url, { method });
+  // 404 means this sidecar build predates the route. Surfaced rather than
+  // parsed, so a caller can tell "the reader said no" from "this build has
+  // never heard of that question".
+  if (res.status === 404) return { ok: false, notBuilt: true };
   return res.json();
 }
 
@@ -297,8 +301,21 @@ async function setAntennas(ports) {
  *
  * @returns {Promise<number[]|null>} ports, or null for "no answer" — never [].
  */
+/**
+ * Set once a sidecar answers 404 for the antenna-link route: that build does not
+ * have it, and will not grow it while it is running. Asking again every tick
+ * would be pointless traffic at a reader we have already been told cannot help.
+ */
+let antennaLinkUnavailable = false;
+
 async function getAntennaLink() {
-  const r = await call('GET', '/antennas/link');
+  if (antennaLinkUnavailable) return null;
+  const r = await call('GET', '/antenna-link');
+  if (r && r.notBuilt) {
+    antennaLinkUnavailable = true;
+    console.warn('[sidecar] this build has no /antenna-link route — antennas cannot be checked until it is rebuilt');
+    return null;
+  }
   if (!r || !r.ok) {
     // `busy` is the reader mid-passage. Not a fault, and not a verdict: the
     // caller keeps whatever it last knew.
