@@ -203,8 +203,15 @@ async function ping(host) {
 // pallet goes through.
 const ANTENNA_STATE_FILE = 'control-tower-antennas.json';
 
-/** Ports quiet this long, WHILE OTHERS ARE READING, are treated as faulty. */
-const ANTENNA_QUIET_MS = 2 * 60 * 60 * 1000;
+/**
+ * How recently a port must have read for that read to still vouch for it.
+ *
+ * A day, not the two hours this used to be. Per-port traffic is far thinner
+ * than the gate's as a whole — one gate logged 4229 reads on port 3 and 1 on
+ * port 4 over the same window — so a short window turned working antennas into
+ * Unchecked every evening.
+ */
+const ANTENNA_QUIET_MS = 24 * 60 * 60 * 1000;
 
 const antennaReads = new Map(); // port -> { last: epochMs, count: number }
 let antennaDirty = false;
@@ -259,6 +266,48 @@ function portsSeenReading() {
   return [...antennaReads.keys()].sort((a, b) => a - b);
 }
 
+
+/**
+ * How long an antenna-link reading stays good for.
+ *
+ * Two hours, because that is the honest cadence: an antenna changes when
+ * somebody unplugs one, not on a five-minute tick. Asking more often would put
+ * monitoring traffic on the reader's wire for no new information.
+ */
+const ANTENNA_LINK_TTL_MS = 2 * 60 * 60 * 1000;
+
+/** Last answer, and when. Shared by all four antenna rows — one question, four verdicts. */
+let antennaLinkCache = { at: 0, ports: null };
+
+/**
+ * The reader's antenna-link reading, cached, and never taken mid-passage.
+ *
+ * Two rules, both about staying out of the gate's way:
+ *
+ *   1. If the reader is reading, do not ask. A pallet going through is the one
+ *      moment this must not add traffic, and it is also the moment the answer
+ *      matters least. The previous reading stands.
+ *   2. One question per two hours, not one per antenna per tick. Four antennas
+ *      on a 5-minute tick would otherwise be 48 questions an hour to learn a
+ *      fact that changes when someone brings a ladder.
+ *
+ * A failed or refused read does NOT restamp the clock, so it retries on the next
+ * tick rather than going quiet for two hours.
+ */
+async function antennaLinkPorts(ctx) {
+  const fresh = Date.now() - antennaLinkCache.at < ANTENNA_LINK_TTL_MS;
+  if (fresh) return antennaLinkCache.ports;
+  if (ctx.controller && ctx.controller.reading) return antennaLinkCache.ports;
+  if (!ctx.uhf || typeof ctx.uhf.getAntennaLink !== 'function') return null;
+
+  const ports = await ctx.uhf.getAntennaLink();
+  if (Array.isArray(ports)) {
+    antennaLinkCache = { at: Date.now(), ports };
+    return ports;
+  }
+  return antennaLinkCache.ports;
+}
+
 /**
  * The antenna check — the one that only works from in here.
  *
@@ -272,109 +321,115 @@ async function checkAntenna(device, ctx) {
 
   if (!device.antennaPort) return unknown('No antenna port set for this antenna.');
   const port = Number(device.antennaPort);
-
-  // ---- 1. read activity, the evidence that beats every self-report ---------
-  // A port producing reads is working. A port silent while its siblings read is
-  // broken. Those two cover the cases that matter, and neither depends on a
-  // firmware call this reader refuses to answer.
-  const now = Date.now();
-  const mine = antennaReads.get(port);
-  const others = [...antennaReads.entries()].filter(([p]) => p !== port);
-  const othersActive = others.filter(([, v]) => now - v.last < ANTENNA_QUIET_MS);
-
-  if (mine && now - mine.last < ANTENNA_QUIET_MS) {
-    const mins = Math.max(1, Math.round((now - mine.last) / 60000));
-    return {
-      status: 'online',
-      issue: null,
-      detail: `Read a tag ${mins}m ago (${mine.count} reads on this port).`,
-      latencyMs: null,
-    };
-  }
-
-  if (othersActive.length > 0) {
-    // Somebody is reading and this port is not. That is a real finding.
-    const lastSeen = mine
-      ? `last read ${Math.round((now - mine.last) / 3600000)}h ago`
-      : 'never read a tag';
-    return {
-      status: 'offline',
-      issue: `No reads on port ${port} while port${othersActive.length > 1 ? 's' : ''} ${othersActive
-        .map(([p]) => p)
-        .join(', ')} ${othersActive.length > 1 ? 'are' : 'is'} reading.`,
-      detail: `This port ${lastSeen}. Check its cable, connector and that the port is enabled.`,
-      latencyMs: null,
-    };
-  }
-
-  // ---- 2. nothing is reading anywhere -------------------------------------
-  // An idle gate cannot prove an antenna works. Fall through to asking the
-  // reader, and if that will not answer either, say so rather than guess.
   if (!ctx.uhf) return unknown('This bridge build has no reader module wired.');
 
-  // Belt and braces: checkDevice already filters foreign gates via
-  // belongsToAnotherGate. Kept so calling checkAntenna directly is still safe.
-  if (device.gateId && ctx.gateId && device.gateId !== ctx.gateId) return null;
+  const now = Date.now();
+  const mine = antennaReads.get(port);
+  const readNote = mine
+    ? ` Last read ${Math.max(1, Math.round((now - mine.last) / 60000))}m ago (${mine.count} reads on this port).`
+    : '';
 
+  // ---- 1. ask the reader whether an antenna is PRESENT on this port -------
+  //
+  // Asked first because it is the only thing that can tell a broken antenna
+  // from a quiet one. On the DLL driver (Windows) UHFGetAntennaLinkStatus
+  // sometimes answers. On the Java sidecar, which is what BOTH live gates
+  // actually run, it cannot: RFIDWithUHFNetworkUR4 exposes setAntenna /
+  // getAntenna / power / work-time and nothing else — there is no link, VSWR or
+  // presence call in that SDK at all. So this branch is a bonus, not the plan,
+  // and everything below has to work without it.
   let connectedPorts = null;
-  let power = null;
   try {
-    connectedPorts = await ctx.uhf.getAntennaLink();
-    // Power is a nicety; never let it fail the check.
+    connectedPorts = await antennaLinkPorts(ctx);
+  } catch (err) {
+    return unknown(`Reader link is down, so its antenna ports cannot be read (${err.message}).${readNote}`);
+  }
+
+  if (Array.isArray(connectedPorts)) {
+    if (!connectedPorts.includes(port)) {
+      // A definite NO from the reader. The only case that earns Offline.
+      return {
+        status: 'offline',
+        issue: OFFLINE_HINT.antenna,
+        detail:
+          `Reader reports no antenna on port ${port}` +
+          (connectedPorts.length ? ` (connected: ${connectedPorts.join(', ')}).` : ' (no ports connected).') +
+          readNote,
+        latencyMs: null,
+      };
+    }
+
+    // Present. Still worth checking the port is enabled: an antenna that is
+    // plugged in but switched off reads nothing and looks fine to everything else.
+    let enabled = null;
+    try {
+      enabled = await ctx.uhf.getAntennas();
+    } catch {
+      enabled = null;
+    }
+    if (Array.isArray(enabled) && enabled.length > 0 && !enabled.includes(port)) {
+      return {
+        status: 'warning',
+        issue: `Antenna is connected but port ${port} is disabled on the reader.`,
+        detail: `Enabled ports: ${enabled.join(', ')}.${readNote}`,
+        latencyMs: null,
+      };
+    }
+
+    let power = null;
     try {
       power = await ctx.uhf.getAntennaPower();
     } catch {
       power = null;
     }
-  } catch (err) {
-    // requireLink threw: the reader link is down. The antenna's state is
-    // genuinely unknowable right now, and the reader row will say so itself.
-    return unknown(`Reader link is down, so its antenna ports can't be read (${err.message}).`);
-  }
-
-  if (!Array.isArray(connectedPorts)) {
-    // Expected on this firmware — see the note above the read tracker.
-    return unknown(
-      'No tag traffic at this gate to judge by, and this reader will not report ' +
-        'antenna link status. Send a pallet through and it will resolve.',
-    );
-  }
-
-  if (!connectedPorts.includes(port)) {
+    const dBm = power && power[port] ? power[port].read : null;
     return {
-      status: 'offline',
-      issue: OFFLINE_HINT.antenna,
+      status: 'online',
+      issue: null,
       detail:
-        `Reader reports port ${port} as not connected` +
-        (connectedPorts.length ? ` (connected: ${connectedPorts.join(', ')}).` : ' (no ports connected).'),
+        `Reader reports an antenna connected on port ${port}` +
+        (dBm != null ? ` at ${dBm} dBm.` : '.') +
+        readNote,
       latencyMs: null,
     };
   }
 
-  // Connected — but an ENABLED check is worth making too: a physically attached
-  // antenna on a disabled port reads nothing, and looks fine to every other test.
-  let enabled = null;
-  try {
-    enabled = await ctx.uhf.getAntennas();
-  } catch {
-    enabled = null;
-  }
-  if (Array.isArray(enabled) && !enabled.includes(port)) {
+  // ---- 2. no presence API — fall back to what the port has actually done ---
+  //
+  // A port that produced reads is working, cable and bracket and all. No
+  // self-report could say as much, so this is a strong YES.
+  if (mine && now - mine.last < ANTENNA_QUIET_MS) {
     return {
-      status: 'warning',
-      issue: `Antenna is connected but port ${port} is disabled on the reader.`,
-      detail: `Enabled ports: ${enabled.join(', ') || 'none'}.`,
+      status: 'online',
+      issue: null,
+      detail: `Read a tag ${Math.max(1, Math.round((now - mine.last) / 60000))}m ago (${mine.count} reads on this port).`,
       latencyMs: null,
     };
   }
 
-  const dBm = power && power[port] ? power[port].read : null;
-  return {
-    status: 'online',
-    issue: null,
-    detail: `Reader reports port ${port} connected${dBm != null ? ` at ${dBm} dBm` : ''}.`,
-    latencyMs: null,
-  };
+  // ---- 3. silence, which proves nothing ------------------------------------
+  //
+  // An earlier version called a port Offline when it was quiet while its
+  // siblings were reading. That was wrong, and the gate's own numbers show how
+  // wrong: over the same window ports 1 and 3 logged 2187 and 4229 reads while
+  // ports 2 and 4 logged 8 and 1. All four work. They are aimed at different
+  // parts of the opening, so a pallet down one side is seen by some and not
+  // others, and any short-window comparison between ports flags healthy
+  // hardware. Silence means "nothing came past this antenna" — never "this
+  // antenna is broken".
+  //
+  // So there is no verdict to give. Unchecked, with the reason, and it resolves
+  // itself the next time something goes through.
+  const others = [...antennaReads.entries()].filter(([p]) => p !== port);
+  const othersActive = others.filter(([, v]) => now - v.last < ANTENNA_QUIET_MS).map(([p]) => p);
+  const seenBefore = mine
+    ? `This port last read ${Math.round((now - mine.last) / 3600000)}h ago.`
+    : 'This port has not read a tag since the bridge started watching.';
+  return unknown(
+    `${seenBefore} This reader will not report whether an antenna is connected, so a quiet port cannot be told` +
+      ` apart from a working one until a tag passes it.` +
+      (othersActive.length ? ` Port${othersActive.length > 1 ? 's' : ''} ${othersActive.join(', ')} read recently.` : ''),
+  );
 }
 
 /**
@@ -385,16 +440,53 @@ async function checkAntenna(device, ctx) {
  * checkReady() is the verdict the print path itself gates on.
  */
 async function checkPrinter(device, ctx) {
+  // ---- a printer with an address is judged by the address ------------------
+  //
+  // If it answers, it is on, plugged in and listening. That is what the light is
+  // asking. An earlier version led with the bridge's print path instead and
+  // reported a printer that was answering on 9100 as "unreachable — check power
+  // and connection", which is the worst kind of wrong: it sends someone across
+  // the warehouse to look at a printer that is working.
+  //
+  // The queue is a SEPARATE thing — whether this gate PC has the printer set up
+  // under the name the bridge prints to. Worth saying in the detail so it gets
+  // fixed, but it is not the printer being down and must not colour the light.
+  //
+  // The bridge does this knock, not the browser: the PC someone opens Control
+  // Tower on is not on the warehouse network and could never reach 192.168.1.x.
+  if (device.ip) {
+    const knock = device.port
+      ? await tcpConnect(device.ip, device.port)
+      : await ping(device.ip);
+
+    if (knock.cantTell) {
+      return { status: 'unknown', issue: null, detail: knock.detail, latencyMs: null };
+    }
+
+    if (!knock.ok) {
+      return {
+        status: 'offline',
+        issue: OFFLINE_HINT[device.type] || 'Printer not answering.',
+        detail: knock.detail,
+        latencyMs: null,
+      };
+    }
+
+    const queueNote = await printQueueNote(device, ctx);
+    return {
+      status: 'online',
+      issue: null,
+      detail: `${knock.detail}${queueNote}`,
+      latencyMs: knock.latencyMs ?? null,
+    };
+  }
+
+  // ---- no address: the print path is all there is --------------------------
+  //
+  // A pallet printer hangs off the gate PC by USB and has no address to knock
+  // on, so here the queue really is the check: no queue means no way to print.
   if (!ctx.printer) return null;
-  // Which printer this row IS decides which readiness check answers for it. The
-  // two are different devices with different queues, so running the carton check
-  // against the pallet printer would report an out-of-media Gprinter as healthy.
-  // sourceKey comes back on the work list precisely so this can be told apart;
-  // without one (a hand-added row) fall back to the name.
-  const key = device.sourceKey || '';
-  const isPallet = key
-    ? key.endsWith(':printer:pallet')
-    : device.type === 'printer_label';
+  const isPallet = printerIsPallet(device);
   try {
     const r = isPallet ? await ctx.printer.checkPalletReady() : await ctx.printer.checkReady();
     if (!r || typeof r.ready !== 'boolean') return null;
@@ -408,6 +500,32 @@ async function checkPrinter(device, ctx) {
         };
   } catch {
     return null; // fall through to the plain network check
+  }
+}
+
+/**
+ * Which printer this row IS decides which readiness check answers for it. The
+ * two are different devices with different queues, so running the carton check
+ * against the pallet printer would report an out-of-media Gprinter as healthy.
+ * sourceKey comes back on the work list precisely so this can be told apart;
+ * without one (a hand-added row) fall back to the type.
+ */
+function printerIsPallet(device) {
+  const key = device.sourceKey || '';
+  return key ? key.endsWith(':printer:pallet') : device.type === 'printer_label';
+}
+
+/** A trailing sentence when the gate PC has no queue for a reachable printer. */
+async function printQueueNote(device, ctx) {
+  if (!ctx.printer) return '';
+  try {
+    const r = printerIsPallet(device)
+      ? await ctx.printer.checkPalletReady()
+      : await ctx.printer.checkReady();
+    if (!r || typeof r.ready !== 'boolean' || r.ready) return '';
+    return ` Not set up to print from this PC yet: ${r.detail || 'no print queue found'}.`;
+  } catch {
+    return '';
   }
 }
 
@@ -475,12 +593,49 @@ function belongsToAnotherGate(device, ctx) {
   return Boolean(device.gateId && ctx.gateId && device.gateId !== ctx.gateId);
 }
 
+/**
+ * Whether THIS machine is entitled to report on a router row.
+ *
+ * The 'shared:lan' and 'shared:wifi' rows have no gateId, so every bridge checks
+ * them — which is right when both bridges sit behind the router, and wrong the
+ * moment one of them doesn't. A gate PC wired to the warehouse switch has no
+ * route to the office WiFi router at all: it would ping 192.168.0.1, get
+ * nothing, report Offline, and overwrite the verdict of the bridge that IS on
+ * that WiFi and can see it working. One machine's blind spot would become
+ * everyone's outage.
+ *
+ * So a router row is answered only by a machine that routes through it. A bridge
+ * that doesn't stays quiet (null), the same as it does for another gate's reader.
+ * Non-router rows are unaffected.
+ */
+async function routerRowIsOurs(device) {
+  if (!/:(?:lan|wifi)(?::|$)/.test(device.sourceKey || '')) return true;
+  if (!device.ip) return true;
+  const gateways = await cachedGateways();
+  // No route table at all (a platform or permissions miss) is not evidence of
+  // anything — fall through and let the ping speak, as it did before.
+  if (gateways.length === 0) return true;
+  return gateways.some((g) => g.host === device.ip);
+}
+
 async function checkDevice(device, ctx) {
   const at = new Date().toISOString();
-  const wrap = (r) => (r ? Object.assign({ id: device.id, at }, r) : null);
+  // Set below for the office WiFi row, whose detail carries the radio's own
+  // reading as well as the ping. Appended rather than replacing, so a device
+  // with no detail still reports null instead of an empty string.
+  let detailSuffix = '';
+  const wrap = (r) =>
+    r
+      ? Object.assign(
+          { id: device.id, at },
+          r,
+          detailSuffix ? { detail: (r.detail || '') + detailSuffix } : null,
+        )
+      : null;
 
   // Not ours to answer for. Returning null sends nothing at all for this row.
   if (belongsToAnotherGate(device, ctx)) return null;
+  if (!(await routerRowIsOurs(device))) return null;
 
   // Antennas are not hosts. Ask the reader.
   if (device.type === 'antenna') return wrap(await checkAntenna(device, ctx));
@@ -517,6 +672,21 @@ async function checkDevice(device, ctx) {
       detail: 'No address set, and this bridge has no other way to reach it.',
       latencyMs: null,
     });
+  }
+
+  // The office WiFi row is about the RADIO as much as the router it pings.
+  //
+  // A ping to the gateway answers "can this machine get off the WiFi", which is
+  // the question IT is asked; but "it answered in 2ms" is a thin thing to read
+  // when someone reports the warehouse WiFi being flaky. So the row also carries
+  // what the adapter is actually seeing — SSID, signal, link rate.
+  //
+  // Deliberately only the DESCRIPTION. Whether a signal counts as weak is Nexus's
+  // call, for the reason given at WARN_LATENCY_MS: one place to retune it, and no
+  // risk of the bridge and the board disagreeing about what colour a reading is.
+  // Nothing here changes the status.
+  if (/:wifi(?::|$)/.test(device.sourceKey || '')) {
+    detailSuffix = await wifiRadioNote();
   }
 
   const r = device.port
@@ -592,8 +762,42 @@ async function wifiLink() {
   }
 }
 
-/** The default gateway — 'the router', and what separates two different outages. */
-async function defaultGateway() {
+/** Interface names that mean 'this route goes out over the air'. */
+const WIRELESS_IFACE = /wi[\s-]?fi|wireless|wlan|^wl\d/i;
+
+/**
+ * EVERY default gateway, not just the best one.
+ *
+ * This site has two: the warehouse switch on 192.168.1.1 over Ethernet and the
+ * office WiFi router on 192.168.0.1, both at route metric 0. The old version
+ * sorted by metric and took the first, so it monitored the wire and never
+ * noticed the WiFi router go down — the one outage most likely to be noticed by
+ * people and least likely to be noticed by us.
+ *
+ * Sorted best-first (the first entry is still 'the' gateway for the boot
+ * summary), deduped by address, so a machine with one route behaves exactly as
+ * it did before.
+ */
+/** Route tables change at the speed of someone moving a cable. */
+const GATEWAY_CACHE_MS = 60000;
+let gatewayCache = { at: 0, value: [] };
+
+/** defaultGateways(), memoised — the check tick asks far more often than routes move. */
+async function cachedGateways() {
+  if (Date.now() - gatewayCache.at < GATEWAY_CACHE_MS) return gatewayCache.value;
+  const value = await defaultGateways();
+  gatewayCache = { at: Date.now(), value };
+  return value;
+}
+
+async function defaultGateways() {
+  const out = [];
+  const add = (host, iface) => {
+    const h = String(host || '').trim();
+    if (!h || h === '0.0.0.0' || h === '::') return;
+    if (out.some((g) => g.host === h)) return;
+    out.push({ host: h, iface: String(iface || '').trim() || null, wireless: WIRELESS_IFACE.test(iface || '') });
+  };
   try {
     if (process.platform === 'win32') {
       const { stdout } = await execFileAsync(
@@ -601,19 +805,55 @@ async function defaultGateway() {
         [
           '-NoProfile',
           '-Command',
-          "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1).NextHop",
+          `Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object NextHop,InterfaceAlias | ConvertTo-Json -Compress`,
         ],
         { timeout: 10000 },
       );
-      return stdout.trim() || null;
+      const parsed = JSON.parse(stdout.trim() || 'null');
+      // ConvertTo-Json emits a bare object when there is exactly one route.
+      for (const r of Array.isArray(parsed) ? parsed : parsed ? [parsed] : []) {
+        add(r.NextHop, r.InterfaceAlias);
+      }
+      return out;
     }
-    const { stdout } = await execFileAsync('sh', ['-c', "ip route | awk '/default/ {print $3; exit}'"], {
-      timeout: 8000,
-    });
-    return stdout.trim() || null;
+    const { stdout } = await execFileAsync(
+      'sh',
+      ['-c', "ip -o route | awk '/^default/ {print $3, $5}'"],
+      { timeout: 8000 },
+    );
+    for (const line of stdout.split('\n')) {
+      const [host, iface] = line.trim().split(/\s+/);
+      add(host, iface);
+    }
+    return out;
   } catch {
-    return null;
+    return out;
   }
+}
+
+/**
+ * What the WiFi adapter is seeing right now, as one sentence.
+ *
+ * Empty string on a wired machine or a parse miss — the ping still stands on its
+ * own, so a missing radio reading costs nothing.
+ */
+async function wifiRadioNote() {
+  const link = await wifiLink();
+  if (link.type !== 'wifi') return '';
+  const bits = [];
+  if (link.signalPercent != null) {
+    bits.push(`${link.signalPercent}% signal${link.rssiDbm != null ? ` (${link.rssiDbm} dBm)` : ''}`);
+  }
+  if (link.linkSpeedMbps != null) bits.push(`${link.linkSpeedMbps} Mbps`);
+  if (link.ssid) bits.unshift(link.ssid);
+  // Leading separator: this is glued onto the end of the ping's own sentence.
+  return bits.length ? ` · ${bits.join(' · ')}` : '';
+}
+
+/** The primary gateway, for the one-line boot/network summary. */
+async function defaultGateway() {
+  const all = await defaultGateways();
+  return all.length ? all[0].host : null;
 }
 
 async function checkNetwork() {
@@ -804,7 +1044,7 @@ async function discoverDevices(ctx) {
           gateId: gate,
           antennaPort: port,
           frequencyMinutes: 5,
-          checkNote: 'Watches whether this antenna port is still reading tags.',
+          checkNote: 'Confirms this antenna port is reading tags.',
         });
       }
     }
@@ -896,28 +1136,38 @@ async function discoverDevices(ctx) {
     });
   }
 
-  // The local network, as ONE shared device.
+  // The routers this machine goes out through — one row each.
   //
-  // Both gates sit behind the same router, so this is deliberately keyed
-  // 'shared:lan' rather than per gate: one physical box, one row. An earlier
-  // version filed it per gate and a single cable pull raised two alarms about
-  // one fault.
+  // A site can have more than one, and this one does: the warehouse runs on the
+  // wired 192.168.1.x switch while the office WiFi is a separate 192.168.0.x
+  // router. They fail independently and people notice them differently, so they
+  // are separate rows rather than one 'network' light.
   //
-  // Both bridges announce the same key, which is idempotent. If a site ever puts
-  // its gates on genuinely separate subnets, set CONTROL_TOWER_LAN_PER_GATE=1 so
-  // each gets its own row instead of the two overwriting each other's address.
-  const gw = await defaultGateway();
-  if (gw) {
-    const perGate = /^(1|true|yes|on)$/i.test(process.env.CONTROL_TOWER_LAN_PER_GATE || '');
+  // Keyed 'shared:*' rather than per gate: both gates sit behind the same boxes,
+  // so one cable pull should raise one alarm, not one per gate. Both bridges
+  // announce the same keys, which is idempotent. Set CONTROL_TOWER_LAN_PER_GATE=1
+  // if a site ever puts its gates on genuinely separate subnets.
+  const perGate = /^(1|true|yes|on)$/i.test(process.env.CONTROL_TOWER_LAN_PER_GATE || '');
+  const gateways = await defaultGateways();
+  let wiredSeen = 0;
+  let wirelessSeen = 0;
+  for (const gw of gateways) {
+    // The first of each kind keeps the plain key so existing rows are updated
+    // rather than duplicated; a rare third router gets its address in the key.
+    const nth = gw.wireless ? wirelessSeen++ : wiredSeen++;
+    const kind = gw.wireless ? 'wifi' : 'lan';
+    const suffix = nth === 0 ? '' : `:${gw.host}`;
     out.push({
-      sourceKey: perGate ? `${gate}:lan` : 'shared:lan',
+      sourceKey: `${perGate ? gate : 'shared'}:${kind}${suffix}`,
       type: 'wifi',
-      name: perGate ? 'Local LAN' : 'Local LAN',
+      name: gw.wireless ? 'Office WiFi' : 'Local LAN',
       zoneName: perGate ? zoneName : sharedZone,
-      ip: gw,
+      ip: gw.host,
       port: null,
       frequencyMinutes: 5,
-      checkNote: 'Pings the router the warehouse network runs through.',
+      checkNote: gw.wireless
+        ? 'Pings the office WiFi router.'
+        : 'Pings the router the warehouse network runs through.',
     });
   }
 

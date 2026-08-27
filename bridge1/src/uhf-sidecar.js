@@ -286,8 +286,65 @@ async function setAntennas(ports) {
   return r.ok ? 0 : -1;
 }
 
+/**
+ * Which antenna ports have an antenna plugged in.
+ *
+ * This used to `return null` — the Java SDK has no such call, so Control Tower
+ * showed every antenna as Unchecked. The READER has it; only the SDK wrapper
+ * lacked it. The sidecar now sends the vendor's own frame (see AntennaLink.java)
+ * and hands back the raw reply, which is parsed HERE so a surprise in the layout
+ * is a JavaScript fix rather than a rebuild-and-restart on a live gate.
+ *
+ * @returns {Promise<number[]|null>} ports, or null for "no answer" — never [].
+ */
 async function getAntennaLink() {
-  return null; // not exposed by the Java SDK's network API
+  const r = await call('GET', '/antennas/link');
+  if (!r || !r.ok) {
+    // `busy` is the reader mid-passage. Not a fault, and not a verdict: the
+    // caller keeps whatever it last knew.
+    return null;
+  }
+  if (typeof r.raw !== 'string') return null;
+  const ports = parseAntennaLinkFrame(r.raw);
+  if (ports === null) {
+    console.warn(`[sidecar] antenna link reply not understood, raw=${r.raw}`);
+  }
+  return ports;
+}
+
+/**
+ * Parse the reader's reply to UHFGetAntennaLinkStatus.
+ *
+ * Frame is A5 5A <len:2> <cmd> [payload] <xor> 0D 0A, len covering the whole
+ * frame. The vendor documents the payload as two bytes:
+ *   payload[0] -> ANT16..ANT9,  payload[1] -> ANT8..ANT1,  bit set = linked.
+ *
+ * Anything else returns null rather than a guess. A wrong answer here sends
+ * someone up a ladder to an antenna that was fine, which is worse than an
+ * honest Unchecked — so the only accepted shape is the documented one, and the
+ * raw bytes get logged when it does not match.
+ */
+function parseAntennaLinkFrame(hex) {
+  let buf;
+  try {
+    buf = Buffer.from(hex, 'hex');
+  } catch {
+    return null;
+  }
+  for (let i = 0; i + 8 <= buf.length; i++) {
+    if (buf[i] !== 0xa5 || buf[i + 1] !== 0x5a) continue;
+    const len = (buf[i + 2] << 8) | buf[i + 3];
+    if (len < 10 || i + len > buf.length) continue;
+    const frame = buf.subarray(i, i + len);
+    if (frame[len - 2] !== 0x0d || frame[len - 1] !== 0x0a) continue;
+    const payload = frame.subarray(5, len - 3);
+    if (payload.length !== 2) continue;
+    const mask = (payload[0] << 8) | payload[1];
+    const ports = [];
+    for (let p = 1; p <= 16; p++) if (mask & (1 << (p - 1))) ports.push(p);
+    return ports;
+  }
+  return null;
 }
 
 async function getWorkMode() {
