@@ -704,6 +704,36 @@ app.post('/debug/mock-visit', (req, res) => {
   res.json({ ok: true, epc, reads: count, detectMode: nexus.detectMode });
 });
 
+// Demo: broadcast one pallet-workflow state to every screen WITHOUT touching
+// the outbox — so the gate board's print card can be seen (and its Print
+// button pressed) on a rig with no receiving batch open. Presentation only:
+// a mock pallet-open's "Close & print" answers 409 (there is no real pallet
+// to close), but a mock pallet-ready's Print button prints for real through
+// the normal /printer/print-pallet-tag path.
+// Body: { type?: 'pallet-open'|'pallet-ready'|'pallet-print', palletCode?,
+//         cartonCount?, windowMs?, ok? }.
+app.post('/debug/mock-pallet-workflow', (req, res) => {
+  const type = ['pallet-open', 'pallet-ready', 'pallet-print'].includes(req.body?.type) ? req.body.type : 'pallet-ready';
+  const now = Date.now();
+  const msg = {
+    type,
+    timestamp: new Date(now).toISOString(),
+    requestId: `mock-workflow-${now}`,
+    passageId: `mock-workflow-${now}`,
+    palletCode: String(req.body?.palletCode || 'PLT-DEMO-00000001'),
+    batchRef: req.body?.batchRef ?? null,
+    cartonCount: Number(req.body?.cartonCount) || 5,
+    queued: false,
+  };
+  if (type === 'pallet-open') {
+    msg.openedAt = msg.timestamp;
+    msg.closesAt = new Date(now + (Number(req.body?.windowMs) || 120_000)).toISOString();
+  }
+  if (type === 'pallet-print') msg.ok = req.body?.ok !== false;
+  broadcast(msg);
+  res.json({ ok: true, ...msg });
+});
+
 /** Last successful power read, so a busy reader never blanks the display. */
 let lastPowerRead = null;
 

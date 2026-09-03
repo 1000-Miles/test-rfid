@@ -18,3 +18,6 @@ Thumbs.db
 
 # reader-bridge build artifact (~88MB: bundles node.exe + node_modules)
 **/dist-reader/
+
+# pre-split bridge copy left on this dev rig only — bridge1/ and bridge2/ are the real ones
+/bridge/

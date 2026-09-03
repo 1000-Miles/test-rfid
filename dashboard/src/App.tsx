@@ -7,6 +7,7 @@ import { chime } from './sound';
 import ControlDrawer from './ControlDrawer';
 import TvBoard from './TvBoard';
 import PalletPrintingPage from './PalletPrintingPage';
+import GatePrintCard from './GatePrintCard';
 import PowerCutRecoveryPage from './PowerCutRecoveryPage';
 
 /**
@@ -144,6 +145,7 @@ export default function App() {
     <>
       <DeliveryAlarm movement={bridge.movement} />
       <GateBoard board={board} entries={bridge.entries} sound={sound} onOpenControls={() => setControlsOpen(true)} />
+      <GatePrintCard bridge={bridge} />
       <LastSaved movement={bridge.movement} />
       <ControlDrawer
         open={controlsOpen}

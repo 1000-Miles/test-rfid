@@ -20,7 +20,7 @@ type ProductArt = { photoUrl: string | null; emoji: string | null };
  * screen and label MUST agree or an operator holding the tag cannot match it to
  * the card in front of them.
  */
-function palletName(code: string | null | undefined): string {
+export function palletName(code: string | null | undefined): string {
   if (!code) return 'Pallet';
   // Already the short form — show it exactly as the barcode carries it.
   if (/^PALLET-(?:[A-Z0-9]+-)?\d+$/i.test(code)) return code.toUpperCase();
@@ -553,7 +553,7 @@ function GearIcon() {
  * HTML puts "Unexpected token '<'" in front of a warehouse operator, which
  * names the symptom and hides the cause. A 404 here has exactly one meaning
  * worth reporting: this page is pointed at a bridge that cannot print. */
-async function readJson(response: Response) {
+export async function readJson(response: Response) {
   const result = await response.json().catch(() => null);
   if (response.status === 404) {
     throw new Error('This bridge has no printer — pallet printing needs the gate bridge, not the reader-only build.');

@@ -65,14 +65,14 @@ export default function ControlDrawer(props: {
   return (
     <div className="fixed inset-0 z-[100] flex justify-end">
       <div className="absolute inset-0 bg-black/60" onClick={props.onClose} />
-      <aside className="relative w-full max-w-3xl h-full overflow-y-auto bg-[#0b0f17] text-slate-200 border-l border-white/10 shadow-2xl">
+      <aside className="relative w-full max-w-3xl h-full overflow-y-auto bg-[#f4f7f8] bg-[radial-gradient(900px_420px_at_100%_-8%,rgba(0,188,212,.08),transparent_62%)] text-[#171717] border-l border-[#e5e5e5] shadow-2xl">
         <TriggerFlash lastTriggerAt={bridge.lastTriggerAt} />
 
-        <header className="sticky top-0 z-10 flex items-center justify-between gap-4 px-5 py-4 bg-[#0d1220] border-b border-white/10">
+        <header className="sticky top-0 z-10 flex items-center justify-between gap-4 px-5 py-4 bg-white/85 backdrop-blur-md border-b border-[#e5e5e5]/70">
           <div className="flex items-center gap-3">
             <span className="text-lg font-semibold tracking-tight">Engineering console</span>
             {status.reading && (
-              <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse">
+              <span className="text-xs px-2 py-0.5 rounded-full bg-[#fffbeb] text-[#b45309] border border-[#fcd34d] animate-pulse">
                 READING
               </span>
             )}
@@ -83,34 +83,34 @@ export default function ControlDrawer(props: {
             <button
               onClick={props.onOpenPrinting}
               title="Open pallet printing"
-              className="text-sm rounded-md px-3 py-1.5 border border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20 font-medium"
+              className="text-sm rounded-lg px-3 py-1.5 border border-[#7fd9e4] bg-[#e0f7fa] text-[#008A9C] hover:bg-[#c9f0f5] font-medium"
             >
               Pallet printing
             </button>
             <button
               onClick={props.onOpenTv}
               title="Open TV wallboard mode"
-              className="text-sm rounded-md px-3 py-1.5 border border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 font-medium"
+              className="text-sm rounded-lg px-3 py-1.5 border border-[#fcd34d] bg-[#fffbeb] text-[#b45309] hover:bg-[#fef3c7] font-medium"
             >
               📺 TV
             </button>
             <button
               onClick={props.onToggleVoice}
               title={props.voiceOn ? 'Gate chime ON — click to mute' : 'Gate chime OFF — click to enable'}
-              className={`text-lg rounded-md px-2 py-1 border transition ${
-                props.voiceOn ? 'bg-indigo-600/30 border-indigo-500/50' : 'bg-black/30 border-white/10 opacity-60 hover:opacity-100'
+              className={`text-lg rounded-lg px-2 py-1 border transition ${
+                props.voiceOn ? 'bg-[#e0f7fa] border-[#7fd9e4]' : 'bg-[#f5f5f5] border-[#e5e5e5] opacity-60 hover:opacity-100'
               }`}
             >
               {props.voiceOn ? '🔊' : '🔇'}
             </button>
-            <button onClick={props.onClose} className="rounded-md bg-slate-700 hover:bg-slate-600 px-3 py-1.5 text-sm font-medium">
+            <button onClick={props.onClose} className="rounded-lg bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_10px_rgba(0,188,212,.28)] hover:from-[#009fb4] hover:to-[#008A9C] active:scale-[.98] transition-all px-3 py-1.5 text-sm font-medium">
               Close ✕
             </button>
           </div>
         </header>
 
         <div className="px-5 py-5 flex flex-col gap-5">
-          <div className="flex rounded-lg bg-black/40 border border-white/10 p-1">
+          <div className="flex rounded-full bg-white border border-[#e3e8ea] p-1 shadow-[0_1px_2px_rgba(16,42,51,.05)]">
             <ModeButton active={tab === 'console'} onClick={() => setTab('console')} disabled={false}>
               Console
             </ModeButton>
@@ -201,23 +201,23 @@ function AddressField(props: {
   const dirty = host.trim() !== props.value || Number(port) !== props.port;
   return (
     <div className="text-sm">
-      <span className="text-slate-400">{props.label}</span>
+      <span className="text-[#737373]">{props.label}</span>
       <div className="mt-1 flex gap-2">
         <input
           value={host}
           onChange={(e) => setHost(e.target.value)}
           placeholder={props.placeholder}
-          className="flex-1 rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm placeholder:text-slate-600"
+          className="flex-1 rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-3 py-2 text-sm placeholder:text-[#a3a3a3]"
         />
         <input
           value={port}
           onChange={(e) => setPort(e.target.value)}
-          className="w-20 rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm"
+          className="w-20 rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-3 py-2 text-sm"
         />
         <button
           onClick={() => props.onApply(host.trim(), Number(port) || 9100)}
           disabled={!dirty}
-          className="rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-40 px-3 py-2 text-sm"
+          className="rounded-lg bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_10px_rgba(0,188,212,.28)] hover:from-[#009fb4] hover:to-[#008A9C] active:scale-[.98] transition-all disabled:opacity-40 px-3 py-2 text-sm"
         >
           Set
         </button>
@@ -232,23 +232,23 @@ function UrlField(props: { label: string; value: string; placeholder?: string; h
   useEffect(() => setText(props.value), [props.value]);
   return (
     <div className="text-sm">
-      <span className="text-slate-400">{props.label}</span>
+      <span className="text-[#737373]">{props.label}</span>
       <div className="mt-1 flex gap-2">
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder={props.placeholder}
-          className="flex-1 rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm placeholder:text-slate-600"
+          title={props.hint}
+          className="flex-1 rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-3 py-2 text-sm placeholder:text-[#a3a3a3]"
         />
         <button
           onClick={() => props.onApply(text.trim())}
           disabled={text.trim() === props.value}
-          className="rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-40 px-3 py-2 text-sm"
+          className="rounded-lg bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_10px_rgba(0,188,212,.28)] hover:from-[#009fb4] hover:to-[#008A9C] active:scale-[.98] transition-all disabled:opacity-40 px-3 py-2 text-sm"
         >
           Set
         </button>
       </div>
-      {props.hint && <p className="text-xs text-slate-500 mt-1">{props.hint}</p>}
     </div>
   );
 }
@@ -288,9 +288,9 @@ function PalletWindowCard() {
   return (
     <Card title="Pallet grouping">
       <label className="text-sm block">
-        <span className="text-slate-400">
+        <span className="text-[#737373]">
           Close an unconfirmed pallet after (seconds)
-          {applied != null ? <span className="text-emerald-400"> — now {applied}s</span> : ''}
+          {applied != null ? <span className="text-[#15803d]"> — now {applied}s</span> : ''}
         </span>
         <div className="flex gap-2 mt-1 items-center">
           <input
@@ -301,26 +301,18 @@ function PalletWindowCard() {
             value={sec}
             disabled={busy}
             onChange={(e) => setSec(Number(e.target.value))}
-            className="w-24 rounded-md bg-black/40 border border-white/10 px-2 py-1.5 font-mono text-sm"
+            className="w-24 rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-2 py-1.5 text-sm"
           />
           <button
             onClick={apply}
             disabled={busy || sec === applied}
-            className="rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-3 py-1.5 text-sm"
+            className="rounded-lg bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_10px_rgba(0,188,212,.28)] hover:from-[#009fb4] hover:to-[#008A9C] active:scale-[.98] transition-all disabled:opacity-50 px-3 py-1.5 text-sm"
           >
             Set
           </button>
         </div>
       </label>
-      <p className="text-xs text-slate-500 mt-2">
-        Every carton read inside this window joins ONE pallet and ONE printed label. Pressing <b>Close &amp; print</b> ends it
-        immediately — this is only the fallback for when nobody does.
-      </p>
-      <p className="text-xs text-slate-500 mt-1">
-        The clock starts on the <b>first</b> carton and does not extend. Shorter separates pallets arriving back to back; too short
-        splits a slow unload across two labels. A change applies to the next pallet, never one already open.
-      </p>
-      {note && <p className="text-xs text-amber-400 mt-2">{note}</p>}
+      {note && <p className="text-xs text-[#b45309] mt-2">{note}</p>}
     </Card>
   );
 }
@@ -344,7 +336,7 @@ const BASIS_LABEL: Record<string, string> = {
 function NumField(props: { label: string; value: number; min: number; step: number; onChange: (v: number) => void; hint: string }) {
   return (
     <label className="text-xs block">
-      <span className="text-slate-400">{props.label}</span>
+      <span className="text-[#737373]">{props.label}</span>
       <input
         type="number"
         value={props.value}
@@ -352,7 +344,7 @@ function NumField(props: { label: string; value: number; min: number; step: numb
         step={props.step}
         onChange={(e) => props.onChange(Number(e.target.value))}
         title={props.hint}
-        className="mt-0.5 w-full rounded-md bg-black/40 border border-white/10 px-2 py-1.5 font-mono text-sm"
+        className="mt-0.5 w-full rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-2 py-1.5 text-sm"
       />
     </label>
   );
@@ -459,19 +451,19 @@ function NoIrPanel(props: { bridge: BridgeState }) {
           <span
             className={`text-xs px-2.5 py-1 rounded-full border font-semibold ${
               enabled
-                ? 'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/40'
-                : 'bg-white/5 text-slate-400 border-white/10'
+                ? 'bg-[#e0f7fa] text-[#008A9C] border-[#7fd9e4]'
+                : 'bg-[#f5f5f5] text-[#737373] border-[#e5e5e5]'
             }`}
           >
             {enabled ? 'NO-IR MODE ACTIVE' : 'IR mode (beams) active'}
           </span>
           {enabled && !misconfigured && (
-            <span className="text-xs text-emerald-400">reader is reading continuously — visits will be detected</span>
+            <span className="text-xs text-[#15803d]">reader is reading continuously — visits will be detected</span>
           )}
         </div>
 
         {misconfigured && (
-          <div className="mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+          <div className="mb-3 rounded-lg border border-[#fcd34d] bg-[#fffbeb] px-3 py-2 text-sm text-[#b45309]">
             ⚠ No-IR mode is on but the reader is {!status.connected ? 'not connected' : status.mode === 'hw' ? 'in HW trigger mode' : 'not reading'} — nothing
             will be detected. It must read continuously: connect it, then Enable again (it sets Manual mode + Start).
           </div>
@@ -479,23 +471,17 @@ function NoIrPanel(props: { bridge: BridgeState }) {
 
         <div className="flex gap-2">
           {!enabled ? (
-            <button onClick={enable} disabled={busy} className="flex-1 rounded-md bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-50 px-4 py-3 font-semibold">
+            <button onClick={enable} disabled={busy} className="flex-1 rounded-lg bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_10px_rgba(0,188,212,.28)] hover:from-[#009fb4] hover:to-[#008A9C] active:scale-[.98] transition-all disabled:opacity-50 px-4 py-3 font-semibold">
               Enable no-IR trial
             </button>
           ) : (
-            <button onClick={disable} disabled={busy} className="flex-1 rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-4 py-3 font-semibold">
+            <button onClick={disable} disabled={busy} className="flex-1 rounded-lg bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_10px_rgba(0,188,212,.28)] hover:from-[#009fb4] hover:to-[#008A9C] active:scale-[.98] transition-all disabled:opacity-50 px-4 py-3 font-semibold">
               Back to IR (beams)
             </button>
           )}
         </div>
-        {error && <p className="text-sm text-rose-400 mt-2 break-all">{error}</p>}
+        {error && <p className="text-sm text-[#b41c1e] mt-2 break-all">{error}</p>}
 
-        <p className="text-xs text-slate-500 mt-3">
-          Logic under trial: a box's first pass = <span className="text-emerald-400">received (IN)</span>; seen again after leaving the field ={' '}
-          <span className="text-sky-400">shipping out (OUT)</span>. Direction is anchored to Nexus carton state (and this bridge's own last verdict), so a
-          desync shows up as a wrong "why" below instead of silently inverting forever. The IR wiring and code stay untouched — this switch is reversible any
-          time.
-        </p>
       </Card>
 
       <Card title="No-IR tuning">
@@ -525,13 +511,13 @@ function NoIrPanel(props: { bridge: BridgeState }) {
             hint="Same tag can't fire again for this long after an event. Raise a lot for production; low values make lingering pallets flip in/out."
           />
           <label className="text-xs block">
-            <span className="text-slate-400">RSSI floor (dBm)</span>
+            <span className="text-[#737373]">RSSI floor (dBm)</span>
             <input
               value={minRssiText}
               onChange={(e) => setMinRssiText(e.target.value)}
               placeholder="off"
               title="Reads weaker than this are ignored entirely — logically shrinks the read zone. Blank = off. Try -60 and tune."
-              className="mt-0.5 w-full rounded-md bg-black/40 border border-white/10 px-2 py-1.5 font-mono text-sm placeholder:text-slate-600"
+              className="mt-0.5 w-full rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-2 py-1.5 text-sm placeholder:text-[#a3a3a3]"
             />
           </label>
           <NumField
@@ -543,29 +529,18 @@ function NoIrPanel(props: { bridge: BridgeState }) {
             hint="Visits with fewer reads are dropped as noise — one multipath ghost read must not flip warehouse state."
           />
         </div>
-        <label className="flex items-start gap-2.5 mt-3 rounded-md border border-white/10 bg-black/20 px-3 py-2 cursor-pointer">
-          <input type="checkbox" checked={fastCount} onChange={(e) => setFastCount(e.target.checked)} className="mt-0.5 accent-emerald-500" />
+        <label className="flex items-start gap-2.5 mt-3 rounded-lg border border-[#e5e5e5] bg-[#fafafa] px-3 py-2 cursor-pointer">
+          <input type="checkbox" checked={fastCount} onChange={(e) => setFastCount(e.target.checked)} className="mt-0.5 accent-[#00BCD4]" />
           <span className="text-xs">
-            <span className="text-slate-200">Count on the deciding read</span>
-            <span className="block text-[11px] text-slate-500 mt-0.5 leading-relaxed">
-              Off, each carton is held for the decision window (Console tab → Max window, {'currently the 4s cap in most setups'}) before it reaches the
-              board — and because the reader runs continuously here, a pallet standing in the field re-arms that timer, so cartons land one at a time
-              rather than as a pallet. On, a carton counts the instant it clears “Min reads / visit”, which in no-IR mode is the only thing the reads
-              decide: direction is inferred, not read. The trade is telemetry — the receipt then carries the deciding read(s) rather than the whole
-              visit, so its read count, antenna list and strongest RSSI narrow. The tag feed and the RSSI floor are unaffected.
-            </span>
+            <span className="text-[#171717]">Count on the deciding read</span>
           </span>
         </label>
         <div className="flex items-center gap-3 mt-2">
-          <button onClick={applyTuning} disabled={busy} className="flex-1 rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-3 py-1.5 text-sm">
+          <button onClick={applyTuning} disabled={busy} className="flex-1 rounded-lg bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_10px_rgba(0,188,212,.28)] hover:from-[#009fb4] hover:to-[#008A9C] active:scale-[.98] transition-all disabled:opacity-50 px-3 py-1.5 text-sm">
             Apply tuning
           </button>
-          {saved && <span className="text-xs text-emerald-400">saved ✓</span>}
+          {saved && <span className="text-xs text-[#15803d]">saved ✓</span>}
         </div>
-        <p className="text-[11px] text-slate-500 mt-1.5">
-          Read power (Console tab → Connection) matters more than any of these: the whole trial stands or falls on the read zone covering the doorway and
-          nothing else.
-        </p>
       </Card>
 
       <Card title="Simulate (no hardware)">
@@ -577,22 +552,18 @@ function NoIrPanel(props: { bridge: BridgeState }) {
             Visit — unknown tag
           </SimButton>
         </div>
-        <p className="text-xs text-slate-500 mt-3">
-          Fires a burst of direction-less reads at <span className="font-mono">/debug/mock-visit</span> — exactly what the antennas produce with no beams.
-          While IR mode is active these are strays (by design) and nothing moves. Fire the same known tag twice, {'>'}re-arm+absence apart, to see IN then OUT.
-        </p>
       </Card>
 
-      <section className="rounded-xl border border-fuchsia-500/30 bg-[#111827] overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 bg-fuchsia-500/10">
-          <h2 className="text-sm font-medium text-fuchsia-200">
-            No-IR decisions <span className="text-slate-500">(direction + why it was inferred)</span>
+      <section className="rounded-2xl border border-[#d5eef2] bg-white overflow-hidden shadow-[0_1px_2px_rgba(16,42,51,.04),0_10px_28px_-16px_rgba(0,138,156,.14)]">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-[#e5e5e5] bg-[#e0f7fa]">
+          <h2 className="text-sm font-medium text-[#008A9C]">
+            No-IR decisions <span className="text-[#8a8a8a]">(direction + why it was inferred)</span>
           </h2>
-          <div className="text-sm text-fuchsia-300 font-semibold tabular-nums">{decisions.length}</div>
+          <div className="text-sm text-[#008A9C] font-semibold tabular-nums">{decisions.length}</div>
         </div>
         <div className="overflow-x-auto max-h-[40vh] overflow-y-auto">
           <table className="w-full text-sm">
-            <thead className="sticky top-0 bg-[#0d1220] text-slate-400">
+            <thead className="sticky top-0 bg-white text-[#737373]">
               <tr>
                 <th className="text-left font-medium px-4 py-2 w-28">Time</th>
                 <th className="text-left font-medium px-4 py-2 w-28">SKU</th>
@@ -605,26 +576,26 @@ function NoIrPanel(props: { bridge: BridgeState }) {
             <tbody>
               {decisions.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
+                  <td colSpan={6} className="px-4 py-8 text-center text-[#8a8a8a]">
                     No inferred movements yet — enable the trial and pass a tagged box through, or use Simulate above.
                   </td>
                 </tr>
               ) : (
                 decisions.map((e) => (
-                  <tr key={e.id} className="border-t border-white/5 hover:bg-white/5">
-                    <td className="px-4 py-1.5 font-mono text-xs text-slate-400">{new Date(e.timestamp).toLocaleTimeString(undefined, { hour12: false })}</td>
-                    <td className={`px-4 py-1.5 font-mono text-xs ${e.known ? 'text-indigo-300' : 'text-amber-400'}`}>{e.item.sku}</td>
-                    <td className="px-4 py-1.5 font-mono text-xs text-slate-500 break-all">{e.epc}</td>
+                  <tr key={e.id} className="border-t border-[#f0f0f0] hover:bg-[#f0fbfd]">
+                    <td className="px-4 py-1.5 text-xs text-[#737373]">{new Date(e.timestamp).toLocaleTimeString(undefined, { hour12: false })}</td>
+                    <td className={`px-4 py-1.5 text-xs ${e.known ? 'text-[#008A9C]' : 'text-[#b45309]'}`}>{e.item.sku}</td>
+                    <td className="px-4 py-1.5 text-xs text-[#8a8a8a] break-all">{e.epc}</td>
                     <td className="px-4 py-1.5">
                       {e.direction === 'in' ? (
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">IN</span>
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-[#f0fdf4] text-[#15803d] border border-[#a7e3bd]">IN</span>
                       ) : (
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30">OUT</span>
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-[#e0f2fe] text-[#0369a1] border border-[#7dd3fc]">OUT</span>
                       )}
                     </td>
-                    <td className="px-4 py-1.5 text-xs text-slate-300">{e.basis ? BASIS_LABEL[e.basis] ?? e.basis : '—'}</td>
+                    <td className="px-4 py-1.5 text-xs text-[#404040]">{e.basis ? BASIS_LABEL[e.basis] ?? e.basis : '—'}</td>
                     <td className="px-4 py-1.5 text-xs">
-                      {e.unexpected ? <span className="text-rose-400">⚠ {e.unexpected}</span> : <span className="text-slate-600">—</span>}
+                      {e.unexpected ? <span className="text-[#b41c1e]">⚠ {e.unexpected}</span> : <span className="text-[#a3a3a3]">—</span>}
                     </td>
                   </tr>
                 ))
@@ -635,30 +606,30 @@ function NoIrPanel(props: { bridge: BridgeState }) {
       </section>
 
       <Card title="What to watch during the trial (the known edge cases)">
-        <ul className="text-sm text-slate-300 flex flex-col gap-2 list-disc pl-5">
+        <ul className="text-sm text-[#404040] flex flex-col gap-2 list-disc pl-5">
           <li>
-            <span className="text-slate-100 font-medium">Read-zone test first.</span> Park a tagged carton 1–3 m from the gate, off to the side, for 10
+            <span className="text-[#0a0a0a] font-medium">Read-zone test first.</span> Park a tagged carton 1–3 m from the gate, off to the side, for 10
             minutes. If decisions appear for it, the field is too big — lower read power or set the RSSI floor before trusting anything else.
           </li>
           <li>
-            <span className="text-slate-100 font-medium">Quick in-and-back-out is swallowed.</span> Within the re-arm window the second pass is deliberately
+            <span className="text-[#0a0a0a] font-medium">Quick in-and-back-out is swallowed.</span> Within the re-arm window the second pass is deliberately
             ignored. If forklifts genuinely enter and leave within {'<'}1 minute, that pass is lost — decide whether that is acceptable before lowering re-arm.
           </li>
           <li>
-            <span className="text-slate-100 font-medium">The 10–20 s read tail is normal.</span> Tags keep reading after a pallet passes; the absence window
+            <span className="text-[#0a0a0a] font-medium">The 10–20 s read tail is normal.</span> Tags keep reading after a pallet passes; the absence window
             exists to absorb it. Never set absence below ~25 s.
           </li>
           <li>
-            <span className="text-slate-100 font-medium">A wrong flip self-perpetuates.</span> One bad decision inverts the next one for that box. The "why"
+            <span className="text-[#0a0a0a] font-medium">A wrong flip self-perpetuates.</span> One bad decision inverts the next one for that box. The "why"
             column is how you catch it; fix by correcting the carton in Nexus — a Nexus record newer than the gate's last sighting of that box wins within a
             few minutes. The gate's memory itself survives restarts (rebuilt from its journal).
           </li>
           <li>
-            <span className="text-slate-100 font-medium">Boxes with reprinted labels flip per-label.</span> A box carrying several live EPCs can read IN under
+            <span className="text-[#0a0a0a] font-medium">Boxes with reprinted labels flip per-label.</span> A box carrying several live EPCs can read IN under
             one label and OUT under another. Retire old labels before relying on this mode.
           </li>
           <li>
-            <span className="text-slate-100 font-medium">OUT is judged, not trusted.</span> An inferred OUT for a carton Nexus says was never received (or
+            <span className="text-[#0a0a0a] font-medium">OUT is judged, not trusted.</span> An inferred OUT for a carton Nexus says was never received (or
             already shipped) is flagged in the Flag column and not counted as a dispatch — same protection as IR mode.
           </li>
         </ul>
@@ -772,26 +743,21 @@ function GateSimulator(props: { board: GateBoardApi }) {
           Reset day
         </SimButton>
       </div>
-      <p className="text-xs text-slate-500 mt-3">
-        Each button POSTs <span className="font-mono">/debug/mock-passage</span> — the bridge emits a real IR trigger plus
-        direction-stamped reads, so the board counts exactly as it would with hardware. Reset day clears today’s counts and
-        exceptions in the browser only.
-      </p>
     </Card>
   );
 }
 
 function SimButton(props: { onClick: () => void; tone: 'cyan' | 'amber' | 'rose' | 'yellow' | 'green' | 'slate'; children: React.ReactNode }) {
   const tones = {
-    cyan: 'bg-cyan-500/10 border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/20',
-    amber: 'bg-orange-500/10 border-orange-500/40 text-orange-300 hover:bg-orange-500/20',
-    rose: 'bg-rose-500/10 border-rose-500/40 text-rose-300 hover:bg-rose-500/20',
-    yellow: 'bg-yellow-500/10 border-yellow-500/40 text-yellow-300 hover:bg-yellow-500/20',
-    green: 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/25',
-    slate: 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10',
+    cyan: 'bg-[#e0f7fa] border-[#7fd9e4] text-[#008A9C] hover:bg-[#c9f0f5]',
+    amber: 'bg-[#fff7ed] border-[#fdba74] text-[#c2410c] hover:bg-[#ffedd5]',
+    rose: 'bg-[#fef2f2] border-[#f0a1a2] text-[#b41c1e] hover:bg-[#fee2e2]',
+    yellow: 'bg-[#fefce8] border-[#fde047] text-[#a16207] hover:bg-[#fef9c3]',
+    green: 'bg-[#f0fdf4] border-[#86d49f] text-[#15803d] hover:bg-[#dcfce7]',
+    slate: 'bg-[#f5f5f5] border-[#e5e5e5] text-[#404040] hover:bg-[#e0f7fa]',
   };
   return (
-    <button onClick={props.onClick} className={`rounded-md border px-3 py-3 text-sm font-medium transition ${tones[props.tone]}`}>
+    <button onClick={props.onClick} className={`rounded-lg border px-3 py-3 text-sm font-medium transition ${tones[props.tone]}`}>
       {props.children}
     </button>
   );
@@ -802,16 +768,16 @@ function SimButton(props: { onClick: () => void; tone: 'cyan' | 'amber' | 'rose'
 function Pill(props: { ok: boolean; okText: string; badText: string }) {
   return (
     <span className="inline-flex items-center gap-2 text-sm">
-      <span className={`h-2.5 w-2.5 rounded-full ${props.ok ? 'bg-emerald-400 shadow-[0_0_8px] shadow-emerald-400/70' : 'bg-rose-500'}`} />
-      <span className={props.ok ? 'text-emerald-300' : 'text-rose-300'}>{props.ok ? props.okText : props.badText}</span>
+      <span className={`h-2.5 w-2.5 rounded-full ${props.ok ? 'bg-[#22c55e] shadow-[0_0_8px] shadow-[#22c55e]/50' : 'bg-[#dc2626]'}`} />
+      <span className={props.ok ? 'text-[#15803d]' : 'text-[#b41c1e]'}>{props.ok ? props.okText : props.badText}</span>
     </span>
   );
 }
 
 function Card(props: { title: string; children: React.ReactNode }) {
   return (
-    <section className="rounded-xl border border-white/10 bg-[#111827] p-4">
-      <h2 className="text-xs uppercase tracking-wider text-slate-400 mb-3">{props.title}</h2>
+    <section className="rounded-2xl border border-[#eef1f2] bg-white p-5 shadow-[0_1px_2px_rgba(16,42,51,.04),0_10px_28px_-16px_rgba(0,138,156,.14)]">
+      <h2 className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#008A9C] mb-4">{props.title}</h2>
       {props.children}
     </section>
   );
@@ -822,8 +788,10 @@ function ModeButton(props: { active: boolean; disabled: boolean; onClick: () => 
     <button
       onClick={props.onClick}
       disabled={props.disabled}
-      className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition ${
-        props.active ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-white/5'
+      className={`flex-1 rounded-full px-3 py-1.5 text-sm font-semibold transition-all ${
+        props.active
+          ? 'bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_8px_rgba(0,188,212,.30)]'
+          : 'text-[#404040] hover:bg-[#f0fbfd]'
       } disabled:opacity-50`}
     >
       {props.children}
@@ -848,30 +816,30 @@ function ConnectPanel(props: {
     <Card title="Connection">
       <div className="flex flex-col gap-3">
         <label className="text-sm">
-          <span className="text-slate-400">Reader IP</span>
+          <span className="text-[#737373]">Reader IP</span>
           <input
             value={props.ip}
             onChange={(e) => props.onIp(e.target.value)}
             disabled={props.connected}
-            className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm disabled:opacity-50"
+            className="mt-1 w-full rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-3 py-2 text-sm disabled:opacity-50"
           />
         </label>
         <label className="text-sm">
-          <span className="text-slate-400">Port</span>
+          <span className="text-[#737373]">Port</span>
           <input
             type="number"
             value={props.port}
             onChange={(e) => props.onPort(Number(e.target.value))}
             disabled={props.connected}
-            className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm disabled:opacity-50"
+            className="mt-1 w-full rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-3 py-2 text-sm disabled:opacity-50"
           />
         </label>
         {!props.connected ? (
-          <button onClick={props.onConnect} disabled={props.busy} className="rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 px-4 py-2 font-medium">
+          <button onClick={props.onConnect} disabled={props.busy} className="rounded-lg bg-[#16a34a] text-white hover:bg-[#15803d] disabled:opacity-50 px-4 py-2 font-medium">
             Connect
           </button>
         ) : (
-          <button onClick={props.onDisconnect} disabled={props.busy} className="rounded-md bg-rose-600 hover:bg-rose-500 disabled:opacity-50 px-4 py-2 font-medium">
+          <button onClick={props.onDisconnect} disabled={props.busy} className="rounded-lg bg-[#dc2626] text-white hover:bg-[#b91c1c] disabled:opacity-50 px-4 py-2 font-medium">
             Disconnect
           </button>
         )}
@@ -914,8 +882,8 @@ function PowerControl(props: { connected: boolean; minRssi?: number | null; weak
 
   return (
     <label className="text-sm">
-      <span className="text-slate-400">
-        Read power (dBm){current != null ? <span className="text-emerald-400"> — current {current}</span> : ''}
+      <span className="text-[#737373]">
+        Read power (dBm){current != null ? <span className="text-[#15803d]"> — current {current}</span> : ''}
       </span>
       <div className="flex gap-2 mt-1 items-center">
         <input
@@ -925,14 +893,13 @@ function PowerControl(props: { connected: boolean; minRssi?: number | null; weak
           value={value}
           disabled={!props.connected || busy}
           onChange={(e) => setValue(Number(e.target.value))}
-          className="flex-1 accent-emerald-500 disabled:opacity-40"
+          className="flex-1 accent-[#00BCD4] disabled:opacity-40"
         />
-        <span className="w-8 text-right font-mono text-sm tabular-nums">{value}</span>
-        <button onClick={apply} disabled={!props.connected || busy || value === current} className="rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-3 py-1.5 text-sm">
+        <span className="w-8 text-right text-sm tabular-nums">{value}</span>
+        <button onClick={apply} disabled={!props.connected || busy || value === current} className="rounded-lg bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_10px_rgba(0,188,212,.28)] hover:from-[#009fb4] hover:to-[#008A9C] active:scale-[.98] transition-all disabled:opacity-50 px-3 py-1.5 text-sm">
           Set
         </button>
       </div>
-      <p className="text-xs text-slate-500 mt-1">Low = short range (fewer stray reads) · 30 = max. Persists on the reader.</p>
       <AntennaPower connected={props.connected} />
       <ReadFloor minRssi={props.minRssi} weakDropped={props.weakDropped} />
       <BeeperControl connected={props.connected} />
@@ -982,24 +949,20 @@ function BeeperControl(props: { connected: boolean }) {
   };
 
   return (
-    <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3">
+    <div className="mt-3 rounded-lg border border-[#e5e5e5] bg-[#fafafa] p-3">
       <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold text-slate-300">Reader beeper</span>
+        <span className="text-xs font-semibold text-[#404040]">Reader beeper</span>
         <button
           onClick={toggle}
           disabled={!props.connected || busy}
-          className={`rounded-md px-2 py-1 text-xs font-semibold disabled:opacity-40 ${
-            on ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' : 'bg-slate-700/50 text-slate-400 border border-white/10'
+          className={`rounded-lg px-2 py-1 text-xs font-semibold disabled:opacity-40 ${
+            on ? 'bg-[#fffbeb] text-[#b45309] border border-[#fcd34d]' : 'bg-[#f5f5f5] text-[#737373] border border-[#e5e5e5]'
           }`}
         >
           {on == null ? '—' : on ? 'BEEPING' : 'SILENT'}
         </button>
       </div>
-      <p className="text-[11px] text-slate-500 mt-2">
-        The reader's own chirp on every tag read — separate from this board's voice. Saved in the reader, so it stays off after a power
-        cycle.
-      </p>
-      {note && <p className="text-xs text-amber-400 mt-2">{note}</p>}
+      {note && <p className="text-xs text-[#b45309] mt-2">{note}</p>}
     </div>
   );
 }
@@ -1057,15 +1020,15 @@ function ReadFloor(props: { minRssi?: number | null; weakDropped?: number }) {
   };
 
   return (
-    <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3">
+    <div className="mt-3 rounded-lg border border-[#e5e5e5] bg-[#fafafa] p-3">
       <div className="flex items-center justify-between mb-2">
-        <span className="text-xs font-semibold text-slate-300">Ignore weak reads</span>
+        <span className="text-xs font-semibold text-[#404040]">Ignore weak reads</span>
         <button
           onClick={() => send(on ? null : typed)}
           disabled={busy || (!on && !valid)}
           title={!on && !valid ? 'Type a cut-off first' : undefined}
-          className={`rounded-md px-2 py-1 text-xs font-semibold disabled:opacity-40 ${
-            on ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : 'bg-slate-700/50 text-slate-400 border border-white/10'
+          className={`rounded-lg px-2 py-1 text-xs font-semibold disabled:opacity-40 ${
+            on ? 'bg-[#f0fdf4] text-[#15803d] border border-[#86d49f]' : 'bg-[#f5f5f5] text-[#737373] border border-[#e5e5e5]'
           }`}
         >
           {on ? 'ON' : 'OFF'}
@@ -1081,9 +1044,9 @@ function ReadFloor(props: { minRssi?: number | null; weakDropped?: number }) {
           placeholder="e.g. -65"
           disabled={busy}
           onChange={(e) => setText(e.target.value)}
-          className="w-24 rounded-md bg-black/40 border border-white/10 px-2 py-1 font-mono text-xs tabular-nums text-slate-200 placeholder:text-slate-600 disabled:opacity-40"
+          className="w-24 rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-2 py-1 text-xs tabular-nums text-[#171717] placeholder:text-[#a3a3a3] disabled:opacity-40"
         />
-        <span className="text-[11px] text-slate-500">dBm</span>
+        <span className="text-[11px] text-[#8a8a8a]">dBm</span>
         <input
           type="range"
           min={-90}
@@ -1091,33 +1054,19 @@ function ReadFloor(props: { minRssi?: number | null; weakDropped?: number }) {
           value={sliderAt}
           disabled={busy}
           onChange={(e) => setText(e.target.value)}
-          className="flex-1 accent-emerald-500 disabled:opacity-40"
+          className="flex-1 accent-[#00BCD4] disabled:opacity-40"
           aria-label="Read floor, coarse adjust"
         />
         <button
           onClick={() => send(typed)}
           disabled={busy || !valid || typed === props.minRssi}
-          className="rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-40 px-2 py-1 text-xs"
+          className="rounded-lg bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_10px_rgba(0,188,212,.28)] hover:from-[#009fb4] hover:to-[#008A9C] active:scale-[.98] transition-all disabled:opacity-40 px-2 py-1 text-xs"
         >
           Set
         </button>
       </div>
-      {text.trim() !== '' && !valid && <p className="text-xs text-amber-400 mt-2">Signal strength is a negative number, e.g. -65.</p>}
-      <p className="text-[11px] text-slate-500 mt-2">
-        {on ? (
-          <>
-            Reads weaker than {props.minRssi} dBm are thrown away — no board row, no movement, nothing recorded.{' '}
-            {props.weakDropped ? <span className="text-slate-400">{props.weakDropped} dropped so far.</span> : null}
-          </>
-        ) : (
-          <>Off — every read counts. Turn on to shrink the read zone without touching antenna power.</>
-        )}
-      </p>
-      <p className="text-[11px] text-slate-500 mt-1">
-        You choose the cut-off. Closer to −40 = near the antenna only · closer to −90 = the whole room. Read the RSSI column in the tag
-        feed to see what your own cartons actually measure.
-      </p>
-      {note && <p className="text-xs text-amber-400 mt-2">{note}</p>}
+      {text.trim() !== '' && !valid && <p className="text-xs text-[#b45309] mt-2">Signal strength is a negative number, e.g. -65.</p>}
+      {note && <p className="text-xs text-[#b45309] mt-2">{note}</p>}
     </div>
   );
 }
@@ -1208,8 +1157,8 @@ function AntennaPower(props: { connected: boolean }) {
   };
 
   return (
-    <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3">
-      <div className="text-xs font-semibold text-slate-300 mb-2">Antennas</div>
+    <div className="mt-3 rounded-lg border border-[#e5e5e5] bg-[#fafafa] p-3">
+      <div className="text-xs font-semibold text-[#404040] mb-2">Antennas</div>
       <div className="space-y-2">
         {PORTS.map((port) => {
           const on = enabled.includes(port);
@@ -1218,8 +1167,8 @@ function AntennaPower(props: { connected: boolean }) {
               <button
                 onClick={() => toggle(port)}
                 disabled={!props.connected || busy}
-                className={`w-14 shrink-0 rounded-md px-2 py-1 text-xs font-semibold disabled:opacity-40 ${
-                  on ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : 'bg-slate-700/50 text-slate-500 border border-white/10'
+                className={`w-14 shrink-0 rounded-lg px-2 py-1 text-xs font-semibold disabled:opacity-40 ${
+                  on ? 'bg-[#f0fdf4] text-[#15803d] border border-[#86d49f]' : 'bg-[#f5f5f5] text-[#8a8a8a] border border-[#e5e5e5]'
                 }`}
               >
                 ANT {port}
@@ -1231,16 +1180,16 @@ function AntennaPower(props: { connected: boolean }) {
                 value={draft[port] ?? 18}
                 disabled={!props.connected || busy || !on}
                 onChange={(e) => setDraft((d) => ({ ...d, [port]: Number(e.target.value) }))}
-                className="flex-1 accent-emerald-500 disabled:opacity-30"
+                className="flex-1 accent-[#00BCD4] disabled:opacity-30"
               />
-              <span className="w-8 text-right font-mono text-xs tabular-nums text-slate-300">{draft[port] ?? 18}</span>
-              <span className="w-14 text-right font-mono text-[11px] tabular-nums text-slate-500">
+              <span className="w-8 text-right text-xs tabular-nums text-[#404040]">{draft[port] ?? 18}</span>
+              <span className="w-14 text-right text-[11px] tabular-nums text-[#8a8a8a]">
                 {applied[port] != null ? `${applied[port]} dBm` : '—'}
               </span>
               <button
                 onClick={() => applyPower(port)}
                 disabled={!props.connected || busy || !on || draft[port] === applied[port]}
-                className="rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-40 px-2 py-1 text-xs"
+                className="rounded-lg bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_10px_rgba(0,188,212,.28)] hover:from-[#009fb4] hover:to-[#008A9C] active:scale-[.98] transition-all disabled:opacity-40 px-2 py-1 text-xs"
               >
                 Set
               </button>
@@ -1248,10 +1197,7 @@ function AntennaPower(props: { connected: boolean }) {
           );
         })}
       </div>
-      {note && <p className="text-xs text-amber-400 mt-2">{note}</p>}
-      <p className="text-[11px] text-slate-500 mt-2">
-        Turn a port OFF if nothing is plugged into it — the reader round-robins across enabled ports, so a dead one steals dwell time from the rest.
-      </p>
+      {note && <p className="text-xs text-[#b45309] mt-2">{note}</p>}
     </div>
   );
 }
@@ -1261,7 +1207,7 @@ function AntennaPower(props: { connected: boolean }) {
 function ModePanel(props: { mode: Mode; irDuration: number; busy: boolean; onIrDuration: (v: number) => void; onSetMode: (m: Mode) => void }) {
   return (
     <Card title="Read Mode">
-      <div className="flex rounded-lg bg-black/40 border border-white/10 p-1 mb-3">
+      <div className="flex rounded-full bg-white border border-[#e3e8ea] p-1 mb-3 shadow-[0_1px_2px_rgba(16,42,51,.05)]">
         <ModeButton active={props.mode === 'manual'} onClick={() => props.onSetMode('manual')} disabled={props.busy}>
           Manual
         </ModeButton>
@@ -1273,7 +1219,7 @@ function ModePanel(props: { mode: Mode; irDuration: number; busy: boolean; onIrD
         </ModeButton>
       </div>
       <label className="text-sm block">
-        <span className="text-slate-400">Burst duration (ms) — read window per IR trigger</span>
+        <span className="text-[#737373]">Burst duration (ms) — read window per IR trigger</span>
         <div className="flex gap-2 mt-1">
           <input
             type="number"
@@ -1281,20 +1227,13 @@ function ModePanel(props: { mode: Mode; irDuration: number; busy: boolean; onIrD
             min={50}
             step={50}
             onChange={(e) => props.onIrDuration(Number(e.target.value))}
-            className="w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm"
+            className="w-full rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-3 py-2 text-sm"
           />
-          <button onClick={() => props.onSetMode(props.mode)} disabled={props.busy} className="rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-3 py-2 text-sm">
+          <button onClick={() => props.onSetMode(props.mode)} disabled={props.busy} className="rounded-lg bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_10px_rgba(0,188,212,.28)] hover:from-[#009fb4] hover:to-[#008A9C] active:scale-[.98] transition-all disabled:opacity-50 px-3 py-2 text-sm">
             Apply
           </button>
         </div>
       </label>
-      <p className="text-xs text-slate-500 mt-3">
-        {props.mode === 'ir'
-          ? 'Bridge watches GPI1 over TCP and starts a read burst when the beam breaks.'
-          : props.mode === 'hw'
-            ? 'Reader firmware triggers on GPI1 and pushes tag data to the bridge over UDP (work mode 2).'
-            : 'You control reading with the Start / Stop buttons below.'}
-      </p>
       <TimingControl />
     </Card>
   );
@@ -1332,7 +1271,7 @@ function TimingControl() {
 
   const Field = (p: { label: string; value: number; step: number; min: number; onChange: (v: number) => void; hint: string }) => (
     <label className="text-xs block">
-      <span className="text-slate-400">{p.label}</span>
+      <span className="text-[#737373]">{p.label}</span>
       <input
         type="number"
         value={p.value}
@@ -1340,28 +1279,25 @@ function TimingControl() {
         step={p.step}
         onChange={(e) => p.onChange(Number(e.target.value))}
         title={p.hint}
-        className="mt-0.5 w-full rounded-md bg-black/40 border border-white/10 px-2 py-1.5 font-mono text-sm"
+        className="mt-0.5 w-full rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-2 py-1.5 text-sm"
       />
     </label>
   );
 
   return (
-    <div className="mt-4 pt-3 border-t border-white/10">
+    <div className="mt-4 pt-3 border-t border-[#e5e5e5]">
       <div className="flex items-center justify-between mb-2">
-        <span className="text-xs uppercase tracking-wider text-slate-400">Portal timing (ms)</span>
-        {saved && <span className="text-xs text-emerald-400">saved ✓</span>}
+        <span className="text-xs uppercase tracking-wider text-[#737373]">Portal timing (ms)</span>
+        {saved && <span className="text-xs text-[#15803d]">saved ✓</span>}
       </div>
       <div className="grid grid-cols-3 gap-2">
         <Field label="Dedup" value={dedupMs} min={0} step={500} onChange={setDedupMs} hint="Ignore the same tag for this long after a movement event" />
         <Field label="Quiet" value={quietMs} min={100} step={100} onChange={setQuietMs} hint="Decide direction after this much read-silence" />
         <Field label="Max window" value={maxWindowMs} min={500} step={500} onChange={setMaxWindowMs} hint="Hard cap on one decision window" />
       </div>
-      <button onClick={apply} disabled={busy} className="mt-2 w-full rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-3 py-1.5 text-sm">
+      <button onClick={apply} disabled={busy} className="mt-2 w-full rounded-lg bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_10px_rgba(0,188,212,.28)] hover:from-[#009fb4] hover:to-[#008A9C] active:scale-[.98] transition-all disabled:opacity-50 px-3 py-1.5 text-sm">
         Apply timing
       </button>
-      <p className="text-[11px] text-slate-500 mt-1.5">
-        Dedup: same tag ignored after an event · Quiet: silence before direction decision · Max window: cap per passage.
-      </p>
     </div>
   );
 }
@@ -1375,7 +1311,7 @@ function GpiPanel(props: { gpi: GpiState; mode: Mode }) {
         <GpiLamp label="GPI1" state={props.gpi.gpi1} primary={props.mode === 'ir'} />
         <GpiLamp label="GPI2" state={props.gpi.gpi2} primary={false} />
       </div>
-      <div className="mt-3 text-xs text-slate-500 font-mono break-all">raw: {props.gpi.raw || '—'}</div>
+      <div className="mt-3 text-xs text-[#8a8a8a] break-all">raw: {props.gpi.raw || '—'}</div>
     </Card>
   );
 }
@@ -1383,13 +1319,13 @@ function GpiPanel(props: { gpi: GpiState; mode: Mode }) {
 function GpiLamp(props: { label: string; state: boolean | null; primary: boolean }) {
   const broken = props.state === true;
   const unknown = props.state === null;
-  const color = unknown ? 'bg-slate-600' : broken ? 'bg-red-500 shadow-[0_0_14px] shadow-red-500/70' : 'bg-emerald-500';
+  const color = unknown ? 'bg-[#00BCD4] text-white' : broken ? 'bg-[#dc2626] shadow-[0_0_14px] shadow-[#dc2626]/50' : 'bg-[#16a34a]';
   const text = unknown ? 'no data' : broken ? 'BEAM BROKEN' : 'beam clear';
   return (
     <div className="flex flex-col items-center gap-1.5">
       <span className={`h-6 w-6 rounded-full ${color} ${broken ? 'animate-pulse' : ''}`} />
-      <span className={`text-sm font-medium ${props.primary ? 'text-indigo-300' : 'text-slate-300'}`}>{props.label}</span>
-      <span className={`text-xs ${broken ? 'text-red-400' : unknown ? 'text-slate-500' : 'text-emerald-400'}`}>{text}</span>
+      <span className={`text-sm font-medium ${props.primary ? 'text-[#008A9C]' : 'text-[#404040]'}`}>{props.label}</span>
+      <span className={`text-xs ${broken ? 'text-[#b91c1c]' : unknown ? 'text-[#8a8a8a]' : 'text-[#15803d]'}`}>{text}</span>
     </div>
   );
 }
@@ -1400,7 +1336,7 @@ function ReadControls(props: { connected: boolean; reading: boolean; mode: Mode;
   const disabled = !props.connected || props.busy || props.mode === 'hw';
   if (props.mode === 'hw') {
     return (
-      <div className="rounded-xl border border-white/10 bg-[#111827] px-4 py-4 text-sm text-slate-400 text-center">
+      <div className="rounded-xl border border-[#e5e5e5] bg-white px-4 py-4 text-sm text-[#737373] text-center">
         HW trigger mode — the reader starts reading by itself when the IR beam breaks. Manual Start / Stop is disabled; watch
         the UDP panel below.
       </div>
@@ -1411,14 +1347,14 @@ function ReadControls(props: { connected: boolean; reading: boolean; mode: Mode;
       <button
         onClick={props.onStart}
         disabled={disabled || props.reading}
-        className="flex-1 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed py-4 text-lg font-semibold"
+        className="flex-1 rounded-xl bg-[#16a34a] text-white hover:bg-[#15803d] disabled:opacity-40 disabled:cursor-not-allowed py-4 text-lg font-semibold"
       >
         ▶ Start Reading
       </button>
       <button
         onClick={props.onStop}
         disabled={disabled || !props.reading}
-        className="flex-1 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed py-4 text-lg font-semibold"
+        className="flex-1 rounded-xl bg-[#dc2626] text-white hover:bg-[#b91c1c] disabled:opacity-40 disabled:cursor-not-allowed py-4 text-lg font-semibold"
       >
         ■ Stop Reading
       </button>
@@ -1520,7 +1456,7 @@ function PrintPanel(props: { rows: TagRow[]; readerConnected: boolean; reading: 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
         {/* transport / target */}
         <div className="flex flex-col gap-3">
-          <div className="flex rounded-lg bg-black/40 border border-white/10 p-1">
+          <div className="flex rounded-full bg-white border border-[#e3e8ea] p-1 shadow-[0_1px_2px_rgba(16,42,51,.05)]">
             <ModeButton active={cfg?.transport !== 'tcp'} onClick={() => applyCfg({ transport: 'usb' })} disabled={busy || !cfg}>
               USB (queue)
             </ModeButton>
@@ -1531,27 +1467,27 @@ function PrintPanel(props: { rows: TagRow[]; readerConnected: boolean; reading: 
           {cfg?.transport === 'tcp' ? (
             <div className="flex gap-2">
               <label className="text-sm flex-1">
-                <span className="text-slate-400">Printer IP</span>
-                <input value={cfg.host} onChange={(e) => applyCfg({ host: e.target.value })} className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm" />
+                <span className="text-[#737373]">Printer IP</span>
+                <input value={cfg.host} onChange={(e) => applyCfg({ host: e.target.value })} className="mt-1 w-full rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-3 py-2 text-sm" />
               </label>
               <label className="text-sm w-24">
-                <span className="text-slate-400">Port</span>
+                <span className="text-[#737373]">Port</span>
                 <input
                   type="number"
                   value={cfg.port}
                   onChange={(e) => applyCfg({ port: Number(e.target.value) })}
-                  className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm"
+                  className="mt-1 w-full rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-3 py-2 text-sm"
                 />
               </label>
             </div>
           ) : (
             <label className="text-sm">
-              <span className="text-slate-400">Windows print queue</span>
+              <span className="text-[#737373]">Windows print queue</span>
               <select
                 value={cfg?.printerName ?? ''}
                 onChange={(e) => applyCfg({ printerName: e.target.value })}
                 disabled={!cfg}
-                className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 text-sm"
+                className="mt-1 w-full rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-3 py-2 text-sm"
               >
                 {cfg && !queues.includes(cfg.printerName) && <option value={cfg.printerName}>{cfg.printerName}</option>}
                 {queues.map((q) => (
@@ -1562,13 +1498,13 @@ function PrintPanel(props: { rows: TagRow[]; readerConnected: boolean; reading: 
               </select>
             </label>
           )}
-          <label className="flex items-center gap-2 text-sm text-slate-300">
+          <label className="flex items-center gap-2 text-sm text-[#404040]">
             <input type="checkbox" checked={cfg?.barcode ?? true} onChange={(e) => applyCfg({ barcode: e.target.checked })} disabled={!cfg} />
             Print Code-128 barcode of the EPC
           </label>
           <div className="flex gap-2">
             <label className="text-sm flex-1">
-              <span className="text-slate-400">Top offset (dots)</span>
+              <span className="text-[#737373]">Top offset (dots)</span>
               <input
                 type="number"
                 min={0}
@@ -1576,11 +1512,11 @@ function PrintPanel(props: { rows: TagRow[]; readerConnected: boolean; reading: 
                 value={cfg?.topOffsetDots ?? 0}
                 onChange={(e) => applyCfg({ topOffsetDots: Number(e.target.value) || 0 })}
                 disabled={!cfg}
-                className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm"
+                className="mt-1 w-full rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-3 py-2 text-sm"
               />
             </label>
             <label className="text-sm flex-1">
-              <span className="text-slate-400">Left offset (dots)</span>
+              <span className="text-[#737373]">Left offset (dots)</span>
               <input
                 type="number"
                 min={0}
@@ -1588,50 +1524,49 @@ function PrintPanel(props: { rows: TagRow[]; readerConnected: boolean; reading: 
                 value={cfg?.leftOffsetDots ?? 0}
                 onChange={(e) => applyCfg({ leftOffsetDots: Number(e.target.value) || 0 })}
                 disabled={!cfg}
-                className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm"
+                className="mt-1 w-full rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-3 py-2 text-sm"
               />
             </label>
           </div>
-          <p className="text-xs text-slate-500">8 dots = 1 mm. Shifts the whole layout down / right.</p>
         </div>
 
         {/* EPC + print + verify */}
         <div className="flex flex-col gap-3">
           <label className="text-sm">
-            <span className="text-slate-400">EPC to encode (hex, blank = auto)</span>
+            <span className="text-[#737373]">EPC to encode (hex, blank = auto)</span>
             <input
               value={epcInput}
               onChange={(e) => setEpcInput(e.target.value)}
               placeholder={nextEpc ? `auto: ${nextEpc}` : 'auto'}
-              className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm placeholder:text-slate-600"
+              className="mt-1 w-full rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-3 py-2 text-sm placeholder:text-[#a3a3a3]"
             />
           </label>
           <label className="text-sm w-28">
-            <span className="text-slate-400">Copies</span>
+            <span className="text-[#737373]">Copies</span>
             <input
               type="number"
               min={1}
               max={50}
               value={copies}
               onChange={(e) => setCopies(Number(e.target.value) || 1)}
-              className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm"
+              className="mt-1 w-full rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-3 py-2 text-sm"
             />
           </label>
-          <button onClick={print} disabled={busy || !cfg} className="rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 px-4 py-3 font-semibold">
+          <button onClick={print} disabled={busy || !cfg} className="rounded-lg bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_10px_rgba(0,188,212,.28)] hover:from-[#009fb4] hover:to-[#008A9C] active:scale-[.98] transition-all disabled:opacity-50 px-4 py-3 font-semibold">
             🖨 Print & Encode
           </button>
-          {error && <p className="text-sm text-rose-400 break-all">{error}</p>}
+          {error && <p className="text-sm text-[#b41c1e] break-all">{error}</p>}
 
           <div className="text-sm">
-            <span className="text-slate-400">Last printed EPC</span>
-            <div className="mt-1 font-mono text-sm break-all">
-              {lastPrint ? <span className={verified ? 'text-emerald-300' : 'text-amber-300'}>{lastPrint.epc}</span> : <span className="text-slate-600">none yet</span>}
+            <span className="text-[#737373]">Last printed EPC</span>
+            <div className="mt-1 text-sm break-all">
+              {lastPrint ? <span className={verified ? 'text-[#15803d]' : 'text-[#b45309]'}>{lastPrint.epc}</span> : <span className="text-[#a3a3a3]">none yet</span>}
             </div>
           </div>
           {lastPrint && (
             <div
-              className={`rounded-md border px-3 py-2 text-sm font-medium ${
-                verified ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+              className={`rounded-lg border px-3 py-2 text-sm font-medium ${
+                verified ? 'border-[#86d49f] bg-[#f0fdf4] text-[#15803d]' : 'border-[#fcd34d] bg-[#fffbeb] text-[#b45309]'
               }`}
             >
               {verified ? '✓ VERIFIED — EPC read back by the UR4' : 'Not verified yet — read the tag with the UR4'}
@@ -1640,21 +1575,21 @@ function PrintPanel(props: { rows: TagRow[]; readerConnected: boolean; reading: 
           <button
             onClick={readToVerify}
             disabled={!props.readerConnected || props.reading || verifying || !lastPrint}
-            className="rounded-md bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 px-4 py-2 text-sm font-medium"
+            className="rounded-lg bg-[#15803d] text-white hover:bg-[#15803d] disabled:opacity-40 px-4 py-2 text-sm font-medium"
             title={props.readerConnected ? 'Runs a 5s read burst on the UR4' : 'Connect the UR4 reader first'}
           >
             {verifying ? 'Reading… hold the label near the UR4' : 'Read 5s to verify'}
           </button>
           {lastZpl && (
-            <details className="text-xs text-slate-400">
+            <details className="text-xs text-[#737373]">
               <summary className="cursor-pointer select-none">ZPL sent</summary>
-              <pre className="mt-2 rounded-md bg-black/40 border border-white/10 p-2 overflow-x-auto">{lastZpl}</pre>
+              <pre className="mt-2 rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 p-2 overflow-x-auto">{lastZpl}</pre>
             </details>
           )}
         </div>
       </div>
 
-      <details className="mt-4 text-sm text-slate-400">
+      <details className="mt-4 text-sm text-[#737373]">
         <summary className="cursor-pointer select-none">Raw ZPL console (tuning / experiments)</summary>
         <div className="mt-2 flex flex-col gap-2">
           <textarea
@@ -1662,9 +1597,9 @@ function PrintPanel(props: { rows: TagRow[]; readerConnected: boolean; reading: 
             onChange={(e) => setRawZpl(e.target.value)}
             rows={5}
             spellCheck={false}
-            className="w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-xs"
+            className="w-full rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-3 py-2 text-xs"
           />
-          <button onClick={sendRaw} disabled={busy} className="self-start rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-4 py-2 text-sm">
+          <button onClick={sendRaw} disabled={busy} className="self-start rounded-lg bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_10px_rgba(0,188,212,.28)] hover:from-[#009fb4] hover:to-[#008A9C] active:scale-[.98] transition-all disabled:opacity-50 px-4 py-2 text-sm">
             Send raw ZPL
           </button>
         </div>
@@ -1752,7 +1687,7 @@ function PalletTagPanel() {
 
   const numField = (label: string, key: keyof PrinterConfig, step = 1) => (
     <label className="text-sm flex-1">
-      <span className="text-slate-400">{label}</span>
+      <span className="text-[#737373]">{label}</span>
       <input
         type="number"
         min={0}
@@ -1760,7 +1695,7 @@ function PalletTagPanel() {
         value={(cfg?.[key] as number) ?? 0}
         onChange={(e) => applyCfg({ [key]: Number(e.target.value) || 0 } as Partial<PrinterConfig>)}
         disabled={!cfg}
-        className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm"
+        className="mt-1 w-full rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-3 py-2 text-sm"
       />
     </label>
   );
@@ -1773,8 +1708,8 @@ function PalletTagPanel() {
           {/* HOW the printer is reached. Network needs no second machine switched
               on, which is why it is first and recommended. */}
           <div className="text-sm">
-            <span className="text-slate-400">How the pallet printer is reached</span>
-            <div className="mt-1 flex rounded-lg bg-black/40 border border-white/10 p-1">
+            <span className="text-[#737373]">How the pallet printer is reached</span>
+            <div className="mt-1 flex rounded-full bg-white border border-[#e3e8ea] p-1 shadow-[0_1px_2px_rgba(16,42,51,.05)]">
               <ModeButton active={cfg?.palletTransport === 'tcp'} onClick={() => applyCfg({ palletTransport: 'tcp' })} disabled={busy || !cfg}>
                 Network (printer IP)
               </ModeButton>
@@ -1786,10 +1721,6 @@ function PalletTagPanel() {
                 Via a PC (sidecar)
               </ModeButton>
             </div>
-            <p className="text-xs text-slate-500 mt-1">
-              Network prints straight to the label printer — nothing else has to be switched on. Use a PC only when the printer is
-              attached by USB.
-            </p>
           </div>
 
           {cfg?.palletTransport === 'tcp' ? (
@@ -1816,12 +1747,12 @@ function PalletTagPanel() {
                 onApply={(url) => applyCfg({ palletSidecarUrl: url })}
               />
               <label className="text-sm">
-                <span className="text-slate-400">Windows print queue</span>
+                <span className="text-[#737373]">Windows print queue</span>
                 <select
                   value={cfg?.palletPrinterName ?? ''}
                   onChange={(e) => applyCfg({ palletPrinterName: e.target.value })}
                   disabled={!cfg}
-                  className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 text-sm"
+                  className="mt-1 w-full rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-3 py-2 text-sm"
                 >
                   {cfg && !queues.includes(cfg.palletPrinterName) && (
                     <option value={cfg.palletPrinterName}>{cfg.palletPrinterName}</option>
@@ -1838,8 +1769,8 @@ function PalletTagPanel() {
 
           {ready.detail && (
             <div
-              className={`rounded-md border px-3 py-2 text-sm font-medium ${
-                ready.ok ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-rose-500/40 bg-rose-500/10 text-rose-300'
+              className={`rounded-lg border px-3 py-2 text-sm font-medium ${
+                ready.ok ? 'border-[#86d49f] bg-[#f0fdf4] text-[#15803d]' : 'border-[#f0a1a2] bg-[#fef2f2] text-[#b41c1e]'
               }`}
             >
               {ready.ok ? '✓ ' : '✕ '}
@@ -1848,8 +1779,8 @@ function PalletTagPanel() {
           )}
 
           <div className="text-sm">
-            <span className="text-slate-400">Printhead density</span>
-            <div className="mt-1 flex rounded-lg bg-black/40 border border-white/10 p-1">
+            <span className="text-[#737373]">Printhead density</span>
+            <div className="mt-1 flex rounded-full bg-white border border-[#e3e8ea] p-1 shadow-[0_1px_2px_rgba(16,42,51,.05)]">
               {PALLET_DPI_OPTIONS.map((d) => (
                 <ModeButton key={d} active={cfg?.palletDpi === d} onClick={() => applyCfg({ palletDpi: d })} disabled={busy || !cfg}>
                   {d} dpi
@@ -1860,7 +1791,7 @@ function PalletTagPanel() {
           <button
             onClick={() => run('Config label', () => api.palletSelfTest())}
             disabled={busy || !cfg}
-            className="rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-4 py-2 text-sm font-medium"
+            className="rounded-lg bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_10px_rgba(0,188,212,.28)] hover:from-[#009fb4] hover:to-[#008A9C] active:scale-[.98] transition-all disabled:opacity-50 px-4 py-2 text-sm font-medium"
             title="Prints the printer's own configuration label, which lists its dpi"
           >
             🧾 Print config label — read the dpi off it
@@ -1875,22 +1806,22 @@ function PalletTagPanel() {
           </div>
           {numField('Left offset (mm)', 'palletLeftOffsetMm')}
           <label className="text-sm">
-            <span className="text-slate-400">Test tag code</span>
+            <span className="text-[#737373]">Test tag code</span>
             <input
               value={testCode}
               onChange={(e) => setTestCode(e.target.value)}
-              className="mt-1 w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 font-mono text-sm"
+              className="mt-1 w-full rounded-lg bg-white border border-[#e3e8ea] outline-none transition focus:border-[#00BCD4] focus:ring-2 focus:ring-[#00BCD4]/20 px-3 py-2 text-sm"
             />
           </label>
           <button
             onClick={() => run('Test tag', () => api.palletTestTag({ palletCode: testCode.trim() || undefined }))}
             disabled={busy || !cfg}
-            className="rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 px-4 py-3 font-semibold"
+            className="rounded-lg bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_10px_rgba(0,188,212,.28)] hover:from-[#009fb4] hover:to-[#008A9C] active:scale-[.98] transition-all disabled:opacity-50 px-4 py-3 font-semibold"
           >
             🏷 Print test tag
           </button>
-          {note && <p className="text-sm text-emerald-300">{note}</p>}
-          {error && <p className="text-sm text-rose-400 break-all">{error}</p>}
+          {note && <p className="text-sm text-[#15803d]">{note}</p>}
+          {error && <p className="text-sm text-[#b41c1e] break-all">{error}</p>}
         </div>
       </div>
     </Card>
@@ -1911,9 +1842,9 @@ function Stats(props: { total: number; unique: number; rps: number }) {
 
 function Stat(props: { label: string; value: string }) {
   return (
-    <div className="rounded-xl border border-white/10 bg-[#111827] p-4 text-center">
+    <div className="rounded-2xl border border-[#eef1f2] bg-white p-5 shadow-[0_1px_2px_rgba(16,42,51,.04),0_10px_28px_-16px_rgba(0,138,156,.14)] text-center">
       <div className="text-3xl font-bold tabular-nums">{props.value}</div>
-      <div className="text-xs uppercase tracking-wider text-slate-400 mt-1">{props.label}</div>
+      <div className="text-xs uppercase tracking-wider text-[#737373] mt-1">{props.label}</div>
     </div>
   );
 }
@@ -1927,16 +1858,16 @@ function MovementsPanel(props: { entries: EntryRow[] }) {
   for (const e of entries) if (!latestByEpc.has(e.epc)) latestByEpc.set(e.epc, e);
   const insideCount = [...latestByEpc.values()].filter((e) => e.kind === 'entry').length;
   return (
-    <section className="rounded-xl border border-indigo-500/30 bg-[#111827] overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 bg-indigo-500/10">
-        <h2 className="text-sm font-medium text-indigo-200">
-          🏭 Gate Movements <span className="text-slate-500">(Mock Nexus · GPI1 first = IN, GPI2 first = OUT)</span>
+    <section className="rounded-2xl border border-[#d5eef2] bg-white overflow-hidden shadow-[0_1px_2px_rgba(16,42,51,.04),0_10px_28px_-16px_rgba(0,138,156,.14)]">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-[#e5e5e5] bg-[#e0f7fa]">
+        <h2 className="text-sm font-medium text-[#008A9C]">
+          🏭 Gate Movements <span className="text-[#8a8a8a]">(Mock Nexus · GPI1 first = IN, GPI2 first = OUT)</span>
         </h2>
-        <div className="text-sm text-indigo-300 font-semibold tabular-nums">{insideCount} inside</div>
+        <div className="text-sm text-[#008A9C] font-semibold tabular-nums">{insideCount} inside</div>
       </div>
       <div className="overflow-x-auto max-h-[40vh] overflow-y-auto">
         <table className="w-full text-sm">
-          <thead className="sticky top-0 bg-[#0d1220] text-slate-400">
+          <thead className="sticky top-0 bg-white text-[#737373]">
             <tr>
               <th className="text-left font-medium px-4 py-2 w-32">Time</th>
               <th className="text-left font-medium px-4 py-2 w-28">SKU</th>
@@ -1948,17 +1879,17 @@ function MovementsPanel(props: { entries: EntryRow[] }) {
           <tbody>
             {entries.length === 0 ? (
               <tr>
-                <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
+                <td colSpan={5} className="px-4 py-8 text-center text-[#8a8a8a]">
                   No movements yet — pass a tagged box through the IR beam.
                 </td>
               </tr>
             ) : (
               entries.map((e) => (
-                <tr key={e.id} className="border-t border-white/5 hover:bg-white/5">
-                  <td className="px-4 py-1.5 font-mono text-xs text-slate-400">{new Date(e.timestamp).toLocaleTimeString(undefined, { hour12: false })}</td>
-                  <td className={`px-4 py-1.5 font-mono text-xs ${e.known ? 'text-indigo-300' : 'text-amber-400'}`}>{e.item.sku}</td>
-                  <td className={`px-4 py-1.5 ${e.known ? '' : 'text-amber-400 italic'}`}>{e.item.name}</td>
-                  <td className="px-4 py-1.5 font-mono text-xs text-slate-500">{e.epc}</td>
+                <tr key={e.id} className="border-t border-[#f0f0f0] hover:bg-[#f0fbfd]">
+                  <td className="px-4 py-1.5 text-xs text-[#737373]">{new Date(e.timestamp).toLocaleTimeString(undefined, { hour12: false })}</td>
+                  <td className={`px-4 py-1.5 text-xs ${e.known ? 'text-[#008A9C]' : 'text-[#b45309]'}`}>{e.item.sku}</td>
+                  <td className={`px-4 py-1.5 ${e.known ? '' : 'text-[#b45309] italic'}`}>{e.item.name}</td>
+                  <td className="px-4 py-1.5 text-xs text-[#8a8a8a]">{e.epc}</td>
                   <td className="px-4 py-1.5">
                     {/* A contested passage gets its own pill rather than a green
                         IN. This list is where "the console says 8 IN" comes
@@ -1967,13 +1898,13 @@ function MovementsPanel(props: { entries: EntryRow[] }) {
                         The No-IR decisions table has carried this all along; the
                         movement list had not. */}
                     {e.unexpected ? (
-                      <span className="text-xs px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-300 border border-rose-500/30" title={e.unexpected}>
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-[#fef2f2] text-[#b41c1e] border border-[#f0a1a2]" title={e.unexpected}>
                         {e.kind === 'entry' ? 'IN' : 'OUT'} · {e.unexpected}
                       </span>
                     ) : e.kind === 'entry' ? (
-                      <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">IN</span>
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-[#f0fdf4] text-[#15803d] border border-[#a7e3bd]">IN</span>
                     ) : (
-                      <span className="text-xs px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30">OUT</span>
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-[#e0f2fe] text-[#0369a1] border border-[#7dd3fc]">OUT</span>
                     )}
                   </td>
                 </tr>
@@ -1991,12 +1922,12 @@ function MovementsPanel(props: { entries: EntryRow[] }) {
 function UdpPanel(props: { udp?: UdpState; frames: UdpFrameRow[] }) {
   const { udp, frames } = props;
   return (
-    <section className="rounded-xl border border-white/10 bg-[#111827] overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
-        <h2 className="text-sm font-medium text-slate-300">
-          UDP Frames from Reader <span className="text-slate-500">(HW trigger output, last 50)</span>
+    <section className="rounded-2xl border border-[#eef1f2] bg-white overflow-hidden shadow-[0_1px_2px_rgba(16,42,51,.04),0_10px_28px_-16px_rgba(0,138,156,.14)]">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-[#e5e5e5]">
+        <h2 className="text-sm font-medium text-[#404040]">
+          UDP Frames from Reader <span className="text-[#8a8a8a]">(HW trigger output, last 50)</span>
         </h2>
-        <div className="text-xs font-mono text-slate-400">
+        <div className="text-xs text-[#737373]">
           {udp?.listening ? (
             <>
               listening :{udp.port} · dest {udp.destIp ?? '?'} · {udp.frames} frames
@@ -2008,7 +1939,7 @@ function UdpPanel(props: { udp?: UdpState; frames: UdpFrameRow[] }) {
       </div>
       <div className="overflow-x-auto max-h-[40vh] overflow-y-auto">
         <table className="w-full text-sm">
-          <thead className="sticky top-0 bg-[#0d1220] text-slate-400">
+          <thead className="sticky top-0 bg-white text-[#737373]">
             <tr>
               <th className="text-left font-medium px-4 py-2 w-40">Time</th>
               <th className="text-left font-medium px-4 py-2 w-40">From</th>
@@ -2020,22 +1951,22 @@ function UdpPanel(props: { udp?: UdpState; frames: UdpFrameRow[] }) {
           <tbody>
             {frames.length === 0 ? (
               <tr>
-                <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
+                <td colSpan={5} className="px-4 py-8 text-center text-[#8a8a8a]">
                   No UDP datagrams yet — break the IR beam. If nothing arrives, check reader work mode and dest IP via{' '}
-                  <span className="font-mono">GET /debug/workmode</span>.
+                  <span className="font-semibold">GET /debug/workmode</span>.
                 </td>
               </tr>
             ) : (
               frames.map((f) => (
-                <tr key={f.id} className="border-t border-white/5 hover:bg-white/5">
-                  <td className="px-4 py-1.5 font-mono text-xs text-slate-400">
+                <tr key={f.id} className="border-t border-[#f0f0f0] hover:bg-[#f0fbfd]">
+                  <td className="px-4 py-1.5 text-xs text-[#737373]">
                     {new Date(f.timestamp).toLocaleTimeString(undefined, { hour12: false })}.
                     {String(new Date(f.timestamp).getMilliseconds()).padStart(3, '0')}
                   </td>
-                  <td className="px-4 py-1.5 font-mono text-xs text-slate-400">{f.from}</td>
+                  <td className="px-4 py-1.5 text-xs text-[#737373]">{f.from}</td>
                   <td className="px-4 py-1.5 text-right tabular-nums">{f.len}</td>
-                  <td className={`px-4 py-1.5 font-mono text-xs ${f.parsed ? 'text-emerald-300' : 'text-slate-600'}`}>{f.epc ?? 'unparsed'}</td>
-                  <td className="px-4 py-1.5 font-mono text-xs text-amber-200/80 break-all">{f.raw}</td>
+                  <td className={`px-4 py-1.5 text-xs ${f.parsed ? 'text-[#15803d]' : 'text-[#a3a3a3]'}`}>{f.epc ?? 'unparsed'}</td>
+                  <td className="px-4 py-1.5 text-xs text-[#b45309] break-all">{f.raw}</td>
                 </tr>
               ))
             )}
@@ -2050,18 +1981,18 @@ function UdpPanel(props: { udp?: UdpState; frames: UdpFrameRow[] }) {
 
 function TagTable(props: { rows: TagRow[]; onClear: () => void }) {
   return (
-    <section className="rounded-xl border border-white/10 bg-[#111827] overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
-        <h2 className="text-sm font-medium text-slate-300">
-          Live Reads <span className="text-slate-500">(newest first, last 100)</span>
+    <section className="rounded-2xl border border-[#eef1f2] bg-white overflow-hidden shadow-[0_1px_2px_rgba(16,42,51,.04),0_10px_28px_-16px_rgba(0,138,156,.14)]">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-[#e5e5e5]">
+        <h2 className="text-sm font-medium text-[#404040]">
+          Live Reads <span className="text-[#8a8a8a]">(newest first, last 100)</span>
         </h2>
-        <button onClick={props.onClear} className="text-sm rounded-md bg-slate-700 hover:bg-slate-600 px-3 py-1.5">
+        <button onClick={props.onClear} className="text-sm rounded-lg bg-gradient-to-b from-[#00BCD4] to-[#00a3b9] text-white shadow-[0_2px_10px_rgba(0,188,212,.28)] hover:from-[#009fb4] hover:to-[#008A9C] active:scale-[.98] transition-all px-3 py-1.5">
           Clear
         </button>
       </div>
       <div className="overflow-x-auto max-h-[50vh] overflow-y-auto">
         <table className="w-full text-sm">
-          <thead className="sticky top-0 bg-[#0d1220] text-slate-400">
+          <thead className="sticky top-0 bg-white text-[#737373]">
             <tr>
               <th className="text-left font-medium px-4 py-2 w-40">Time</th>
               <th className="text-left font-medium px-4 py-2">EPC</th>
@@ -2072,18 +2003,18 @@ function TagTable(props: { rows: TagRow[]; onClear: () => void }) {
           <tbody>
             {props.rows.length === 0 ? (
               <tr>
-                <td colSpan={4} className="px-4 py-10 text-center text-slate-500">
+                <td colSpan={4} className="px-4 py-10 text-center text-[#8a8a8a]">
                   No reads yet.
                 </td>
               </tr>
             ) : (
               props.rows.map((r) => (
-                <tr key={r.id} className="border-t border-white/5 hover:bg-white/5">
-                  <td className="px-4 py-1.5 font-mono text-xs text-slate-400">
+                <tr key={r.id} className="border-t border-[#f0f0f0] hover:bg-[#f0fbfd]">
+                  <td className="px-4 py-1.5 text-xs text-[#737373]">
                     {new Date(r.timestamp).toLocaleTimeString(undefined, { hour12: false })}.
                     {String(new Date(r.timestamp).getMilliseconds()).padStart(3, '0')}
                   </td>
-                  <td className="px-4 py-1.5 font-mono text-emerald-300">{r.epc}</td>
+                  <td className="px-4 py-1.5 text-[#15803d]">{r.epc}</td>
                   <td className="px-4 py-1.5 text-right tabular-nums">{r.antenna ?? '—'}</td>
                   <td className="px-4 py-1.5 text-right tabular-nums">{r.rssi != null ? `${r.rssi} dBm` : '—'}</td>
                 </tr>
@@ -2110,7 +2041,7 @@ function TriggerFlash(props: { lastTriggerAt: number }) {
   if (!show) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
-      <div key={props.lastTriggerAt} className="trigger-flash rounded-2xl bg-indigo-500/90 text-white px-12 py-8 text-5xl font-black tracking-tight shadow-2xl">
+      <div key={props.lastTriggerAt} className="trigger-flash rounded-2xl bg-[#00BCD4] text-white px-12 py-8 text-5xl font-black tracking-tight shadow-2xl">
         ⚡ TRIGGERED!
       </div>
     </div>
